@@ -40,7 +40,10 @@ func framedID(parts ...string) string {
 // framing makes the encoding injective and the first component remains the
 // explicit, versioned recipe domain.
 func identityName(parts ...string) []byte {
-	name := make([]byte, 0, len(identityEncoding)+len(parts)*8)
+	// Keep the initial capacity independent of caller-controlled slice length.
+	// The framed values are small in normal operation, and append can grow this
+	// buffer safely without an overflowing allocation-size calculation.
+	name := make([]byte, 0, len(identityEncoding))
 	name = append(name, identityEncoding...)
 	name = binary.AppendUvarint(name, uint64(len(parts)))
 	for _, part := range parts {
