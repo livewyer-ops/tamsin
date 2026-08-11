@@ -1,0 +1,30 @@
+# Without segmentation the input is stored exactly as it arrived and FFmpeg is
+# never invoked, so options that only reach the media through FFmpeg cannot take
+# effect. Ignoring them quietly would be worse than refusing: both feed the
+# generated Flow identity, so an argument that changed nothing about the bytes
+# would still change which Flow the ingest lands on, and an argument list also
+# leaves generation unset, implying a transcode that never happened.
+
+[!media] skip 'needs ffmpeg and ffprobe'
+
+exec ffmpeg -hide_banner -loglevel error -y -f lavfi -i testsrc=size=160x120:rate=25 -t 1 -c:v libx264 whole.ts
+
+# A whole-file ingest on its own is fine, and is the one arrangement that needs
+# no FFmpeg at all.
+exec tamsin --profile preserve --format human --log-level error --dry-run=exact -d 0 --essence-storage muxed -i whole.ts
+stdout '^PLANNED - NO CHANGES MADE  whole.ts'
+stdout '1 media object planned'
+! stdout '\t|objects='
+
+! exec tamsin --profile preserve --format human --log-level error --dry-run=exact -d 0 --essence-storage muxed --ffmpeg-arg '-c:v' --ffmpeg-arg libx264 -i whole.ts
+! stdout .
+stderr '--ffmpeg-arg cannot take effect without segmentation'
+
+! exec tamsin --profile preserve --format human --log-level error --dry-run=exact -d 0 --essence-storage muxed --segment-format mpegts -i whole.ts
+! stdout .
+stderr '--segment-format mpegts cannot take effect without segmentation'
+
+# With segmentation they are honoured, so the refusal is about this one path
+# rather than about the options.
+exec tamsin --profile preserve --format human --log-level error --dry-run=exact -d 1s --essence-storage muxed --segment-format mpegts -i whole.ts
+stdout '^PLANNED - NO CHANGES MADE  whole.ts'

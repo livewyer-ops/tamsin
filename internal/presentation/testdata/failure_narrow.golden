@@ -1,0 +1,44 @@
+INGEST FAILED - OBJECTS STRANDED: ACTION
+REQUIRED
+  input failure.ts
+  elapsed 4.4s
+
+  collection
+    11111111-1111-4111-8111-111111111111
+    state indeterminate - inspect this
+    Flow before retrying
+  video
+    22222222-2222-4222-8222-222222222222
+    3 media objects
+    stranded object
+    55555555-5555-4555-8555-555555555555
+    retracted object
+    66666666-6666-4666-8666-666666666666
+    registration-indeterminate object
+    77777777-7777-4777-8777-777777777777
+  Action: inspect or retract every
+  stranded media object before retrying.
+  Action: determine whether each
+  indeterminate media object was
+  registered before retrying.
+  Action: determine whether each
+  indeterminate Flow update committed
+  before retrying.
+  failure
+    A Flow update may have committed
+    before its response was lost.
+
+  3 media objects; one or more
+  unverified objects remain registered
+  profile streaming-ts@1
+  input SHA-256
+    ffffffffffffffffffffffffffffffffffff
+    ffffffffffffffffffffffffffff
+
+FAILED  0/1 inputs succeeded; 1 failed
+  3 MiB stored
+  1 MiB verified by readback
+  1 media object retracted
+  1 media object stranded
+  run
+    00000000-0000-4000-8000-000000000000

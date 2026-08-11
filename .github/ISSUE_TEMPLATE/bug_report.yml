@@ -1,0 +1,59 @@
+name: Bug report
+description: Report reproducible incorrect TAMSin behaviour.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Do not report security vulnerabilities here. Use private vulnerability reporting instead.
+  - type: input
+    id: version
+    attributes:
+      label: TAMSin version
+      description: Provide the release version and, for an image, its immutable digest.
+      placeholder: v0.1.0-rc.1 / sha256:...
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux amd64
+        - Linux arm64
+        - macOS amd64
+        - macOS arm64
+        - OCI / Kubernetes
+        - Source build
+    validations:
+      required: true
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: Expected and actual behaviour
+      description: Explain what you expected, what happened, and the operational impact.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Include redacted commands, configuration, and input characteristics. Do not attach customer media or credentials.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Redacted doctor report and logs
+      description: Prefer `tamsin doctor --format json`. Confirm that all secrets and customer data are removed.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety check
+      options:
+        - label: I have removed credentials, signed-URL query values, customer data, and private media.
+          required: true
+        - label: This report does not describe a security vulnerability.
+          required: true

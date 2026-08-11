@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a focused capability or usability improvement.
+title: "proposal: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the operator or integration need, independent of a preferred implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe the observable behaviour and why it belongs in TAMSin.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and trade-offs
+      description: Include existing workarounds and expected security, compatibility, performance, or resource impact.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I have checked the documentation and existing issues for this capability.
+          required: true

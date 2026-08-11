@@ -1,0 +1,45 @@
+# The two storage arrangements produce different result shapes, and the human
+# receipt has to render both. Independent storage produces several Flows from
+# one input -- one per essence, plus the Multi-Flow that records they came from
+# it -- so a formatter reading only the top-level fields would print a single
+# line for work that created three Flows.
+
+[!media] skip 'needs ffmpeg and ffprobe'
+
+# A real muxed fixture: demultiplexing cannot be faked with a stub.
+exec ffmpeg -hide_banner -loglevel error -y -f lavfi -i testsrc=size=160x120:rate=25 -f lavfi -i sine=frequency=440 -t 2 -c:v libx264 -g 25 -c:a aac muxed.ts
+
+# Independent storage: one grouped receipt contains both essences and the
+# collector. The empty root is labelled as a collection instead of leaking an
+# implementation row with objects=0.
+exec tamsin --profile editorial --format human --log-level error --dry-run=exact -i muxed.ts
+stdout '^PLANNED - NO CHANGES MADE  muxed.ts'
+stdout '^  collection [0-9a-f-]+$'
+stdout '^  video +[0-9a-f-]+ +[1-9][0-9]* media objects?$'
+stdout '^  audio +[0-9a-f-]+ +[1-9][0-9]* media objects?$'
+! stdout '\t|root=|disposition=|objects='
+
+# The same run in JSON emits each Flow as bounded events. Reducing the stream
+# proves sequence, lifecycle, terminal completeness, and exact-last semantics;
+# the payload checks retain the storage-specific shape.
+exec tamsin --profile editorial --format json --log-level error --dry-run=exact -i muxed.ts
+cp stdout elemental.ndjson
+checkevents elemental.ndjson succeeded 1 0 planned
+exec cat elemental.ndjson
+stdout '"type":"flow.result".*"kind":"collection".*"disposition":"planned","object_summary":\{"total":0'
+stdout '"type":"flow.result".*"kind":"essence","role":"video".*"object_summary":\{"total":[1-9]'
+stdout '"type":"flow.result".*"kind":"essence","role":"audio".*"object_summary":\{"total":[1-9]'
+stdout '"type":"input.finished".*"root_flow_id":'
+! stdout '"role":"multi"'
+! stdout '"flow_id":""|\r|\x1b'
+
+# Muxed storage reports the root plus the collected track Flows it created.
+exec tamsin --profile editorial --format human --log-level error --dry-run=exact --essence-storage muxed -i muxed.ts
+stdout '^  multiplex +[0-9a-f-]+ +1 media object$'
+stdout '^  video [0-9a-f-]+$'
+stdout '^  audio [0-9a-f-]+$'
+! stdout '\t|root=|objects='
+
+# An unknown mode fails before any media is staged.
+! exec tamsin --essence-storage elemental --dry-run -i muxed.ts
+stderr 'unsupported essence storage'

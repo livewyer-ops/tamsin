@@ -1,0 +1,7 @@
+title = "Tamsin Gitleaks configuration"
+
+[allowlist]
+description = "The contract inventory records the public upstream OpenAPI Git blob SHA-1."
+condition = "AND"
+paths = ['''contracts/tams-v8\.1\.json''']
+regexes = ['''^[0-9a-f]{40}$''']

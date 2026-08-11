@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/livewyer-ops/tamsin/main/contracts/tamsin/batch-result-v1.json",
+  "title": "Tamsin ingest batch result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tool_version",
+    "tool_commit",
+    "profile_version",
+    "run_id",
+    "results",
+    "succeeded",
+    "failed"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "tool_version": { "type": "string", "minLength": 1 },
+    "tool_commit": { "type": "string", "minLength": 1 },
+    "tool_build_date": { "type": "string", "minLength": 1 },
+    "profile_version": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "format": "uuid" },
+    "results": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/result" }
+    },
+    "succeeded": { "type": "integer", "minimum": 0 },
+    "failed": { "type": "integer", "minimum": 0 }
+  },
+  "$defs": {
+    "object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["object_id", "timerange", "bytes", "sha256", "status"],
+      "properties": {
+        "object_id": { "type": "string", "format": "uuid" },
+        "timerange": { "type": "string", "minLength": 1 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "status": {
+          "enum": [
+            "planned",
+            "uploaded",
+            "registration-indeterminate",
+            "registered",
+            "registration-rejected",
+            "verified",
+            "retracted",
+            "stranded",
+            "ingested",
+            "resumed"
+          ]
+        }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "action_required"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]*$", "maxLength": 128 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "action_required": { "type": "boolean" }
+      }
+    },
+    "flow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["flow_id", "source_id", "disposition"],
+      "properties": {
+        "flow_id": { "type": "string", "format": "uuid" },
+        "source_id": { "type": "string", "format": "uuid" },
+        "role": { "type": "string", "minLength": 1 },
+        "disposition": {
+          "enum": ["planned", "unchanged", "written", "indeterminate", "unattempted"]
+        },
+        "objects": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/object" }
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "profile", "profile_version", "status", "verification", "flows"],
+      "properties": {
+        "input": { "type": "string", "minLength": 1 },
+        "profile": { "type": "string", "minLength": 1 },
+        "profile_version": { "type": "string", "minLength": 1 },
+        "ffmpeg_version": { "type": "string", "minLength": 1 },
+        "media_toolchain": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "root_flow_id": { "type": "string", "format": "uuid" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "status": { "enum": ["planned", "ingested", "resumed", "failed"] },
+        "verification": {
+          "enum": ["verified", "not_requested", "not_reached", "failed_retracted", "failed_stranded"]
+        },
+        "flows": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/flow" },
+          "uniqueItems": true
+        },
+        "failure": { "$ref": "#/$defs/failure" }
+      },
+      "dependentRequired": {
+        "ffmpeg_version": ["media_toolchain"],
+        "media_toolchain": ["ffmpeg_version"]
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "failed" } }, "required": ["status"] },
+          "then": { "required": ["failure"] },
+          "else": { "not": { "required": ["failure"] } }
+        },
+        {
+          "if": { "required": ["root_flow_id"] },
+          "then": { "properties": { "flows": { "minItems": 1 } } }
+        }
+      ]
+    }
+  }
+}

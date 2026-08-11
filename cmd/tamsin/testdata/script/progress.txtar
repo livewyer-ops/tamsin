@@ -1,0 +1,56 @@
+# Human progress uses stderr; JSON mode publishes semantic progress snapshots
+# on stdout and never draws terminal progress. These dry runs do no transfers,
+# so they exercise selection without manufacturing progress events.
+
+[!unix] skip 'needs a POSIX shell for the ffprobe stub'
+
+chmod 0755 ffprobe
+
+# Default JSON mode remains a complete machine stream with no terminal bytes.
+exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error -d 0 --dry-run=exact -i input.mp4
+! stderr .
+cp stdout auto.ndjson
+checkevents auto.ndjson succeeded 1 0 planned
+
+# Explicitly disabled suppresses optional snapshots, not lifecycle or terminal
+# events.
+exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact -i input.mp4
+! stderr .
+cp stdout none.ndjson
+checkevents none.ndjson succeeded 1 0 planned
+exec cat none.ndjson
+! stdout '"type":"progress.snapshot"'
+
+# The human rendering choices remain accepted in JSON mode, but cannot inject
+# cursor movement or a second progress language into the stream.
+exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error --progress tty -d 0 --dry-run=exact -i input.mp4
+cp stdout tty.ndjson
+checkevents tty.ndjson succeeded 1 0 planned
+exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error --progress plain -d 0 --dry-run=exact -i input.mp4
+cp stdout plain.ndjson
+checkevents plain.ndjson succeeded 1 0 planned
+
+# Machine progress never includes terminal control sequences; checkevents
+# enforces this for every stream above.
+
+# An unknown mode is rejected before any work begins.
+! exec tamsin --progress fancy --dry-run -i input.mp4
+stderr 'invalid progress mode'
+
+-- input.mp4 --
+pretend media bytes
+-- ffprobe --
+#!/bin/sh
+if [ "$1" = "-version" ]; then echo "ffprobe stub"; exit 0; fi
+for arg in "$@"; do
+  if [ "$arg" = "-show_frames" ]; then
+    printf '%s\n' \
+      'stream_index=0|best_effort_timestamp=0' \
+      'stream_index=0|best_effort_timestamp=40' \
+      'stream_index=0|best_effort_timestamp=80'
+    exit 0
+  fi
+done
+cat <<'JSON'
+{"streams":[{"index":0,"codec_name":"h264","codec_type":"video","width":64,"height":64,"avg_frame_rate":"25/1","r_frame_rate":"25/1","start_time":"0.000000","duration":"1.000000"}],"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2","start_time":"0.000000","duration":"1.000000"}}
+JSON

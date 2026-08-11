@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The gate floats to the newest 1.26 patch so govulncheck picks up stdlib
+      # security fixes as they ship. Pinning to go.mod's exact version instead
+      # would fail the vuln target every time a Go CVE lands. Move this to 1.27
+      # before Go 1.28 ships, when the 1.26 line stops receiving patches.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.x'
+          cache: true
+      - name: Verify
+        run: make verify
+
+  dist:
+    needs: verify
+    runs-on: ubuntu-24.04
+    # The cold arm64 Debian/FFmpeg layer executes through QEMU. Local evidence
+    # is comfortably below this bound, but the old native-only 30m budget left
+    # too little margin for registry or hosted-runner variance.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Distribution stays on go.mod's exact toolchain: reproducible artefacts
+      # need a fixed compiler, so this one must not float.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Set up pinned Docker with the containerd image store
+        uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0
+        with:
+          version: type=archive,version=29.1.3,channel=stable
+          daemon-config: |
+            {
+              "features": {
+                "containerd-snapshotter": true
+              }
+            }
+      - name: Set up pinned QEMU for the arm64 smoke test
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          image: docker.io/tonistiigi/binfmt:qemu-v10.0.4@sha256:8f58e6214f4cc9dc83ce8f5acad1ece508eb6b20e696a8c1e9f274481982c541
+          platforms: arm64
+      - name: Set up pinned Buildx and BuildKit
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: v0.35.0
+          driver-opts: |
+            image=moby/buildkit:v0.26.2@sha256:de10faf919fc71ba4eb1dd7bd6449566d012b0c9436b1c61bfee21d621b009aa
+      - name: Build and identify the two-platform OCI layout
+        id: bundle
+        run: |
+          image_ref="ghcr.io/livewyer-ops/tamsin:ci"
+          build_epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
+          build_date="$(date --utc --date="@$build_epoch" +%Y-%m-%dT%H:%M:%SZ)"
+          make dist \
+            VERSION="0.0.0-ci" \
+            COMMIT="${GITHUB_SHA}" \
+            BUILD_DATE="$build_date" \
+            SOURCE_DATE_EPOCH="$build_epoch" \
+            IMAGE="$image_ref" \
+            IMAGE_PLATFORMS="linux/amd64,linux/arm64"
+          (cd dist && sha256sum tamsin-* > SHA256SUMS)
+          cp -a dist .tmp/release-bundle/dist
+          ./scripts/verify-oci-layout.sh record \
+            .tmp/release-bundle \
+            "$image_ref" >> "$GITHUB_OUTPUT"
+      - name: Smoke the exact amd64 and arm64 index members
+        run: |
+          ./scripts/smoke-release-image.sh \
+            .tmp/release-bundle \
+            'ghcr.io/livewyer-ops/tamsin:ci' \
+            '${{ steps.bundle.outputs.image_index_digest }}'

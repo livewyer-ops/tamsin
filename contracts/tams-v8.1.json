@@ -1,0 +1,465 @@
+{
+  "tams": {
+    "version": "8.1",
+    "repository": "https://github.com/bbc/tams",
+    "commit": "98d307b09b5ebf79278aa7d3aad53295154e2c17",
+    "openapi_path": "api/TimeAddressableMediaStore.yaml",
+    "openapi_git_blob": "3b4400e14b1b5c530d276e822726eb9eb5ae160a"
+  },
+  "tamoss": {
+    "repository": "https://github.com/livewyer-ops/tamoss",
+    "commit": "cda9611e31ff427d34afb2c06c45c78c91262ee9",
+    "tams_submodule_commit": "98d307b09b5ebf79278aa7d3aad53295154e2c17",
+    "profile": "local-kind",
+    "release": "8.1.0-oss6"
+  },
+  "authentication": [
+    {
+      "id": "basic_auth",
+      "cli": "--auth basic",
+      "implemented_by": "internal/auth.NewRoundTripper",
+      "tested_by": "internal/auth.TestHeaderAndURLAuthentication"
+    },
+    {
+      "id": "bearer_token_auth",
+      "cli": "--auth bearer",
+      "implemented_by": "internal/auth.NewRoundTripper",
+      "tested_by": "internal/auth.TestHeaderAndURLAuthentication, internal/auth.TestCredentialTransportBlocksCrossOriginHTTPSRedirect"
+    },
+    {
+      "id": "url_token_auth",
+      "cli": "--auth url-token",
+      "implemented_by": "internal/auth.NewRoundTripper",
+      "tested_by": "internal/auth.TestHeaderAndURLAuthentication"
+    },
+    {
+      "id": "oauth2_client_credentials",
+      "cli": "--auth oauth-client",
+      "implemented_by": "internal/auth.NewRoundTripper",
+      "tested_by": "internal/auth.TestOAuthClientCredentials"
+    },
+    {
+      "id": "oauth2_authorization_code",
+      "cli": "--auth oauth-code",
+      "implemented_by": "internal/auth.NewRoundTripper",
+      "tested_by": "internal/auth.TestOAuthAuthorizationCode, internal/auth.TestPreobtainedAuthorizationCodeDoesNotRequireAuthorizationEndpoint"
+    }
+  ],
+  "ingest_operations": [
+    {
+      "operation_id": "GET_service",
+      "method": "GET",
+      "path": "/service",
+      "cli": "api service",
+      "implemented_by": "internal/tams.Client.Service",
+      "tested_by": "internal/tams.TestClientIngestOperations, internal/cli.TestDoctorOnlineChecksAPIVersionWithoutMutation"
+    },
+    {
+      "operation_id": "GET_storage-backends",
+      "method": "GET",
+      "path": "/service/storage-backends",
+      "cli": "api storage-backends",
+      "implemented_by": "internal/tams.Client.StorageBackends",
+      "tested_by": "internal/tams.TestClientIngestOperations, internal/cli.TestDoctorOnlineResolvesDefaultAndRequestedStorage"
+    },
+    {
+      "operation_id": "GET_flows-flowId",
+      "method": "GET",
+      "path": "/flows/{flowId}",
+      "cli": "api flow get",
+      "implemented_by": "internal/tams.Client.Flow",
+      "tested_by": "internal/tams.TestClientIngestOperations"
+    },
+    {
+      "operation_id": "PUT_flows-flowId",
+      "method": "PUT",
+      "path": "/flows/{flowId}",
+      "cli": "api flow put",
+      "implemented_by": "internal/tams.Client.PutFlow",
+      "tested_by": "internal/tams.TestClientIngestOperations"
+    },
+    {
+      "operation_id": "GET_flows-flowId-segments",
+      "method": "GET",
+      "path": "/flows/{flowId}/segments",
+      "cli": "api segment list",
+      "implemented_by": "internal/tams.Client.ListSegments",
+      "tested_by": "internal/tams.TestSegmentsResolvesPagingAgainstThePreviousPage, internal/tams.TestSegmentsParsesAllRFCLinkFieldValues, internal/tams.TestSegmentsEnforcesAtomicCollectionLimits, internal/cli.TestCLIAPISegmentListDownloadURLsAreOptIn"
+    },
+    {
+      "operation_id": "POST_flows-flowId-segments",
+      "method": "POST",
+      "path": "/flows/{flowId}/segments",
+      "cli": "api segment register",
+      "implemented_by": "internal/tams.Client.RegisterSegment",
+      "tested_by": "internal/tams.TestClientIngestOperations"
+    },
+    {
+      "operation_id": "POST_flows-flowId-storage",
+      "method": "POST",
+      "path": "/flows/{flowId}/storage",
+      "cli": "api storage allocate",
+      "implemented_by": "internal/tams.Client.AllocateStorage",
+      "tested_by": "internal/tams.TestClientIngestOperations"
+    },
+    {
+      "operation_id": "GET_objects",
+      "method": "GET",
+      "path": "/objects/{objectId}",
+      "cli": "api object get",
+      "implemented_by": "internal/tams.Client.Object",
+      "tested_by": "internal/tams.TestClientIngestOperations"
+    },
+    {
+      "operation_id": "POST_objects-instances",
+      "method": "POST",
+      "path": "/objects/{objectId}/instances",
+      "cli": "api object instance register",
+      "implemented_by": "internal/tams.Client.RegisterObjectInstance",
+      "tested_by": "internal/tams.TestClientIngestOperations"
+    },
+    {
+      "operation_id": "DELETE_objects-instances",
+      "method": "DELETE",
+      "path": "/objects/{objectId}/instances",
+      "cli": "api object instance delete",
+      "implemented_by": "internal/tams.Client.DeleteObjectInstance",
+      "tested_by": "internal/tams.TestClientIngestOperations"
+    },
+    {
+      "operation_id": "DELETE_flows-flowId-segments",
+      "method": "DELETE",
+      "path": "/flows/{flowId}/segments",
+      "cli": "api segment delete",
+      "implemented_by": "internal/tams.Client.DeleteSegments",
+      "tested_by": "internal/tams.TestClientIngestOperations, internal/tams.TestDeleteSegmentsReconcilesCommittedRequestAfterLostResponse"
+    },
+    {
+      "operation_id": "GET_flow-delete-requests-request-id",
+      "method": "GET",
+      "path": "/flow-delete-requests/{request-id}",
+      "cli": "api segment delete",
+      "implemented_by": "internal/tams.Client.DeleteSegments",
+      "tested_by": "internal/tams.TestDeleteSegmentsMonitorsAcceptedRequest"
+    }
+  ],
+  "spec_review": {
+    "reviewed_at_commit": "98d307b09b5ebf79278aa7d3aad53295154e2c17",
+    "adrs_total": 48,
+    "adrs_read": 48,
+    "appnotes_total": 20,
+    "appnotes_read": 20,
+    "note": "Counts are the ADRs and Application Notes present at the pinned commit, excluding their index READMEs. Every document has now been read. Rules are those bearing on the ingest write path; each names its source and the test asserting it. Documents that do not constrain ingest are listed in not_applicable with the reason. Requirements that do bear on ingest but are not yet met are listed in open_findings rather than left unrecorded; those marked blocks_release stop the release workflow until they are resolved or the mark is removed deliberately."
+  },
+  "rules": [
+    {
+      "id": "tags-implementation-prefix",
+      "source": "appnote/0003",
+      "requirement": "Implementation-specific tags carry an underscore and the service name; unprefixed names are reserved for interoperable tags.",
+      "asserted_by": "contracts.TestFlowTagsUseImplementationPrefix"
+    },
+    {
+      "id": "multi-essence-collection",
+      "source": "adr/0012,appnote/0006",
+      "requirement": "A multi-essence Flow owns the Media Objects and collects one mono-essence Flow per elementary stream via flow_collection, with each container_mapping on the parent Collection Item that supplies its context.",
+      "asserted_by": "contracts.TestMultiEssenceFlowCollectsMonoEssenceFlows, ingest.TestCollectionItemsCarryExactMultiAudioTrackIndices"
+    },
+    {
+      "id": "collected-flows-omit-container",
+      "source": "appnote/0006",
+      "requirement": "Collected mono-essence Flows do not reference Media Objects directly, so they omit container; their parent Collection Items carry container_mapping.",
+      "asserted_by": "contracts.TestMultiEssenceFlowCollectsMonoEssenceFlows, ingest.TestPipelineRegistersCollectedFlowsBeforeCollector"
+    },
+    {
+      "id": "single-essence-declares-container",
+      "source": "appnote/0006",
+      "requirement": "A Flow that references Media Objects directly declares container and needs no container_mapping.",
+      "asserted_by": "contracts.TestSingleEssenceFlowIsNotCollected"
+    },
+    {
+      "id": "collection-item-id-and-role",
+      "source": "schema/collection-item",
+      "requirement": "Collection Items require both id and role, and the referenced Flow must already be registered.",
+      "asserted_by": "ingest.TestPipelineRegistersCollectedFlowsBeforeCollector"
+    },
+    {
+      "id": "complete-flow-graph-before-media",
+      "source": "appnote/0001,appnote/0006,schema/collection-item",
+      "requirement": "The complete valid empty Flow graph is written before any Object allocation, so every media-owning elemental Flow is associated with its collector before Segment commits begin.",
+      "asserted_by": "ingest.TestPipelineRegistersCollectedFlowsBeforeCollector, ingest.TestEssencePreparationFailureLeavesNoUnassociatedOwners, ingest.TestPartialFlowGraphMutationIsExplicit"
+    },
+    {
+      "id": "final-flow-metadata-preflight",
+      "source": "schema/flow,schema/flow-core",
+      "requirement": "Every final effective Flow is validated against the pinned schema and graph ownership rules before the first TAMS mutation; identity and collection relationships cannot be overridden through generic metadata.",
+      "asserted_by": "ingest.TestInvalidFinalFlowMetadataCausesZeroMutation, ingest.TestFlowMetadataRejectsIdentityAndOwnershipPathsAsUsage"
+    },
+    {
+      "id": "objects-short-and-independent",
+      "source": "appnote/0001,appnote/0005",
+      "requirement": "Media Objects are typically short, on the order of seconds, and independently decodable.",
+      "asserted_by": "cli.TestCLIDefaultSegmentDurationIsTenSeconds"
+    },
+    {
+      "id": "complete-segment-pagination",
+      "source": "adr/0010,openapi/GET_flows-flowId-segments",
+      "requirement": "A Segment listing parses every RFC 8288 Link field-value and follows one unambiguous rel=next URL reference resolved against the page that supplied it; authenticated cursors remain confined to the configured API origin and base path without recursively encoded traversal/separator ambiguity, cursor cycles are rejected, and atomic collection is bounded by pages, Segment count, and successful response bytes.",
+      "asserted_by": "tams.TestSegmentsFollowsPaging, tams.TestSegmentsResolvesPagingAgainstThePreviousPage, tams.TestSegmentsParsesAllRFCLinkFieldValues, tams.TestSegmentsRejectsMalformedOrAmbiguousNextLinks, tams.TestSegmentsRejectsOffOriginPaging, tams.TestSegmentsRejectsPagingOutsideAPIBasePath, tams.TestSegmentsRejectsRecursivelyEncodedPagingTraversal, tams.TestSegmentsRejectsMalformedPagingCursor, tams.TestSegmentsRejectsPagingCursorCycle, tams.TestSegmentsEnforcesAtomicCollectionLimits"
+    },
+    {
+      "id": "lean-segment-listing",
+      "source": "adr/0023,openapi/GET_flows-flowId-segments",
+      "requirement": "Segment listings that need only identity omit get_urls, while callers that immediately read media explicitly request fresh presigned URLs; the low-level command is lean by default, strips unexpected get_urls from every page, and makes URL disclosure an explicit opt-in.",
+      "asserted_by": "cli.TestCLIAPISegmentListDownloadURLsAreOptIn, ingest.TestListingsOnlyRequestDownloadURLsWhenRead"
+    },
+    {
+      "id": "generation-records-transcode",
+      "source": "schema/flow-core",
+      "requirement": "generation is 0 where content came straight from its source and is incremented per lossy transcode.",
+      "asserted_by": "ingest.TestPipelineRecordsGeneration"
+    },
+    {
+      "id": "verify-then-retract",
+      "source": "adr/0016,openapi/DELETE_flows-flowId-segments",
+      "requirement": "Clients verify uploaded Segment integrity; a Flow must not retain a Segment referencing bytes that failed verification. Retraction selects the exact Object and timerange and waits for observable absence because 202, 204, a lost response, or a retry ending in 404 can all follow a committed deferred removal.",
+      "asserted_by": "ingest.TestPipelineRetractsSegmentWhenVerificationFails,tams.TestDeleteSegmentsWaitsForTerminalAbsence,tams.TestDeleteSegmentsReconcilesCommittedRequestAfterLostResponse,tams.TestDeleteSegmentsJoinsAmbiguousFailureWithFailedConfirmation"
+    },
+    {
+      "id": "vfr-excludes-frame-rate",
+      "source": "adr/0041,schema/flow-video",
+      "requirement": "frame_rate MUST be set if vfr is false or omitted, and MUST NOT be set if vfr is true; the distinction is established from presentation timestamps rather than summary-rate heuristics.",
+      "asserted_by": "contracts.TestVariableFrameRateExcludesFrameRate, media.TestProbePresentationDistinguishesVariableCadence"
+    },
+    {
+      "id": "segments-must-not-overlap",
+      "source": "adr/0009",
+      "requirement": "Segment overlap was rejected; Segment timeranges form a non-overlapping sequence.",
+      "asserted_by": "contracts.TestSegmentTimerangesDoNotOverlap"
+    },
+    {
+      "id": "uncontrolled-instance-label",
+      "source": "adr/0042",
+      "requirement": "label is mandatory when registering an uncontrolled Object Instance, and meaningless for a controlled one.",
+      "asserted_by": "cli.TestCLIObjectInstanceLabelRules"
+    },
+    {
+      "id": "object-timerange-not-deprecated-fields",
+      "source": "adr/0036",
+      "requirement": "Partial Segment usage is expressed with object_timerange; sample_offset and sample_count are deprecated.",
+      "asserted_by": "contracts.TestSegmentRequestMatchesPinnedSchema"
+    },
+    {
+      "id": "client-selected-object-identities",
+      "source": "adr/0034,schema/flow-storage-post",
+      "requirement": "A client may supply object_ids when allocating storage; Tamsin supplies its deterministic Object identifiers rather than asking the service to mint unrelated IDs.",
+      "asserted_by": "contracts.TestStorageRequestMatchesPinnedSchema, ingest.TestPipelineIngestsVerifiesAndResumes"
+    },
+    {
+      "id": "no-post-pin-properties",
+      "source": "schema/flow-segment-post",
+      "requirement": "Properties absent from the pinned schemas, such as init_object_id and init_segments, are not sent.",
+      "asserted_by": "contracts.TestSegmentRequestOmitsPostPinnedFields"
+    },
+    {
+      "id": "independent-essences-own-objects",
+      "source": "appnote/0001,appnote/0006",
+      "requirement": "Independently stored essence Flows own their Media Objects, so each declares a container and carries no container_mapping.",
+      "asserted_by": "contracts.TestIndependentEssenceFlowsOwnTheirObjects"
+    },
+    {
+      "id": "segment-bit-rates-not-essence",
+      "source": "appnote/0013,adr/0022",
+      "requirement": "avg_bit_rate and max_bit_rate are Segment bit rates, not essence bit rates, and are computed over the Segments actually written; max_bit_rate is the peak over a contiguous run lasting 0.5 to 1.5 times the target Segment duration, extended to include a single longer Segment.",
+      "asserted_by": "media.TestSegmentBitRatesFollowTheAppNote, ingest.TestFlowCarriesSegmentBitRates"
+    },
+    {
+      "id": "compatibility-from-api-version",
+      "source": "adr/0020,schema/service",
+      "requirement": "A client determines compatibility from api_version in the schema's exact non-negative MAJOR.MINOR form, not service_version, which the specification marks informative only; a differing major version is incompatible.",
+      "asserted_by": "tams.TestParseAPIVersionRequiresExactSchemaForm, ingest.TestIngestChecksTheStoreAPIVersion, cli.TestDoctorOnlineChecksAPIVersionWithoutMutation"
+    },
+    {
+      "id": "segments-carry-timerange-only",
+      "source": "adr/0007",
+      "requirement": "Flow Segments express their position with timerange alone; the duplicate representation was removed from the API.",
+      "asserted_by": "contracts.TestSegmentRequestMatchesPinnedSchema"
+    },
+    {
+      "id": "essence-parameters-in-sub-property",
+      "source": "adr/0008",
+      "requirement": "Type-specific Flow parameters live in the essence_parameters sub-property rather than at the top level of the Flow.",
+      "asserted_by": "contracts.TestGeneratedFlowsMatchPinnedSchema"
+    },
+    {
+      "id": "independent-essences-are-collected",
+      "source": "appnote/0001",
+      "requirement": "A demultiplexed ingest registers a Multi-Flow whose flow_collection records the essences it produced. The collector owns no Media Objects and declares no container, and is registered after the essences it references.",
+      "asserted_by": "ingest.TestPipelineStoresEssencesIndependently"
+    },
+    {
+      "id": "essence-position-and-offset",
+      "source": "appnote/0001,appnote/0006",
+      "requirement": "An essence is identified by its index within the container, not its position among the essences, and keeps its start relative to the container so the set shares one time index.",
+      "asserted_by": "media.TestCollectedEssencesCarryContainerPositionAndOffset, media.TestContainerMappingCountsContainerTracks"
+    },
+    {
+      "id": "partial-registration-reaches-terminal-state",
+      "source": "adr/0029,adr/0016",
+      "requirement": "Every Segment known or reasonably suspected to have registered ends verified or retracted, including partial bulk success, an ambiguous response, and a failed or incomplete registration readback.",
+      "asserted_by": "ingest.TestPartialBulkRegistrationLeavesNothingUnchecked, ingest.TestRegistrationResponseLossAndReadbackFailureRetractsEveryObject, ingest.TestSuccessfulRegistrationWithFreshListingFailureRollsBack, ingest.TestIncompleteFreshListingVerifiesVisibleAndRetractsEveryMissingObject"
+    },
+    {
+      "id": "objects-registered-within-advertised-lifetime",
+      "source": "schema/service,adr/0044",
+      "requirement": "A Media Object is registered against a Flow Segment within a syntactically valid min_object_timeout at or above the specification minimum; invalid guarantees fail before mutation rather than becoming an unlimited batch.",
+      "asserted_by": "tams.TestParseServiceLimits, ingest.TestObjectsAreCommittedWithinTheAdvertisedLifetime, ingest.TestInvalidServiceLifetimesFailBeforeMutation"
+    },
+    {
+      "id": "presigned-urls-used-while-valid",
+      "source": "schema/service,adr/0044",
+      "requirement": "Presigned URLs are used within a valid min_presigned_url_timeout that meets the specification minimum and does not exceed min_object_timeout: PUT URLs are allocated only after bounded upload workers hold transfer capacity, GET URLs are refreshed only after verification workers hold it, and retries do not begin after that start window. When the conditional field is absent, scheduling uses the pinned 30-second minimum rather than an unlimited value.",
+      "asserted_by": "tams.TestParseServiceLimits, ingest.TestQueuedUploadsRequestURLsOnlyAfterWorkerIsReady, ingest.TestQueuedVerificationRefreshesURLsOnlyAfterWorkerIsReady, ingest.TestResumedObjectsAreVerifiedBeforeUploadsBegin, ingest.TestOutlastsURL, tams.TestPresignedTransfersDoNotRetryAfterTheirStartDeadline, tams.TestPresignedTransfersStillRetryWithinTheirStartDeadline, tams.TestPresignedTransferMayFinishAfterItsStartDeadline"
+    },
+    {
+      "id": "colour-system-from-primaries",
+      "source": "schema/flow-video",
+      "requirement": "colorspace names the colour system the essence was authored in, taken from the primaries rather than the matrix coefficients, and BT2100 is reported where BT.2020 primaries carry an HLG or PQ transfer.",
+      "asserted_by": "media.TestVideoColorspaceComesFromPrimaries, media.TestProbeReadsColourAndAspectFromRealMedia"
+    },
+    {
+      "id": "aspect-ratio-preserved",
+      "source": "schema/flow-video",
+      "requirement": "A picture whose pixels are not square carries pixel_aspect_ratio and aspect_ratio, so frame dimensions alone do not describe the wrong shape.",
+      "asserted_by": "media.TestAnamorphicVideoKeepsItsShape, media.TestAspectRatioIsNotInvented"
+    },
+    {
+      "id": "container-names-the-real-format",
+      "source": "appnote/0006,schema/flow-core",
+      "requirement": "container names the format a reader will actually find: members of the ISO base media family are separated by their major brand, and Matroska and WebM follow the essence they carry.",
+      "asserted_by": "media.TestContainerMIMEDistinguishesTheISOFamily, media.TestContainerMIMEFollowsWhatTheContainerHolds, media.TestProbeReadsTheContainerBrand"
+    },
+    {
+      "id": "codec-uses-supported-media-type",
+      "source": "schema/flow-core,schema/flow-video,schema/flow-audio,schema/flow-data,schema/flow-image",
+      "requirement": "Elemental Flows require codec; Tamsin emits a finite supported media-type mapping and never fabricates an unregistered x- subtype from an unknown FFprobe codec name.",
+      "asserted_by": "media.TestUnsupportedCodecIsNotInvented, ingest.TestUnsupportedCodecIsHonestAndActionable"
+    },
+    {
+      "id": "still-image-uses-image-flow",
+      "source": "adr/0031,schema/flow-image",
+      "requirement": "A single still image is represented by the distinct image Flow format with positive frame dimensions, rather than being mislabelled as timed video.",
+      "asserted_by": "media.TestBuildStillImageFlow, contracts.TestGeneratedFlowsMatchPinnedSchema"
+    }
+  ],
+  "not_applicable": [
+    {
+      "source": "adr/0033",
+      "reason": "Segment created metadata was rejected; no fields to populate."
+    },
+    {
+      "source": "adr/0011",
+      "reason": "Superseded for this use by adr/0034, which allows a client to supply object_ids; tamsin's deterministic IDs use that path."
+    },
+    {
+      "source": "adr/0029",
+      "reason": "The segments endpoint accepts single or bulk registration; single is permitted."
+    },
+    {
+      "source": "adr/0039",
+      "reason": "Pre-actions and put_cors_url were removed; tamsin never used them."
+    },
+    {
+      "source": "adr/0014,adr/0026,adr/0037",
+      "reason": "Webhooks and event streams are read-side; ingest does not use them."
+    },
+    {
+      "source": "adr/0004,adr/0024,adr/0025",
+      "reason": "Deletion, source-level edit and property updates are outside the ingest write path."
+    },
+    {
+      "source": "adr/0000,adr/0046",
+      "reason": "Process and governance decisions; they place no requirement on a client."
+    },
+    {
+      "source": "adr/0001,adr/0003,adr/0019",
+      "reason": "Created and updated attribution and timestamps are managed by the service, which ignores date-time values in client requests; tamsin sends none."
+    },
+    {
+      "source": "adr/0002,adr/0018",
+      "reason": "Sources are created and modified through their Flows rather than directly; tamsin sets source_id on the Flow and leaves the Source to the service."
+    },
+    {
+      "source": "adr/0004a",
+      "reason": "Flow and Source ancestry is not recorded by tamsin; provenance is carried in _tamsin_ tags and generation instead."
+    },
+    {
+      "source": "adr/0005,adr/0006",
+      "reason": "Flow read-only permissions and flow status are service state; a rejected write surfaces as an error from the store."
+    },
+    {
+      "source": "adr/0013",
+      "reason": "The shared timeline is realised by the timerange rules already recorded."
+    },
+    {
+      "source": "adr/0015",
+      "reason": "get_url expectations govern reading media, not writing it."
+    },
+    {
+      "source": "adr/0017",
+      "reason": "Container mapping requirements are recorded as the appnote/0006 rules above."
+    },
+    {
+      "source": "adr/0021,appnote/0009",
+      "reason": "Deprecated by adr/0032, which supersedes the storage label format."
+    },
+    {
+      "source": "adr/0027,adr/0038",
+      "reason": "The objects and object instance endpoints are covered as ingest operations; they add no rule about what tamsin writes."
+    },
+    {
+      "source": "adr/0028,adr/0035,appnote/0016",
+      "reason": "Authentication and authorisation are covered by the authentication section above."
+    },
+    {
+      "source": "adr/0030",
+      "reason": "External media objects are covered by the adr/0042 uncontrolled instance label rule."
+    },
+    {
+      "source": "adr/0032",
+      "reason": "Storage backend selection is exercised through --storage-id and recorded as an ingest operation."
+    },
+    {
+      "source": "adr/0040",
+      "reason": "Tag values may be lists; tamsin writes strings, which remains valid."
+    },
+    {
+      "source": "adr/0043,appnote/0019",
+      "reason": "Retention and automatic deletion are lifecycle concerns outside the ingest write path."
+    },
+    {
+      "source": "adr/0048,appnote/0021",
+      "reason": "The integrity model is realised by the adr/0016 verify-then-retract rule."
+    },
+    {
+      "source": "appnote/0002,appnote/0008,appnote/0012",
+      "reason": "Timing, timestamps and Segment timeranges are realised by the timerange and ts_offset behaviour the rules above assert."
+    },
+    {
+      "source": "appnote/0004,appnote/0011,appnote/0014,appnote/0015",
+      "reason": "Non-media data, C2PA, external referencing and OpenTimelineIO describe uses built on top of TAMS, not what an ingest writes."
+    },
+    {
+      "source": "appnote/0007",
+      "reason": "Guidance on populating Source metadata; tamsin sets label and tags on the Flow and does not write Sources directly."
+    },
+    {
+      "source": "appnote/0010,appnote/0017",
+      "reason": "Guidance on when to reuse identities; tamsin derives Flow, Source and Object IDs deterministically from the input and its segmentation profile, so a repeated ingest reuses them and a changed one does not."
+    },
+    {
+      "source": "appnote/0018",
+      "reason": "Managing multiple Object instances is a storage operation covered by the object instance endpoints."
+    }
+  ],
+  "open_findings": []
+}

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/livewyer-ops/tamsin/main/contracts/tamsin/ingest-journal-v1.json",
+  "title": "Tamsin ingest result journal record v1",
+  "type": "object",
+  "required": ["schema_version", "tool_version", "tool_commit", "profile_version", "run_id", "record_type"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "tool_version": { "type": "string", "minLength": 1 },
+    "tool_commit": { "type": "string", "minLength": 1 },
+    "tool_build_date": { "type": "string", "minLength": 1 },
+    "profile_version": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "format": "uuid" },
+    "record_type": { "enum": ["start", "result", "summary"] },
+    "total": { "type": "integer", "minimum": 0 },
+    "inputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["index", "input"],
+        "properties": {
+          "index": { "type": "integer", "minimum": 0 },
+          "input": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "index": { "type": "integer", "minimum": 0 },
+    "result": {
+      "$ref": "batch-result-v1.json#/$defs/result",
+      "description": "One strict terminal result. A failed result carries the required safe structured failure defined by the batch-result contract; raw errors are not journal fields."
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "succeeded", "failed", "outcome"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "succeeded": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "outcome": { "enum": ["completed", "interrupted", "failed"] }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "properties": { "record_type": { "const": "start" } },
+      "required": ["total", "inputs"],
+      "not": { "anyOf": [{ "required": ["index"] }, { "required": ["result"] }, { "required": ["summary"] }] }
+    },
+    {
+      "properties": { "record_type": { "const": "result" } },
+      "required": ["index", "result"],
+      "not": { "anyOf": [{ "required": ["total"] }, { "required": ["inputs"] }, { "required": ["summary"] }] }
+    },
+    {
+      "properties": { "record_type": { "const": "summary" } },
+      "required": ["summary"],
+      "not": { "anyOf": [{ "required": ["total"] }, { "required": ["inputs"] }, { "required": ["index"] }, { "required": ["result"] }] }
+    }
+  ],
+  "unevaluatedProperties": false
+}

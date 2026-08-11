@@ -1,0 +1,80 @@
+# Results go to stdout and diagnostics to stderr, so a wrapper can parse one
+# while preserving the other. A regression here silently breaks every caller
+# that pipes stdout into a JSON parser.
+
+[!unix] skip 'needs a POSIX shell for the ffprobe stub'
+
+chmod 0755 ffprobe
+
+# Diagnostics are on by default and must not contaminate the event stream.
+exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format json -d 0 --dry-run=exact -i input.mp4
+stderr 'preparing input'
+cp stdout events.ndjson
+checkevents events.ndjson succeeded 1 0 planned
+exec cat events.ndjson
+stdout '^\{"protocol":"tamsin.ingest.events","protocol_version":"2.0","type":"hello","seq":0,'
+stdout '"type":"object.result".*"disposition":"planned".*"verification_status":"not_reached"'
+stdout '"type":"input.finished".*"status":"planned"'
+stdout '"type":"run.finished".*"outcome":"succeeded".*"exit_code":0'
+! stdout 'preparing input|\r|\x1b'
+
+# Human format is a grouped permanent receipt, never a tab-separated record.
+exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format human --log-level error -d 0 --dry-run=exact -i input.mp4
+stdout '^PLANNED - NO CHANGES MADE  input.mp4'
+stdout '^  video +[0-9a-f-]+ +1 media object$'
+stdout '^COMPLETE +1/1 inputs succeeded$'
+! stdout '\t|root=|disposition=|objects=|\r|\x1b'
+! stderr .
+
+# Quietening logs must not remove machine results.
+exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error -d 0 --dry-run=exact -i input.mp4
+! stderr .
+cp stdout quiet-logs.ndjson
+checkevents quiet-logs.ndjson succeeded 1 0 planned
+
+# Quiet human mode suppresses a clean dry-run receipt, while verbose mode
+# expands the same result with provenance and terminal Object details.
+exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format human --quiet --log-level error -d 0 --dry-run=exact -i input.mp4
+! stdout .
+! stderr .
+
+exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format human --verbose --color never --log-level error -d 0 --dry-run=exact -i input.mp4
+stdout '^    disposition planned$'
+stdout '^    planned object [0-9a-f-]+$'
+stdout '^  result schema 2.0$'
+! stdout '\x1b'
+
+# Explicit colour is honoured even when stdout is redirected; auto/never are
+# the modes wrappers should use for plain durable receipts.
+exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format human --color always --log-level error -d 0 --dry-run=exact -i input.mp4
+stdout '\x1b\[1;32mPLANNED - NO CHANGES MADE\x1b\[0m'
+
+# Startup failures in JSON mode remain a complete, reducer-valid process
+# stream and do not append a human error footer.
+! exec tamsin --format json --log-level error --progress fancy --dry-run -i input.mp4
+! stderr .
+cp stdout invalid.ndjson
+checkevents invalid.ndjson failed 0 2
+exec cat invalid.ndjson
+stdout '"type":"diagnostic".*"code":"config.invalid"'
+stdout '"type":"run.finished".*"outcome":"failed".*"exit_code":2'
+! stdout '^tamsin:'
+
+-- input.mp4 --
+pretend media bytes
+-- ffprobe --
+#!/bin/sh
+# Minimal ffprobe stub: one h264 video stream in an mp4 container.
+if [ "$1" = "-version" ]; then echo "ffprobe version stub"; exit 0; fi
+for arg in "$@"; do
+  if [ "$arg" = "-show_frames" ]; then
+    printf '%s\n' \
+      'stream_index=0|best_effort_timestamp=0' \
+      'stream_index=0|best_effort_timestamp=40' \
+      'stream_index=0|best_effort_timestamp=80'
+    exit 0
+  fi
+done
+cat <<'JSON'
+{"streams":[{"index":0,"codec_name":"h264","codec_type":"video","width":64,"height":64,"avg_frame_rate":"25/1","r_frame_rate":"25/1","start_time":"0.000000","duration":"1.000000"}],"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2","start_time":"0.000000","duration":"1.000000"}}
+JSON

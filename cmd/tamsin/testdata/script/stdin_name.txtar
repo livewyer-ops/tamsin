@@ -1,0 +1,73 @@
+# Naming piped media is an explicit stdin selection. This keeps the common
+# ffmpeg ... - | tamsin ingest --stdin-name ingest.ts form concise while a bare
+# ingest remains an immediate usage error.
+
+[!unix] skip 'needs a POSIX shell for the ffprobe stub'
+
+chmod 0755 ffprobe
+stdin payload.ts
+exec tamsin ingest --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact --stdin-name ingest.ts
+! stderr .
+cp stdout events.ndjson
+checkevents events.ndjson succeeded 1 0 planned
+exec cat events.ndjson
+stdout '"type":"input.declared".*"input":"stdin:"'
+stdout '"type":"input.finished".*"input":"stdin:"'
+
+# Once stdin is implied, the traditional single positional argument is the
+# endpoint rather than being misclassified as a media input.
+stdin payload.ts
+exec tamsin ingest --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact --stdin-name ingest.ts https://tams.example.test/v8.1
+cp stdout endpoint-events.ndjson
+checkevents endpoint-events.ndjson succeeded 1 0 planned
+exec cat endpoint-events.ndjson
+stdout '"type":"input.declared".*"input":"stdin:"'
+
+# An effective input remains authoritative: naming stdin must neither append a
+# second selector nor consume the pipe when -i already names media.
+exec tamsin ingest --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact --stdin-name ignored.ts -i input.ts
+cp stdout file-events.ndjson
+checkevents file-events.ndjson succeeded 1 0 planned
+exec cat file-events.ndjson
+! stdout '"input":"stdin:"'
+
+# The former explicit spelling remains one stdin input, not an inferred plus
+# explicit duplicate.
+stdin payload.ts
+exec tamsin ingest --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact --stdin-name ingest.ts -i -
+cp stdout explicit-events.ndjson
+checkevents explicit-events.ndjson succeeded 1 0 planned
+
+# Flag-parse failures still use the complete machine bootstrap protocol.
+! exec tamsin ingest --format json --log-level error --stdin-name
+! stderr .
+cp stdout invalid-events.ndjson
+checkevents invalid-events.ndjson failed 0 2
+
+# The default/configured filename remains only a hint. It must not make an
+# accidental no-input invocation wait for terminal stdin.
+! exec tamsin --config config.yaml --profile editorial --dry-run
+stderr 'at least one input is required'
+
+-- payload.ts --
+pretend transport stream bytes
+-- input.ts --
+pretend file transport stream bytes
+-- config.yaml --
+source:
+  stdin_name: configured.ts
+-- ffprobe --
+#!/bin/sh
+if [ "$1" = "-version" ]; then echo "ffprobe version stub"; exit 0; fi
+for arg in "$@"; do
+  if [ "$arg" = "-show_frames" ]; then
+    printf '%s\n' \
+      'stream_index=0|best_effort_timestamp=0' \
+      'stream_index=0|best_effort_timestamp=40' \
+      'stream_index=0|best_effort_timestamp=80'
+    exit 0
+  fi
+done
+cat <<'JSON'
+{"streams":[{"index":0,"codec_name":"h264","codec_type":"video","width":64,"height":64,"avg_frame_rate":"25/1","r_frame_rate":"25/1","start_time":"0.000000","duration":"1.000000"}],"format":{"format_name":"mpegts","start_time":"0.000000","duration":"1.000000"}}
+JSON

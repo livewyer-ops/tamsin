@@ -1,0 +1,17 @@
+# The builder only needs production Go sources and embedded schemas. An
+# allowlist prevents an untracked credential, media file, or local result from
+# being uploaded to a remote BuildKit daemon or retained in its cache.
+**
+!go.mod
+!go.sum
+!cmd/
+!cmd/**/*.go
+!contracts/
+!contracts/**/*.go
+!contracts/schemas/
+!contracts/schemas/*.json
+!ingestevent/
+!ingestevent/**/*.go
+!internal/
+!internal/**/*.go
+**/*_test.go

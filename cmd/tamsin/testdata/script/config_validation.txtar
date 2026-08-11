@@ -1,0 +1,80 @@
+# Configuration is a strict operator contract: misspellings and weakly coerced
+# values must fail before an ingest or API operation begins.
+
+exec tamsin --config valid.yaml config validate
+stdout '"status":"valid"'
+stdout '"config_file":"valid.yaml"'
+
+! exec tamsin --config typo.yaml config validate
+stderr 'unknown configuration key \\"ingest.concurreny\\"'
+stderr 'did you mean \\"ingest.concurrency\\"'
+
+! exec tamsin --config wrong-type.yaml config validate
+stderr 'configuration key \\"ingest.verify\\"'
+stderr 'must be a string'
+
+! exec tamsin --config unitless-duration.yaml config validate
+stderr 'must use units'
+
+env TAMSIN_HTTP_RETRIES=many
+! exec tamsin config validate
+stderr 'TAMSIN_HTTP_RETRIES must be an integer'
+env TAMSIN_HTTP_RETRIES=
+
+# Show reports every precedence layer, but never its credential material.
+env TAMSIN_AUTH_PASSWORD=environment-password
+exec tamsin --config secret.yaml --format json --log-level warn config show --effective
+stdout '"auth.password":\{"value":"<redacted>","source":"env","source_detail":"TAMSIN_AUTH_PASSWORD"\}'
+stdout '"auth.token":\{"value":"<redacted>","source":"file","source_detail":"secret.yaml"\}'
+stdout '"format":\{"value":"json","source":"flag","source_detail":"--format"\}'
+stdout '"ingest.concurrency":\{"value":4,"source":"file","source_detail":"secret.yaml"\}'
+stdout '"progress":\{"value":"auto","source":"default"\}'
+! stdout 'environment-password|file-password|file-token|file-header-token|file-signature|file-access-token'
+env TAMSIN_AUTH_PASSWORD=
+
+! exec tamsin config show
+stderr 'config show requires --effective'
+
+# Unknown names are rejected even when empty, because a misspelled deployment
+# key can become non-empty on the next Secret/ConfigMap rollout.
+env TAMSIN_HTTP_RETRISE=
+! exec tamsin config validate
+stderr 'unsupported environment variable \\"TAMSIN_HTTP_RETRISE\\"'
+stderr 'did you mean \\"TAMSIN_HTTP_RETRIES\\"'
+
+-- valid.yaml --
+format: json
+http:
+  timeout: 30s
+  transfer_timeout: 0
+ingest:
+  profile: editorial
+  verify: auto
+  concurrency: 4
+input:
+  - fixture.mp4
+
+-- typo.yaml --
+ingest:
+  concurreny: 4
+
+-- wrong-type.yaml --
+ingest:
+  verify: true
+
+-- unitless-duration.yaml --
+http:
+  timeout: 30
+
+-- secret.yaml --
+endpoint: https://tams.example.test/v8.1?access_token=file-access-token
+auth:
+  password: file-password
+  token: file-token
+ingest:
+  concurrency: 4
+source:
+  http_headers:
+    - 'Authorization: file-header-token'
+input:
+  - https://media.example.test/asset.mp4?signature=file-signature

@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/livewyer-ops/tamsin/main/contracts/tamsin/batch-result-v2.json",
+  "title": "Tamsin ingest batch result v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tool_version", "tool_commit", "profile_version", "run_id", "results", "succeeded", "failed"],
+  "properties": {
+    "schema_version": { "const": "2.0" },
+    "tool_version": { "type": "string", "minLength": 1 },
+    "tool_commit": { "type": "string", "minLength": 1 },
+    "tool_build_date": { "type": "string", "minLength": 1 },
+    "profile_version": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "format": "uuid" },
+    "results": { "type": "array", "items": { "$ref": "#/$defs/result" } },
+    "succeeded": { "type": "integer", "minimum": 0 },
+    "failed": { "type": "integer", "minimum": 0 }
+  },
+  "$defs": {
+    "object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["object_id", "timerange", "bytes", "sha256", "disposition", "verification_status", "verification_method"],
+      "properties": {
+        "object_id": { "type": "string", "format": "uuid" },
+        "timerange": { "type": "string", "minLength": 1 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "disposition": { "enum": ["planned", "uploaded", "registration_indeterminate", "registered", "rejected", "ingested", "resumed", "retracted", "stranded", "unattempted"] },
+        "verification_status": { "enum": ["verified", "not_requested", "not_reached", "failed"] },
+        "verification_method": { "enum": ["none", "storage", "readback"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "verification_status": { "const": "verified" } }, "required": ["verification_status"] },
+          "then": { "properties": { "verification_method": { "enum": ["storage", "readback"] } } }
+        },
+        {
+          "if": { "properties": { "verification_status": { "enum": ["not_requested", "not_reached"] } }, "required": ["verification_status"] },
+          "then": { "properties": { "verification_method": { "const": "none" } } }
+        },
+        {
+          "if": { "properties": { "verification_status": { "const": "failed" } }, "required": ["verification_status"] },
+          "then": { "properties": { "verification_method": { "const": "readback" } } }
+        }
+      ]
+    },
+    "object_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "bytes", "ingested", "resumed", "rejected", "retracted", "stranded", "unattempted", "verified", "storage_verified", "readback_verified"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "ingested": { "type": "integer", "minimum": 0 },
+        "resumed": { "type": "integer", "minimum": 0 },
+        "rejected": { "type": "integer", "minimum": 0 },
+        "retracted": { "type": "integer", "minimum": 0 },
+        "stranded": { "type": "integer", "minimum": 0 },
+        "unattempted": { "type": "integer", "minimum": 0 },
+        "verified": { "type": "integer", "minimum": 0 },
+        "storage_verified": { "type": "integer", "minimum": 0 },
+        "readback_verified": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "action_required"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]*$", "maxLength": 128 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "action_required": { "type": "boolean" }
+      }
+    },
+    "flow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["flow_id", "source_id", "kind", "disposition", "object_summary"],
+      "properties": {
+        "flow_id": { "type": "string", "format": "uuid" },
+        "source_id": { "type": "string", "format": "uuid" },
+        "kind": { "enum": ["essence", "collection", "muxed"] },
+        "role": { "type": "string", "minLength": 1 },
+        "disposition": { "enum": ["planned", "unchanged", "written", "indeterminate", "unattempted"] },
+        "object_summary": { "$ref": "#/$defs/object_summary" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "essence" } }, "required": ["kind"] },
+          "then": { "required": ["role"] },
+          "else": { "not": { "required": ["role"] } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "collection" } }, "required": ["kind"] },
+          "then": { "properties": { "object_summary": { "properties": { "total": { "const": 0 } } } } }
+        }
+      ]
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "profile", "profile_version", "status", "verification", "flows"],
+      "properties": {
+        "input": { "type": "string", "minLength": 1 },
+        "profile": { "type": "string", "minLength": 1 },
+        "profile_version": { "type": "string", "minLength": 1 },
+        "ffmpeg_version": { "type": "string", "minLength": 1 },
+        "media_toolchain": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "root_flow_id": { "type": "string", "format": "uuid" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "status": { "enum": ["planned", "ingested", "resumed", "failed"] },
+        "verification": { "enum": ["verified", "not_requested", "not_reached", "failed_retracted", "failed_stranded"] },
+        "flows": { "type": "array", "items": { "$ref": "#/$defs/flow" }, "uniqueItems": true },
+        "failure": { "$ref": "#/$defs/failure" }
+      },
+      "dependentRequired": {
+        "ffmpeg_version": ["media_toolchain"],
+        "media_toolchain": ["ffmpeg_version"]
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "failed" } }, "required": ["status"] },
+          "then": { "required": ["failure"] },
+          "else": { "not": { "required": ["failure"] } }
+        },
+        {
+          "if": { "required": ["root_flow_id"] },
+          "then": { "properties": { "flows": { "minItems": 1 } } }
+        }
+      ]
+    }
+  }
+}

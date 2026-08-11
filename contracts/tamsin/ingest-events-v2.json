@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/livewyer-ops/tamsin/main/contracts/tamsin/ingest-events-v2.json",
+  "title": "Tamsin ingest NDJSON event envelope v2",
+  "description": "One independently decodable line from the tamsin.ingest.events v2 process protocol. Object results are live records; terminal Flow records carry bounded summaries.",
+  "type": "object",
+  "required": ["protocol", "protocol_version", "type", "seq", "run_id", "emitted_at", "elapsed_ms", "payload"],
+  "properties": {
+    "protocol": { "const": "tamsin.ingest.events" },
+    "protocol_version": { "type": "string", "pattern": "^2\\.[0-9]+$" },
+    "type": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)*$" },
+    "seq": { "type": "integer", "minimum": 0 },
+    "run_id": { "type": "string", "format": "uuid" },
+    "emitted_at": { "type": "string", "format": "date-time" },
+    "elapsed_ms": { "type": "integer", "minimum": 0 },
+    "scope": { "$ref": "#/$defs/scope" },
+    "payload": { "type": "object" }
+  },
+  "allOf": [
+    { "if": { "properties": { "type": { "const": "hello" } }, "required": ["type"] }, "then": { "properties": { "seq": { "const": 0 }, "payload": { "$ref": "#/$defs/hello" } }, "not": { "required": ["scope"] } } },
+    { "if": { "properties": { "type": { "const": "run.started" } }, "required": ["type"] }, "then": { "properties": { "payload": { "$ref": "#/$defs/runStarted" } }, "not": { "required": ["scope"] } } },
+    { "if": { "properties": { "type": { "const": "input.declared" } }, "required": ["type"] }, "then": { "required": ["scope"], "properties": { "scope": { "$ref": "#/$defs/inputScope" }, "payload": { "$ref": "#/$defs/inputDeclared" } } } },
+    { "if": { "properties": { "type": { "const": "manifest.finished" } }, "required": ["type"] }, "then": { "properties": { "payload": { "$ref": "#/$defs/manifestFinished" } }, "not": { "required": ["scope"] } } },
+    { "if": { "properties": { "type": { "const": "input.started" } }, "required": ["type"] }, "then": { "required": ["scope"], "properties": { "scope": { "$ref": "#/$defs/inputScope" }, "payload": { "$ref": "#/$defs/inputStarted" } } } },
+    { "if": { "properties": { "type": { "const": "flow.planned" } }, "required": ["type"] }, "then": { "required": ["scope"], "properties": { "scope": { "$ref": "#/$defs/flowScope" }, "payload": { "$ref": "#/$defs/flowPlanned" } } } },
+    { "if": { "properties": { "type": { "const": "progress.snapshot" } }, "required": ["type"] }, "then": { "required": ["scope"], "properties": { "scope": { "$ref": "#/$defs/inputScope" }, "payload": { "$ref": "#/$defs/progressSnapshot" } } } },
+    { "if": { "properties": { "type": { "const": "retry.scheduled" } }, "required": ["type"] }, "then": { "properties": { "payload": { "$ref": "#/$defs/retryScheduled" } } } },
+    { "if": { "properties": { "type": { "const": "diagnostic" } }, "required": ["type"] }, "then": { "properties": { "payload": { "$ref": "#/$defs/diagnostic" } } } },
+    { "if": { "properties": { "type": { "const": "object.result" } }, "required": ["type"] }, "then": { "required": ["scope"], "properties": { "scope": { "$ref": "#/$defs/objectScope" }, "payload": { "$ref": "#/$defs/objectResult" } } } },
+    { "if": { "properties": { "type": { "const": "flow.result" } }, "required": ["type"] }, "then": { "required": ["scope"], "properties": { "scope": { "$ref": "#/$defs/flowScope" }, "payload": { "$ref": "#/$defs/flowResult" } } } },
+    { "if": { "properties": { "type": { "const": "input.finished" } }, "required": ["type"] }, "then": { "required": ["scope"], "properties": { "scope": { "$ref": "#/$defs/inputScope" }, "payload": { "$ref": "#/$defs/inputFinished" } } } },
+    { "if": { "properties": { "type": { "const": "run.cancellation_requested" } }, "required": ["type"] }, "then": { "properties": { "payload": { "$ref": "#/$defs/runCancellationRequested" } }, "not": { "required": ["scope"] } } },
+    { "if": { "properties": { "type": { "const": "run.finished" } }, "required": ["type"] }, "then": { "properties": { "payload": { "$ref": "#/$defs/runFinished" } }, "not": { "required": ["scope"] } } }
+  ],
+  "$defs": {
+    "scope": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "input_index": { "type": "integer", "minimum": 0 },
+        "flow_id": { "type": "string", "format": "uuid" },
+        "object_id": { "type": "string", "format": "uuid" }
+      },
+      "dependentRequired": { "flow_id": ["input_index"], "object_id": ["input_index", "flow_id"] }
+    },
+    "inputScope": { "allOf": [{ "$ref": "#/$defs/scope" }, { "required": ["input_index"], "not": { "anyOf": [{ "required": ["flow_id"] }, { "required": ["object_id"] }] } }] },
+    "flowScope": { "allOf": [{ "$ref": "#/$defs/scope" }, { "required": ["input_index", "flow_id"], "not": { "required": ["object_id"] } }] },
+    "objectScope": { "allOf": [{ "$ref": "#/$defs/scope" }, { "required": ["input_index", "flow_id", "object_id"] }] },
+    "safeCode": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]*$", "maxLength": 128 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "hello": {
+      "type": "object",
+      "required": ["tool_version", "tool_commit", "result_schema_version", "profile_policy_version", "max_event_bytes", "capabilities"],
+      "properties": {
+        "tool_version": { "type": "string", "minLength": 1 },
+        "tool_commit": { "type": "string", "minLength": 1 },
+        "tool_build_date": { "type": "string", "minLength": 1 },
+        "result_schema_version": { "const": "2.0" },
+        "profile_policy_version": { "type": "string", "minLength": 1 },
+        "max_event_bytes": { "type": "integer", "minimum": 512, "maximum": 16777216 },
+        "capabilities": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/safeCode" } }
+      }
+    },
+    "runStarted": {
+      "type": "object",
+      "required": ["started_at"],
+      "properties": {
+        "started_at": { "type": "string", "format": "date-time" },
+        "profile": { "type": "string", "minLength": 1 },
+        "profile_version": { "type": "string", "minLength": 1 },
+        "dry_run_mode": { "enum": ["off", "fast", "exact"] },
+        "verification_mode": { "enum": ["auto", "readback", "none"] },
+        "concurrency": { "type": "integer", "minimum": 1 },
+        "transfers": { "type": "integer", "minimum": 1 },
+        "requested_inputs": { "type": "integer", "minimum": 0 }
+      },
+      "dependentRequired": { "profile": ["profile_version"], "profile_version": ["profile"] }
+    },
+    "inputDeclared": { "type": "object", "required": ["input"], "properties": { "input": { "type": "string", "minLength": 1 } } },
+    "manifestFinished": { "type": "object", "required": ["total_inputs"], "properties": { "total_inputs": { "type": "integer", "minimum": 0 } } },
+    "inputStarted": { "type": "object", "required": ["started_at"], "properties": { "started_at": { "type": "string", "format": "date-time" } } },
+    "flowCore": {
+      "type": "object",
+      "required": ["flow_id", "source_id", "kind"],
+      "properties": {
+        "flow_id": { "type": "string", "format": "uuid" },
+        "source_id": { "type": "string", "format": "uuid" },
+        "kind": { "enum": ["essence", "collection", "muxed"] },
+        "role": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [{ "if": { "properties": { "kind": { "const": "essence" } }, "required": ["kind"] }, "then": { "required": ["role"] }, "else": { "not": { "required": ["role"] } } }]
+    },
+    "flowPlanned": {
+      "allOf": [
+        { "$ref": "#/$defs/flowCore" },
+        { "type": "object", "required": ["root"], "properties": { "root": { "type": "boolean" }, "parent_flow_id": { "type": "string", "format": "uuid" }, "format": { "type": "string", "minLength": 1 }, "container": { "type": "string", "minLength": 1 } } },
+        { "if": { "properties": { "root": { "const": true } }, "required": ["root"] }, "then": { "not": { "required": ["parent_flow_id"] } }, "else": { "required": ["parent_flow_id"] } }
+      ]
+    },
+    "progressSnapshot": {
+      "type": "object",
+      "required": ["revision", "phase", "totals_final", "completed_objects", "total_objects", "completed_bytes", "total_bytes", "elapsed_ms"],
+      "properties": {
+        "revision": { "type": "integer", "minimum": 1 },
+        "phase": { "enum": ["store", "verify"] },
+        "totals_final": { "type": "boolean" },
+        "completed_objects": { "type": "integer", "minimum": 0 },
+        "total_objects": { "type": "integer", "minimum": 0 },
+        "completed_bytes": { "type": "integer", "minimum": 0 },
+        "total_bytes": { "type": "integer", "minimum": 0 },
+        "elapsed_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "retryScheduled": {
+      "type": "object",
+      "required": ["operation", "attempt", "max_attempts", "delay_ms"],
+      "properties": {
+        "operation": { "$ref": "#/$defs/safeCode" },
+        "attempt": { "type": "integer", "minimum": 2 },
+        "max_attempts": { "type": "integer", "minimum": 2 },
+        "delay_ms": { "type": "integer", "minimum": 0 },
+        "status_class": { "$ref": "#/$defs/safeCode" },
+        "error_class": { "$ref": "#/$defs/safeCode" }
+      },
+      "anyOf": [{ "required": ["status_class"] }, { "required": ["error_class"] }]
+    },
+    "diagnostic": {
+      "type": "object",
+      "required": ["severity", "code", "message", "action_required", "truncated"],
+      "properties": {
+        "severity": { "enum": ["debug", "info", "warning", "error"] },
+        "code": { "$ref": "#/$defs/safeCode" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "hint": { "type": "string", "maxLength": 4096 },
+        "action_required": { "type": "boolean" },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "objectResult": { "$ref": "batch-result-v2.json#/$defs/object" },
+    "objectSummary": { "$ref": "batch-result-v2.json#/$defs/object_summary" },
+    "flowResult": {
+      "allOf": [
+        { "$ref": "#/$defs/flowCore" },
+        { "type": "object", "required": ["disposition", "object_summary"], "properties": { "disposition": { "enum": ["planned", "unchanged", "written", "indeterminate", "unattempted"] }, "object_summary": { "$ref": "#/$defs/objectSummary" } } },
+        { "if": { "properties": { "kind": { "const": "collection" } }, "required": ["kind"] }, "then": { "properties": { "object_summary": { "properties": { "total": { "const": 0 } } } } } }
+      ]
+    },
+    "inputFinished": {
+      "type": "object",
+      "required": ["input", "profile", "profile_version", "status", "verification", "flow_count", "object_count"],
+      "properties": {
+        "input": { "type": "string", "minLength": 1 },
+        "profile": { "type": "string", "minLength": 1 },
+        "profile_version": { "type": "string", "minLength": 1 },
+        "ffmpeg_version": { "type": "string", "minLength": 1 },
+        "media_toolchain": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "root_flow_id": { "type": "string", "format": "uuid" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "status": { "enum": ["planned", "ingested", "resumed", "failed"] },
+        "verification": { "enum": ["verified", "not_requested", "not_reached", "failed_retracted", "failed_stranded"] },
+        "flow_count": { "type": "integer", "minimum": 0 },
+        "object_count": { "type": "integer", "minimum": 0 },
+        "error_code": { "$ref": "#/$defs/safeCode" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      },
+      "dependentRequired": { "ffmpeg_version": ["media_toolchain"], "media_toolchain": ["ffmpeg_version"] },
+      "allOf": [{ "if": { "properties": { "status": { "const": "failed" } }, "required": ["status"] }, "then": { "required": ["error_code", "message"] }, "else": { "not": { "anyOf": [{ "required": ["error_code"] }, { "required": ["message"] }] } } }]
+    },
+    "runCancellationRequested": { "type": "object", "required": ["reason"], "properties": { "reason": { "enum": ["signal", "parent", "deadline", "output_closed", "internal"] } } },
+    "runFinished": {
+      "type": "object",
+      "required": ["outcome", "exit_code", "total", "succeeded", "failed", "elapsed_ms", "bytes_staged", "bytes_uploaded", "bytes_verified", "retries", "objects_verified", "objects_retracted", "objects_stranded"],
+      "properties": {
+        "outcome": { "enum": ["succeeded", "failed", "partial", "interrupted"] },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "total": { "type": "integer", "minimum": 0 },
+        "succeeded": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "elapsed_ms": { "type": "integer", "minimum": 0 },
+        "bytes_staged": { "type": "integer", "minimum": 0 },
+        "bytes_uploaded": { "type": "integer", "minimum": 0 },
+        "bytes_verified": { "type": "integer", "minimum": 0 },
+        "retries": { "type": "integer", "minimum": 0 },
+        "objects_verified": { "type": "integer", "minimum": 0 },
+        "objects_retracted": { "type": "integer", "minimum": 0 },
+        "objects_stranded": { "type": "integer", "minimum": 0 }
+      },
+      "allOf": [
+        { "if": { "properties": { "outcome": { "const": "succeeded" } }, "required": ["outcome"] }, "then": { "properties": { "exit_code": { "const": 0 }, "failed": { "const": 0 } } }, "else": { "properties": { "exit_code": { "not": { "const": 0 } } } } },
+        { "if": { "properties": { "outcome": { "const": "partial" } }, "required": ["outcome"] }, "then": { "properties": { "succeeded": { "minimum": 1 }, "failed": { "minimum": 1 } } } },
+        { "if": { "properties": { "outcome": { "const": "interrupted" } }, "required": ["outcome"] }, "then": { "properties": { "exit_code": { "const": 8 } } } }
+      ]
+    }
+  }
+}

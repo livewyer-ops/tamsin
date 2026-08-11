@@ -1,0 +1,12 @@
+/bin/
+/dist/
+/coverage.out
+/.cache/
+/.tmp/
+/tams.kubeconfig
+*.log
+
+# Compiled test binaries. `go test -cpuprofile` and friends leave these behind,
+# and a stray `git add -A` will otherwise commit several megabytes of them.
+*.test
+coverage.out
