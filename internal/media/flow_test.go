@@ -36,7 +36,7 @@ func TestBuildVideoFlow(t *testing.T) {
 func TestBuildFlowRecordsResolvedMediaToolchain(t *testing.T) {
 	t.Parallel()
 	identity := testIdentity()
-	identity.IngestProfile = "editorial"
+	identity.IngestProfile = "essence-segments"
 	identity.IngestProfileVersion = "1"
 	identity.FFmpegVersion = "ffmpeg version 7.0"
 	identity.MediaToolchain = "sha256:toolchain"
@@ -50,7 +50,7 @@ func TestBuildFlowRecordsResolvedMediaToolchain(t *testing.T) {
 	}
 	tags := flow["tags"].(map[string]any)
 	for name, want := range map[string]string{
-		"_tamsin_ingest_profile": "editorial", "_tamsin_ingest_profile_version": "1",
+		"_tamsin_ingest_profile": "essence-segments", "_tamsin_ingest_profile_version": "1",
 		"_tamsin_ffmpeg_version": "ffmpeg version 7.0", "_tamsin_media_toolchain": "sha256:toolchain",
 	} {
 		if tags[name] != want {

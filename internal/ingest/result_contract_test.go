@@ -145,7 +145,7 @@ func TestResultContractCarriesTheSelectedProfileVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	pipeline, err := New(Config{
-		Profile: ProfilePreserve, ProfileVersion: ProfileVersion,
+		Profile: ProfilePreserve, ProfileVersion: "1",
 		Concurrency: 1, DryRun: true, Verify: true, SegmentFormat: media.SegmentFormatSource,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, nil, fakeProber{}, nil, discardLogger(), nil)
@@ -156,7 +156,7 @@ func TestResultContractCarriesTheSelectedProfileVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if batch.ProfileVersion != ProfileVersion || pipeline.ResultContract().ProfileVersion != batch.ProfileVersion {
+	if batch.ProfileVersion != "1" || pipeline.ResultContract().ProfileVersion != batch.ProfileVersion {
 		t.Fatalf("selected profile version was not propagated: %#v", batch)
 	}
 	if batch.Results[0].Verification != VerificationNotReached {

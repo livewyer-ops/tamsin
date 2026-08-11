@@ -76,7 +76,7 @@ const (
 	FailureMessageSourceTransferFailed     = "The input could not be staged completely."
 	FailureMessageMediaAnalysisFailed      = "Media analysis did not complete successfully."
 	FailureMessageMediaContainerUnknown    = "The input container could not be identified."
-	FailureMessageMediaUnsupported         = "The input codecs are not supported by the streaming-ts profile."
+	FailureMessageMediaUnsupported         = "The input codecs are not supported by the MPEG-TS segment policy."
 	FailureMessageMediaOptionsInvalid      = "The FFmpeg options conflict with the selected media treatment."
 	FailureMessageMediaToolUnavailable     = "The configured media toolchain is unavailable."
 	FailureMessageMediaInvalidFlow         = "The input could not be described as a valid Flow."

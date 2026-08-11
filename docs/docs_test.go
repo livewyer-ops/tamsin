@@ -564,7 +564,7 @@ func TestFirstIngestTutorialStatesTheExecutableMediaContract(t *testing.T) {
 	}
 	contents := string(page)
 	for _, required := range []string{
-		"tamsin --profile editorial --dry-run=exact --format json -i first-ingest.ts",
+		"tamsin --profile essence-segments --dry-run=exact --format json -i first-ingest.ts",
 		"**three** entries", `"role": "video"`, `"role": "audio"`, "root_flow_id",
 		"tamsin --profile preserve", "--essence-storage muxed --segment-duration 0",
 	} {

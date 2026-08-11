@@ -321,10 +321,9 @@ const (
 
 	// ResultSchemaVersion changes for any shape, enum, or required-field change:
 	// the strict schema rejects unknown properties, so even an optional field
-	// cannot be added under the same version. ResultProfileVersion versions the
-	// built-in ingest policy independently of the executable.
-	ResultSchemaVersion  = "2.0"
-	ResultProfileVersion = ProfileVersion
+	// cannot be added under the same version. Profile versions are carried by
+	// each result and batch independently of the executable and result schema.
+	ResultSchemaVersion = "2.0"
 )
 
 // Failure is the stable, disclosure-safe terminal explanation shared by the
@@ -414,15 +413,11 @@ func New(config Config, client TAMSClient, prober media.Prober, segmenter media.
 		config.Profile = ProfileCustom
 	}
 	if config.ProfileVersion == "" {
-		config.ProfileVersion = ProfileVersion
-	}
-	switch config.Profile {
-	case ProfilePreserve, ProfileEditorial, ProfileStreamingTS, ProfileCustom:
-	default:
-		return nil, fmt.Errorf("unsupported resolved ingest profile %q", config.Profile)
-	}
-	if config.ProfileVersion != ProfileVersion {
-		return nil, fmt.Errorf("unsupported resolved ingest profile version %q", config.ProfileVersion)
+		if config.Profile == ProfileCustom {
+			config.ProfileVersion = CustomProfileVersion
+		} else if profile, err := namedProfile(config.Profile); err == nil {
+			config.ProfileVersion = profile.Version
+		}
 	}
 	if err := validateResolvedProfile(config); err != nil {
 		return nil, err
@@ -823,7 +818,7 @@ func (p *Pipeline) ingestOne(ctx context.Context, item source.Item, storageID st
 		// deliberately transcode to a compatible output codec that does not yet
 		// exist to probe, so that workflow owns its output metadata and policy.
 		if len(p.config.FFmpegArgs) == 0 {
-			if err := validateStreamingTSCodecs(probe); err != nil {
+			if err := validateMPEGTSSegmentCodecs(probe); err != nil {
 				return Result{}, withFailure(FailureCodeMediaUnsupported, FailureMessageMediaUnsupported, true, err)
 			}
 		}

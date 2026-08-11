@@ -108,7 +108,7 @@ func newIngestEventOutput(writer io.Writer, runID string, cancel context.CancelC
 	output.mu.Lock()
 	err = output.emitLocked(nil, ingestevent.Hello{
 		ToolVersion: version.Version, ToolCommit: version.SourceCommit(), ToolBuildDate: version.BuildDate(),
-		ResultSchemaVersion: ingest.ResultSchemaVersion, ProfilePolicyVersion: ingest.ResultProfileVersion,
+		ResultSchemaVersion: ingest.ResultSchemaVersion, ProfilePolicyVersion: ingest.ProfilePolicyVersion,
 		MaxEventBytes: ingestevent.DefaultMaxEventBytes,
 		Capabilities: []string{
 			"bounded_reducer", "durable_journal", "graceful_cancel", "live_object_results", "progress",
@@ -516,7 +516,7 @@ func (o *ingestEventOutput) Finish(batch *ingest.BatchResult, cause error, exitC
 		return ExitGeneral, err
 	}
 
-	profile, profileVersion := ingest.ProfileEditorial, ingest.ResultProfileVersion
+	profile, profileVersion := ingest.ProfileUnresolved, ingest.UnresolvedProfileVersion
 	verification := ingestevent.VerificationNotReached
 	if options != nil {
 		profile, profileVersion = options.profile, options.profileVersion

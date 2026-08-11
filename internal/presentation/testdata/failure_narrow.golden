@@ -30,7 +30,7 @@ REQUIRED
 
   3 media objects; one or more
   unverified objects remain registered
-  profile streaming-ts@1
+  profile mpegts-segments@1
   input SHA-256
     ffffffffffffffffffffffffffffffffffff
     ffffffffffffffffffffffffffff

@@ -15,8 +15,11 @@ integrity, and distribution contracts.
 
 - Ingest local files, recursive directories, manifests, HTTP(S), S3, and
   standard input into a BBC TAMS 8.1 service.
-- Select an explicit, versioned `preserve@1`, `editorial@1`, or
-  `streaming-ts@1` media policy instead of relying on an implicit treatment.
+- Select one of five explicit, versioned media policies: `preserve@1`,
+  `demux@1`, `muxed-segments@1`, `essence-segments@1`, or
+  `mpegts-segments@1`.
+- Inspect profile semantics and resource trade-offs with the config-independent
+  human or versioned JSON `tamsin profiles` report.
 - Create deterministic Source and Flow identities for safe retry and resume,
   while retaining renderer and source provenance separately from identity.
 - Store muxed inputs as one Flow or split their essences into independently
@@ -77,8 +80,9 @@ integrity, and distribution contracts.
 
 - TAMSin targets the pinned BBC TAMS 8.1 contract and the pinned TAMOSS
   reference profile recorded in `contracts/tams-v8.1.json`.
-- `editorial@1`, `streaming-ts@1`, and custom rendered treatments require
-  `ffprobe` and `ffmpeg`; the OCI image includes both tools.
+- Every profile requires `ffprobe`. Segmented and custom rendered treatments
+  require `ffmpeg`; `demux@1` uses it when separating a multi-essence input,
+  while `preserve@1` does not. The OCI image includes both tools.
 - Custom transcoding currently supports one essence and requires explicit
   output codec and essence metadata. Prepare multi-stream transcodes before
   ingest until per-essence output metadata is supported.

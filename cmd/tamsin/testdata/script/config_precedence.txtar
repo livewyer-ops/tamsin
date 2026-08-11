@@ -26,12 +26,12 @@ env TAMSIN_FORMAT=
 
 # An explicitly named config file that cannot be read is an error, not a
 # silent fallback to defaults.
-! exec tamsin --config missing.yaml --profile editorial -d 0 --dry-run -i input.mp4
+! exec tamsin --config missing.yaml --profile essence-segments -d 0 --dry-run -i input.mp4
 stderr 'read configuration'
 
 # Nested keys map to underscore-separated environment names.
 env TAMSIN_INGEST_DRY_RUN=exact
-exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error -d 0 -i input.mp4
+exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error -d 0 -i input.mp4
 cp stdout environment.ndjson
 checkevents environment.ndjson succeeded 1 0 planned
 env TAMSIN_INGEST_DRY_RUN=
@@ -39,7 +39,7 @@ env TAMSIN_INGEST_DRY_RUN=
 -- config.yaml --
 format: json
 ingest:
-  profile: editorial
+  profile: essence-segments
   dry_run: exact
 -- input.mp4 --
 pretend media bytes

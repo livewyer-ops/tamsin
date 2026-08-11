@@ -48,7 +48,7 @@ http:
   timeout: 30s
   transfer_timeout: 0
 ingest:
-  profile: editorial
+  profile: essence-segments
   verify: auto
   concurrency: 4
 input:

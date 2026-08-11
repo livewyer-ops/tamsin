@@ -7,14 +7,14 @@
 chmod 0755 ffprobe
 
 # Default JSON mode remains a complete machine stream with no terminal bytes.
-exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error -d 0 --dry-run=exact -i input.mp4
+exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error -d 0 --dry-run=exact -i input.mp4
 ! stderr .
 cp stdout auto.ndjson
 checkevents auto.ndjson succeeded 1 0 planned
 
 # Explicitly disabled suppresses optional snapshots, not lifecycle or terminal
 # events.
-exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact -i input.mp4
+exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact -i input.mp4
 ! stderr .
 cp stdout none.ndjson
 checkevents none.ndjson succeeded 1 0 planned
@@ -23,10 +23,10 @@ exec cat none.ndjson
 
 # The human rendering choices remain accepted in JSON mode, but cannot inject
 # cursor movement or a second progress language into the stream.
-exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error --progress tty -d 0 --dry-run=exact -i input.mp4
+exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error --progress tty -d 0 --dry-run=exact -i input.mp4
 cp stdout tty.ndjson
 checkevents tty.ndjson succeeded 1 0 planned
-exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error --progress plain -d 0 --dry-run=exact -i input.mp4
+exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error --progress plain -d 0 --dry-run=exact -i input.mp4
 cp stdout plain.ndjson
 checkevents plain.ndjson succeeded 1 0 planned
 

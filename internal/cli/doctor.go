@@ -142,10 +142,10 @@ func (a *application) doctorCommand() *cobra.Command {
 	}
 	flags := command.Flags()
 	flags.BoolVar(&raw.online, "online", false, "also run the read-only TAMS startup preflight")
-	flags.StringVar(&raw.profile, "profile", "",
-		"versioned ingest profile: preserve, editorial, or streaming-ts")
+	flags.StringVar(&raw.profile, "profile", "", profileFlagDescription())
+	registerProfileCompletion(command)
 	flags.DurationVarP(&raw.segmentDuration, "segment-duration", "d", defaultSegmentDuration,
-		"target duration of each TAMS Flow Segment; 0 stores the whole input as one Media Object")
+		"target duration of each TAMS Flow Segment; 0 disables segmentation, leaving storage to decide whole input or whole essence")
 	flags.StringVar(&raw.segmentFormat, "segment-format", string(media.SegmentFormatSource),
 		"container for Flow Segments: source or mpegts")
 	flags.StringVar(&raw.essenceStorage, "essence-storage", string(media.EssenceStorageIndependent),
@@ -228,12 +228,8 @@ func (a *application) runDoctor(command *cobra.Command, raw *doctorFlagValues) e
 		run.report.Profile = doctorProfile{RequiresFFmpeg: true}
 		run.pass("profile", map[string]any{
 			"selection_required_for_ingest": true,
-			"available_profiles": []string{
-				ingest.ProfilePreserve + "@" + ingest.ProfileVersion,
-				ingest.ProfileEditorial + "@" + ingest.ProfileVersion,
-				ingest.ProfileStreamingTS + "@" + ingest.ProfileVersion,
-			},
-			"requires_ffmpeg": true,
+			"available_profiles":            versionedProfileSelections(),
+			"requires_ffmpeg":               true,
 		})
 	} else {
 		requiresFFmpeg := ingest.TreatmentRequiresFFmpeg(profile)

@@ -154,10 +154,10 @@ auth:
     - tams.write
 
 ingest:
-  # Required versioned media treatment: preserve, editorial, or streaming-ts.
-  # A version may be pinned as editorial@1. Explicit media settings below
+  # Required versioned media treatment. Run `tamsin profiles` for the catalogue.
+  # A version may be pinned as essence-segments@1. Explicit media settings below
   # override it and a differing combination reports custom@1.
-  profile: editorial
+  profile: essence-segments
   # Optional stable root identities. Each is valid only when expansion resolves
   # exactly one input; an omitted identity is derived from the content.
   flow_id: ""
@@ -193,9 +193,10 @@ ingest:
   journal: ""
   start: "0:0"
   storage_id: ""
-  # Target duration of each TAMS Flow Segment; 0 stores the whole input as one
-  # Media Object. Cuts land on keyframes, so actual Segments vary around this.
-  # Any non-zero value makes ffmpeg a runtime requirement for every ingest.
+  # Target duration of each TAMS Flow Segment; 0 disables segmentation, while
+  # essence storage decides whether Objects hold the input or each essence.
+  # Cuts land on keyframes, so actual Segments vary around this. Any non-zero
+  # value requires ffmpeg; zero with independent storage may require it too.
   segment_duration: 10s
   # Container for Flow Segments: source (the input's own) or mpegts.
   segment_format: source

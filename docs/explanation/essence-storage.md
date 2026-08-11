@@ -23,7 +23,7 @@ That difference drives everything else, including a pair of rules that invert be
 
 The logic is consistent once you see it: `container` describes media a Flow *has*, and its presence is what signals that a Flow references Media Objects directly. `container_mapping` describes where a child Flow's essence sits inside the particular parent container collecting it, so AppNote 0006 puts the mapping on that parent's Collection Item rather than on the child globally. A collected child therefore has neither property: it is reachable through the Collection Item that names and maps it.
 
-## Why editorial ingest uses independent storage
+## Why independent storage exists
 
 [AppNote 0001](https://github.com/bbc/tams/blob/98d307b09b5ebf79278aa7d3aad53295154e2c17/docs/appnotes/0001-multi-mono-essence-flows-sources.md) leads with independent storage, and its argument is about what happens after ingest:
 

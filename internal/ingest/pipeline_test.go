@@ -878,7 +878,7 @@ func TestTutorialIndependentDryRunShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	pipeline, err := New(Config{
-		Profile: ProfileEditorial, ProfileVersion: ProfileVersion,
+		Profile: ProfileEssenceSegments, ProfileVersion: "1",
 		Concurrency: 1, Transfers: 1, ProbeConcurrency: 1, DryRun: true,
 		SegmentDuration: 10 * time.Second, SegmentFormat: media.SegmentFormatSource,
 		EssenceStorage: media.EssenceStorageIndependent,
@@ -933,7 +933,7 @@ func TestDryRunFastSkipsRendererWhileExactBuildsObjects(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			segmenter := &recordingSegmenter{}
 			pipeline, err := New(Config{
-				Profile: ProfileEditorial, ProfileVersion: ProfileVersion,
+				Profile: ProfileEssenceSegments, ProfileVersion: "1",
 				Concurrency: 1, Transfers: 1, ProbeConcurrency: 1, DryRunMode: testCase.mode,
 				SegmentDuration: 10 * time.Second, SegmentFormat: media.SegmentFormatSource,
 				EssenceStorage: media.EssenceStorageIndependent,
@@ -1194,7 +1194,7 @@ func TestPipelineDryRunDoesNotRequireClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if batch.SchemaVersion != ResultSchemaVersion || batch.ToolVersion == "" || batch.ProfileVersion != ResultProfileVersion ||
+	if batch.SchemaVersion != ResultSchemaVersion || batch.ToolVersion == "" || batch.ProfileVersion != "1" ||
 		batch.Results[0].Status != ResultStatusPlanned || batch.Results[0].RootFlowID == "" ||
 		batch.Results[0].Verification != VerificationNotRequested {
 		t.Fatalf("unexpected dry-run result: %#v", batch)

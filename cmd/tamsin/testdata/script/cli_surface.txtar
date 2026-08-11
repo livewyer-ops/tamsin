@@ -10,6 +10,21 @@ stdout 'creates TAMS Flows, and uploads verified Media Objects'
 stdout 'ingest'
 stdout 'api'
 stdout 'doctor'
+stdout 'profiles'
+
+# Profile discovery is config-independent and exposes the complete stable
+# catalogue to both operators and wrappers.
+exec tamsin profiles
+stdout 'preserve@1'
+stdout 'demux@1'
+stdout 'muxed-segments@1'
+stdout 'essence-segments@1'
+stdout 'mpegts-segments@1'
+
+exec tamsin --format json profiles
+stdout '"schema_version":"1.0"'
+stdout '"profile_policy_version":"1"'
+! stdout 'editorial|streaming-ts'
 
 exec tamsin doctor --help
 stdout '--online'
@@ -62,7 +77,8 @@ exec tamsin completion zsh
 exec tamsin completion fish
 exec tamsin completion powershell
 
-# Segmentation is on by default, at a target of 10 seconds. This is load-bearing:
-# it makes ffmpeg a runtime requirement for every ingest, including dry runs.
+# The structured override keeps its documented 10-second default. A required
+# profile supplies the complete policy, so this flag default is not a hidden
+# ingest-profile default.
 exec tamsin ingest --help
 stdout 'default 10s'

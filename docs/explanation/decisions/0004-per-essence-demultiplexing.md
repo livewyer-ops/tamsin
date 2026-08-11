@@ -5,7 +5,8 @@
 
 ## Context
 
-The editorial and streaming profiles use independent essence storage, so a
+The `demux`, `essence-segments`, and `mpegts-segments` profiles use independent
+essence storage, so a
 multiplexed input becomes one Flow per essence. TAMSin produces those essences by invoking FFmpeg once per
 stream: each invocation opens the input, maps a single stream, and writes that
 essence's Segments.
@@ -81,5 +82,5 @@ also provides the safer local-resource bound even when wall-clock savings vary.
 
 ## Sources
 
-- AppNote 0005, which is why the editorial profiles use independent storage and this
-  question arises at all.
+- AppNote 0005, which is why the segmented independent profiles use this
+  storage model and the question arises at all.

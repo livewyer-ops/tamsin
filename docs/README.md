@@ -11,7 +11,7 @@ authoritative contracts, and design discussion distinct.
 | Complete a first ingest | [Your first ingest](tutorials/first-ingest.md) | [Inputs](reference/inputs.md) |
 | Learn the product vocabulary | [Terminology and product model](reference/terminology.md) | [Essence storage](explanation/essence-storage.md) |
 | Choose an ingest policy | [Profiles and supported media](reference/profiles.md) | [Choose how essences are stored](how-to/choose-how-essences-are-stored.md) |
-| Prepare media for delivery | [Segment media for streaming](how-to/segment-media-for-streaming.md) | [Segmentation](explanation/segmentation.md) |
+| Prepare MPEG-TS Objects | [Prepare MPEG-TS Segments](how-to/prepare-mpegts-segments.md) | [Segmentation](explanation/segmentation.md) |
 | Run in Kubernetes | [Run as a Kubernetes Job](how-to/run-as-a-kubernetes-job.md) | [Configuration](reference/configuration.md) |
 | Cut a release | [Release procedure](how-to/cut-a-release.md) | [TAMS conformance](explanation/conformance.md) |
 | Integrate a service or UI | [Output protocol and journal](reference/result-contract.md) | [Exit codes](reference/exit-codes.md) |
@@ -34,7 +34,7 @@ operational task.
 - [Choose how essences are stored](how-to/choose-how-essences-are-stored.md)
 - [Cut a release](how-to/cut-a-release.md)
 - [Run as a Kubernetes Job](how-to/run-as-a-kubernetes-job.md)
-- [Segment media for streaming](how-to/segment-media-for-streaming.md)
+- [Prepare MPEG-TS Segments](how-to/prepare-mpegts-segments.md)
 
 ## Reference
 

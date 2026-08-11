@@ -11,12 +11,16 @@ A Flow Segment maps a Media Object onto a period of a Flow's timeline. Segmentat
 - A corrupted or missing Segment costs you that Segment, not its neighbours as well.
 - HLS profiles that require independently decodable Segments can read the Flow.
 
-Storing an input as one whole-file Object is legal TAMS and is what `-d 0` does, but it forfeits all four. A reader wanting ten seconds from the middle must fetch the entire file.
+Storing media as whole Objects is legal TAMS and is what a zero Segment duration
+does. Muxed storage creates one whole-input Object; independent storage creates
+one whole Object per essence. Both forfeit the four benefits above. A reader
+wanting ten seconds from the middle must fetch the complete owning Object.
 
-The versioned `preserve@1` profile selects the complete whole-file treatment;
-`editorial@1` selects a ten-second source-container policy and `streaming-ts@1`
-selects the conservative two-second MPEG-TS policy. Ingest requires one of
-these choices explicitly.
+The versioned `preserve@1` and `demux@1` profiles select whole-file or
+whole-essence treatments. `muxed-segments@1` and `essence-segments@1` select
+ten-second source-family policies, while `mpegts-segments@1` selects the
+conservative two-second MPEG-TS policy. Ingest requires one of these choices
+explicitly.
 
 Note that AppNote 0005 makes independence *recommended*, not mandatory, and is candid about the drawbacks: some codec configurations do not support short independently decodable groups of pictures, and waiting to close a Segment adds write latency.
 
@@ -70,7 +74,7 @@ classify. A workflow that knows the correct type can override it explicitly:
 ```
 
 ```sh
-tamsin --profile editorial -i programme.bin --flow-metadata container.json -o https://tams.example.com
+tamsin --profile essence-segments -i programme.bin --flow-metadata container.json -o https://tams.example.com
 ```
 
 This fallback keeps the required distinction between a Flow that owns Objects
@@ -81,7 +85,7 @@ There is deliberately no fragmented-MP4 option. Fragmented MP4 needs a separate 
 
 ## See also
 
-- [Segment media for streaming](../how-to/segment-media-for-streaming.md) — the task
+- [Prepare MPEG-TS Segments](../how-to/prepare-mpegts-segments.md) — the task
 - [Integrity](integrity.md) — what happens to Segments that fail verification
 - [Container media-type decision](decisions/0005-container-media-types.md) — the supported-profile boundary and fallback
 - [Ingest profiles and supported media](../reference/profiles.md) — versioned treatments and compatibility matrix

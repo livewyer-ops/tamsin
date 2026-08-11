@@ -318,7 +318,7 @@ func TestCLIDefaultSegmentDurationIsTenSeconds(t *testing.T) {
 	}
 }
 
-func TestCLIRequiresProfileAndResolvesExplicitEditorialProfile(t *testing.T) {
+func TestCLIRequiresProfileAndResolvesExplicitEssenceSegmentsProfile(t *testing.T) {
 	t.Parallel()
 	app := &application{v: viper.New()}
 	app.configureDefaults()
@@ -327,14 +327,14 @@ func TestCLIRequiresProfileAndResolvesExplicitEditorialProfile(t *testing.T) {
 	if _, _, err := app.ingestOptions(command, []string{"input.mp4"}, raw); err == nil || !strings.Contains(err.Error(), "profile is required") {
 		t.Fatalf("ingest without a profile error = %v", err)
 	}
-	if err := command.Flags().Set("profile", ingest.ProfileEditorial); err != nil {
+	if err := command.Flags().Set("profile", ingest.ProfileEssenceSegments); err != nil {
 		t.Fatal(err)
 	}
 	options, _, err := app.ingestOptions(command, []string{"input.mp4"}, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.profile != "editorial" || options.profileVersion != "1" ||
+	if options.profile != "essence-segments" || options.profileVersion != "1" ||
 		options.segmentDuration != 10*time.Second || options.segmentFormat != "source" ||
 		options.essenceStorage != "independent" {
 		t.Fatalf("default resolved options = %#v", options)

@@ -17,7 +17,7 @@ func TestCommandTreeExposesEveryAddressableCommand(t *testing.T) {
 	t.Parallel()
 
 	want := map[string][]string{
-		"tamsin":                     {"api", "completion", "config", "doctor", "ingest"},
+		"tamsin":                     {"api", "completion", "config", "doctor", "ingest", "profiles"},
 		"tamsin api":                 {"flow", "object", "request", "segment", "service", "storage", "storage-backends"},
 		"tamsin api flow":            {"get", "put"},
 		"tamsin api storage":         {"allocate"},

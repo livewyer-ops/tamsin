@@ -24,6 +24,7 @@ func compileTamsinSchema(t *testing.T, name string) *jsonschema.Schema {
 	for _, filename := range []string{
 		"batch-result-v1.json", "batch-result-v2.json", "doctor-report-v1.json",
 		"ingest-journal-v1.json", "ingest-journal-v2.json", "ingest-events-v1.json", "ingest-events-v2.json",
+		"profiles-report-v1.json",
 	} {
 		file, err := os.Open("tamsin/" + filename)
 		if err != nil {
@@ -62,10 +63,10 @@ func contractFixture() ingest.BatchResult {
 	rootID := "f3b1a8de-6c1e-4a0b-9d2f-1c7e5a904bb1"
 	return ingest.BatchResult{
 		SchemaVersion: ingest.ResultSchemaVersion, ToolVersion: "v1.2.3", ToolCommit: "abc123",
-		ProfileVersion: ingest.ResultProfileVersion, RunID: "d1f5657c-cee0-5ac4-a0a5-c78ba122fa39",
+		ProfileVersion: "1", RunID: "d1f5657c-cee0-5ac4-a0a5-c78ba122fa39",
 		Succeeded: 1,
 		Results: []ingest.Result{{
-			Input: "file:///programme.ts", Profile: ingest.ProfileEditorial, ProfileVersion: ingest.ProfileVersion,
+			Input: "file:///programme.ts", Profile: ingest.ProfileEssenceSegments, ProfileVersion: "1",
 			RootFlowID: rootID, Bytes: 991017,
 			SHA256: "77145c94c11f3754207499158df22406e1fe7635553c1c86dc5e881dfeb32016",
 			Status: ingest.ResultStatusIngested, Verification: ingest.VerificationVerified,
@@ -127,7 +128,7 @@ func TestPublishedBatchResultSchemaAcceptsTheRuntimeContract(t *testing.T) {
 	}
 	provenance := invalid["results"].([]any)[0].(map[string]any)
 	provenance["verification"] = "verified"
-	provenance["profile"] = "editorial"
+	provenance["profile"] = "essence-segments"
 	provenance["profile_version"] = "1"
 	provenance["ffmpeg_version"] = "ffmpeg version 7.0"
 	provenance["media_toolchain"] = "sha256:77145c94c11f3754207499158df22406e1fe7635553c1c86dc5e881dfeb32016"

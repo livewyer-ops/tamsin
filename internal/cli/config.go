@@ -831,7 +831,7 @@ func (a *application) effectiveConfig(command *cobra.Command) effectiveConfigRes
 		// Persistent pre-run validation already reports this to users. Retain a
 		// defensive fallback for direct unit callers rather than panicking.
 		profile = ingest.Profile{
-			Name: ingest.ProfileCustom, Version: ingest.ProfileVersion,
+			Name: ingest.ProfileCustom, Version: ingest.CustomProfileVersion,
 			SegmentDuration: a.v.GetDuration("ingest.segment_duration"),
 			SegmentFormat:   media.SegmentFormat(a.v.GetString("ingest.segment_format")),
 			EssenceStorage:  media.EssenceStorage(a.v.GetString("ingest.essence_storage")),

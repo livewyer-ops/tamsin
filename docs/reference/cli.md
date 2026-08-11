@@ -33,12 +33,13 @@ are flags only.
 | `tamsin config validate` | Validate the effective configuration without running an ingest |
 | `tamsin config show` | Show redacted effective values and their provenance |
 | `tamsin doctor` | Check runtime dependencies and optional TAMS connectivity |
+| `tamsin profiles` | List built-in ingest profiles and their resource trade-offs |
 | `tamsin completion` | Generate a shell completion script |
 | `tamsin help` | Show help for any command |
 
 Invoking `tamsin` with no subcommand runs `ingest`, so
-`tamsin --profile editorial -i input.mp4 -o URL` and
-`tamsin ingest --profile editorial -i input.mp4 -o URL` are equivalent.
+`tamsin --profile essence-segments -i input.mp4 -o URL` and
+`tamsin ingest --profile essence-segments -i input.mp4 -o URL` are equivalent.
 
 ## Configuration commands
 
@@ -51,6 +52,19 @@ Both commands honour `--config`, `TAMSIN_CONFIG`, the default configuration
 path, and the normal precedence rules. Output is pretty JSON in the default
 human presentation and compact JSON with `--format json`. These finite
 commands still write one document; only `ingest --format json` is NDJSON.
+
+## Profile catalogue
+
+`tamsin profiles` lists all selectable profiles in stable presentation order,
+including their version, storage arrangement, Segment target, format, FFmpeg
+use, nominal Object pattern, intended use, and resource impact. It deliberately
+does not load or validate configuration, so it remains available when a config
+file is broken or absent.
+
+With `--format json`, stdout is one document conforming to
+[`profiles-report-v1.json`](../../contracts/tamsin/profiles-report-v1.json).
+The report has `schema_version: "1.0"` and a separate
+`profile_policy_version`. It is not ingest NDJSON.
 
 ## Doctor flags
 
@@ -65,8 +79,8 @@ for check and output semantics.
 | `--ffmpeg-arg` |  | stringArray | additional explicit FFmpeg argument (repeatable) |
 | `--help` | `-h` |  | help for doctor |
 | `--online` |  |  | also run the read-only TAMS startup preflight |
-| `--profile` |  | string | versioned ingest profile: preserve, editorial, or streaming-ts |
-| `--segment-duration` | `-d` | duration | target duration of each TAMS Flow Segment; 0 stores the whole input as one Media Object (default 10s) |
+| `--profile` |  | string | versioned ingest profile: preserve, demux, muxed-segments, essence-segments, mpegts-segments |
+| `--segment-duration` | `-d` | duration | target duration of each TAMS Flow Segment; 0 disables segmentation, leaving storage to decide whole input or whole essence (default 10s) |
 | `--segment-format` |  | string | container for Flow Segments: source or mpegts (default "source") |
 | `--staging-byte-budget` |  | string | global temporary-media budget: auto or a byte size such as 80GiB (default "auto") |
 | `--storage-id` |  | string | target TAMS storage backend ID |
@@ -88,11 +102,11 @@ for check and output semantics.
 | `--journal` |  | string | create a new one-run durable JSONL result file |
 | `--max-inputs` |  | int | maximum unique inputs after directory, manifest, and S3 prefix expansion (default 10000) |
 | `--probe-concurrency` |  | int | maximum queued FFprobe measurements (local media processes are capped at two) |
-| `--profile` |  | string | versioned ingest profile: preserve, editorial, or streaming-ts |
+| `--profile` |  | string | versioned ingest profile: preserve, demux, muxed-segments, essence-segments, mpegts-segments |
 | `--s3-endpoint` |  | string | S3-compatible endpoint URL |
 | `--s3-path-style` |  |  | use path-style S3 addressing |
 | `--s3-region` |  | string | AWS region override for S3 inputs |
-| `--segment-duration` | `-d` | duration | target duration of each TAMS Flow Segment; 0 stores the whole input as one Media Object (default 10s) |
+| `--segment-duration` | `-d` | duration | target duration of each TAMS Flow Segment; 0 disables segmentation, leaving storage to decide whole input or whole essence (default 10s) |
 | `--segment-format` |  | string | container for Flow Segments: source or mpegts (default "source") |
 | `--source-id` |  | string | Source UUID for a single resolved input |
 | `--start` |  | string | Flow start as a TAMS timestamp (default "0:0") |
@@ -214,7 +228,7 @@ warning, failure, action-required state, or non-zero process status.
 
 Ingest `--format json` writes the `tamsin.ingest.events` NDJSON process
 protocol. Its stdout is machine-only; human progress is disabled regardless of
-`--progress`. Finite `api`, `doctor`, and `config` commands retain one
+`--progress`. Finite `api`, `doctor`, `profiles`, and `config` commands retain one
 command-specific JSON document. `--log-format` and `--log-level` independently
 control sanitised support logs on stderr. See [ingest output protocol and
 durable journal](result-contract.md) and [run and retry
@@ -225,8 +239,8 @@ observability](../explanation/observability.md).
 Both positional and flag forms are accepted:
 
 ```sh
-tamsin --profile editorial input.mp4 https://tams.example.com     # input, then endpoint
-tamsin --profile editorial -i input.mp4 -o https://tams.example.com
+tamsin --profile essence-segments input.mp4 https://tams.example.com     # input, then endpoint
+tamsin --profile essence-segments -i input.mp4 -o https://tams.example.com
 ```
 
 Values beginning with `-` must use the `=` form so they are not parsed as flags, which matters for `--ffmpeg-arg` and for OAuth client IDs that start with a hyphen:

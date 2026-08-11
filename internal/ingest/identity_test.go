@@ -214,7 +214,7 @@ func TestGeneratedIdentityCoversEveryMediaTreatmentField(t *testing.T) {
 	}
 	want := root("bytes-a", "media-a", base)
 	variations := map[string]func(*Config){
-		"profile":          func(config *Config) { config.Profile = "streaming-ts" },
+		"profile":          func(config *Config) { config.Profile = "mpegts-segments" },
 		"profile version":  func(config *Config) { config.ProfileVersion = "2" },
 		"segment duration": func(config *Config) { config.SegmentDuration = 2 * time.Second },
 		"segment format":   func(config *Config) { config.SegmentFormat = media.SegmentFormatMPEGTS },

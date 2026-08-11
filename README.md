@@ -23,7 +23,7 @@ and versioned NDJSON events are projections of the same ingest result.
 
 - Local files, directories, manifests, HTTP, S3, and standard input
 - Deterministic Source and Flow identities for safe retry and resume
-- Versioned ingest profiles for preservation, editorial, and streaming use
+- Versioned ingest profiles for whole-file, segmented, muxed, and independent storage
 - Independent or multiplexed essence storage
 - Byte verification, exact Segment rollback, and durable redacted journals
 - Human receipts, terminal-aware progress, and a bounded NDJSON event protocol
@@ -56,8 +56,10 @@ Profiles put the packaging decision up front and make it reproducible.
 | Profile | Essence storage | Segment target | Stored representation | Best suited to |
 | --- | --- | --- | --- | --- |
 | `preserve@1` | muxed | whole file | source bytes | archive, interchange, and evidence preservation |
-| `editorial@1` | independent | 10 seconds | source-family remux | TAMS-native essence access and production work |
-| `streaming-ts@1` | independent | 2 seconds | MPEG-TS | independently accessible short-form delivery Segments |
+| `demux@1` | independent | whole essence | source-family remux | transcription, analysis, and downstream proxy generation |
+| `muxed-segments@1` | muxed | 10 seconds | source-family remux | time-range access when consumers need the complete multiplex |
+| `essence-segments@1` | independent | 10 seconds | source-family remux | TAMS-native essence access and production work |
+| `mpegts-segments@1` | independent | 2 seconds | MPEG-TS | systems that explicitly require short MPEG-TS Objects |
 
 Ingest requires an explicit profile; it does not silently choose how to rewrite
 or preserve media. Select one with `--profile`, then override an individual
@@ -105,12 +107,12 @@ credentials for your TAMS service:
 ```sh
 export TAMSIN_AUTH_TOKEN='...'
 tamsin doctor --endpoint https://tams.example.com
-tamsin ingest --profile editorial \
+tamsin ingest --profile essence-segments \
   --input ./programme.ts \
   --endpoint https://tams.example.com
 ```
 
-The editorial profile stores a multiplexed input as one Flow per essence plus an
+The `essence-segments` profile stores a multiplexed input as one Flow per essence plus an
 empty collector Flow. A successful command ends with a permanent receipt that
 identifies the collection, essence Flows, verified Objects and bytes, profile,
 input digest, and run.
@@ -153,8 +155,9 @@ explanation develops the design and trade-offs.
 
 ## Requirements
 
-- Runtime: `ffprobe` and `ffmpeg` on `PATH` for `editorial@1` and
-  `streaming-ts@1`; `preserve@1` uploads source bytes without invoking FFmpeg
+- Runtime: `ffprobe` for every profile; `ffmpeg` for every segmented profile
+  and for `demux@1` when a multiplex has more than one essence. `preserve@1`
+  uploads source bytes without invoking FFmpeg
 - S3 inputs: credentials supplied through the standard AWS credential chain
 - Development: Go 1.26 or newer
 - Multi-platform distribution: Docker Buildx and amd64/arm64 binfmt handlers
