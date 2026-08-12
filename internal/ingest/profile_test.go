@@ -52,6 +52,38 @@ func TestNamedProfilesAreVersionedMediaContracts(t *testing.T) {
 	}
 }
 
+func TestAllBuiltInProfilesCompleteExactDryRuns(t *testing.T) {
+	t.Parallel()
+	filename := filepath.Join(t.TempDir(), "fixture.mp4")
+	if err := os.WriteFile(filename, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, definition := range BuiltInProfiles() {
+		t.Run(definition.Name, func(t *testing.T) {
+			t.Parallel()
+			pipeline, err := New(Config{
+				Profile: definition.Name, ProfileVersion: definition.Version,
+				SegmentDuration: definition.SegmentDuration, SegmentFormat: definition.SegmentFormat,
+				EssenceStorage: definition.EssenceStorage, DryRun: true, DryRunMode: DryRunExact,
+				Concurrency: 1, Transfers: 1, ProbeConcurrency: 1,
+			}, nil, fakeProber{}, fakeSegmenter{}, discardLogger(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
+			if err != nil {
+				t.Fatalf("Pipeline.Run() = _, %v, want nil", err)
+			}
+			if batch.Succeeded != 1 || batch.Failed != 0 || len(batch.Results) != 1 {
+				t.Fatalf("exact dry-run batch = %#v, want one successful result", batch)
+			}
+			if got := batch.Results[0].Status; got != ResultStatusPlanned {
+				t.Fatalf("exact dry-run result status = %q, want %q", got, ResultStatusPlanned)
+			}
+		})
+	}
+}
+
 func TestBuiltInProfileCatalogueIsStableAndDoesNotAliasRemovedNames(t *testing.T) {
 	t.Parallel()
 	definitions := BuiltInProfiles()

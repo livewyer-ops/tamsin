@@ -6,6 +6,14 @@ pin automation to a reviewed release and read this file before upgrading.
 
 ## Unreleased
 
+### Fixed
+
+- Compare generated Flow metadata with TAMS 8.2 Flow Profiles using JSON value
+  semantics. Numerically equal metadata now matches across Go integer,
+  `json.Number`, and exactly equivalent finite floating-point representations
+  without losing precision for integers larger than 2^53; all non-numeric
+  structure and value checks remain strict.
+
 ## [1.0.0] - 2026-08-12
 
 This first public release candidate establishes TAMSin's supported product,

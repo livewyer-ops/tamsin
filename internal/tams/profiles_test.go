@@ -65,7 +65,7 @@ func TestClientFlowProfileOperations(t *testing.T) {
 		writer.Header().Set("Content-Type", "application/json")
 		switch request.Method {
 		case http.MethodGet:
-			_, _ = io.WriteString(writer, `{"id":"`+profileID+`","label":"house","flow_metadata":{"format":"urn:x-nmos:format:audio"}}`)
+			_, _ = io.WriteString(writer, `{"id":"`+profileID+`","label":"house","flow_metadata":{"format":"urn:x-nmos:format:audio","essence_parameters":{"sample_rate":9007199254740993}}}`)
 		case http.MethodPost:
 			if err := json.NewDecoder(request.Body).Decode(&posted); err != nil {
 				t.Errorf("decode profile: %v", err)
@@ -83,7 +83,11 @@ func TestClientFlowProfileOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	profile, err := client.Profile(context.Background(), profileID)
-	if err != nil || profile["label"] != "house" {
+	if err != nil {
+		t.Fatal(err)
+	}
+	parameters := profile["flow_metadata"].(map[string]any)["essence_parameters"].(map[string]any)
+	if profile["label"] != "house" || parameters["sample_rate"] != json.Number("9007199254740993") {
 		t.Fatalf("Profile() = %#v, %v", profile, err)
 	}
 	created, err := client.CreateProfile(context.Background(), profileID, Profile{

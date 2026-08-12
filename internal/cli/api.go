@@ -523,6 +523,7 @@ func (a *application) readJSONFile(filename string, destination any) error {
 		return errors.New("JSON request must be an object, not null")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
 		return fmt.Errorf("decode JSON request: %w", err)

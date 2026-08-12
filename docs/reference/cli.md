@@ -130,12 +130,16 @@ flag value separated by a space is parsed as a positional argument.
 `--tams-flow-profile` is independent of TAMSin's local treatment `--profile`.
 It fetches an immutable TAMS 8.2 technical profile and requires the generated
 Flow to match it exactly, except that the profile's target `avg_bit_rate` may
-differ from measured output. A bare UUID requires exactly one eligible essence
-Flow. Use `video=UUID`, `audio=UUID`, or zero-based selectors such as
-`audio:1=UUID` when the graph contains several candidates. Assignment becomes
-part of deterministic Flow identity. In dry-run this option permits only the
-otherwise necessary `GET /service` and selected Profile GETs; it never reads
-storage backends or mutates TAMS.
+differ from measured output. Matching follows JSON value semantics: equal
+numbers compare equal regardless of their decoded Go numeric type, including
+integers larger than 2^53, while object fields, array order, strings, nulls,
+omitted values, and empty values remain distinct as required by the Profile.
+TAMSin does not materialise schema defaults to make a Profile match. A bare UUID
+requires exactly one eligible essence Flow. Use `video=UUID`, `audio=UUID`, or
+zero-based selectors such as `audio:1=UUID` when the graph contains several
+candidates. Assignment becomes part of deterministic Flow identity. In dry-run
+this option permits only the otherwise necessary `GET /service` and selected
+Profile GETs; it never reads storage backends or mutates TAMS.
 
 `--verify=auto` accepts trustworthy SHA-256 evidence returned by storage for a
 new upload and falls back to downloading the registered Object. Resumed Objects
