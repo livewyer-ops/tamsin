@@ -374,20 +374,17 @@ func TestPartialFlowGraphMutationIsExplicit(t *testing.T) {
 	}
 }
 
-// TestPipelineRecordsGeneration makes the no-transcode promise machine-
-// readable. Stream copy carries the coded essence through untouched, so the
-// Flow is generation 0. An explicit FFmpeg profile may re-encode and nothing
-// can tell from an argument list whether it does, so generation is left for the
-// operator rather than asserted wrongly.
-func TestPipelineRecordsGeneration(t *testing.T) {
+// TestPipelineDoesNotInventGeneration keeps this editorial lineage field
+// operator-owned. Stream copy does not prove that the input is camera-original
+// generation zero; it only proves this ingest did not add another generation.
+func TestPipelineDoesNotInventGeneration(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {
 		name       string
 		ffmpegArgs []string
-		wantSet    bool
 	}{
-		{name: "stream-copy", wantSet: true},
-		{name: "explicit-ffmpeg-profile", ffmpegArgs: []string{"-c:v", "libx264"}, wantSet: false},
+		{name: "stream-copy"},
+		{name: "explicit-ffmpeg-profile", ffmpegArgs: []string{"-c:v", "libx264"}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
@@ -423,14 +420,8 @@ func TestPipelineRecordsGeneration(t *testing.T) {
 			client.lock.Lock()
 			defer client.lock.Unlock()
 			generation, present := client.flows[batch.Results[0].RootFlowID]["generation"]
-			if testCase.wantSet {
-				if !present || generation != 0 {
-					t.Fatalf("stream copy should record generation 0, got %v (present=%v)", generation, present)
-				}
-				return
-			}
 			if present {
-				t.Fatalf("an explicit FFmpeg profile must not assert a generation, got %v", generation)
+				t.Fatalf("ingest must not assert editorial generation, got %v", generation)
 			}
 		})
 	}
@@ -1468,14 +1459,20 @@ type fakeClient struct {
 	// Object is registered before the next batch is allocated.
 	callLog         []string
 	serviceDocument map[string]any
+	profiles        map[string]tams.Profile
+	profileReads    int
+	serviceReads    int
+	backendReads    int
 	// flowReadErr fails the read that precedes a Flow write.
 	flowReadErr error
 	// backendsErr fails the startup storage backends request.
 	backendsErr error
 	// putFlowErrAt fails the numbered Flow PUT, allowing graph-transaction tests
 	// to observe a prefix written before the collector.
-	putFlowErrAt int
-	putFlowCalls int
+	putFlowErrAt       int
+	putFlowCalls       int
+	flowStatusWrites   []string
+	allocationStatuses []string
 	// registerSegmentsErr fails a bulk registration; registerSegmentsCommit is
 	// how many of the batch reach the store first. A commit of -1 means the
 	// whole batch lands and only the response is lost.
@@ -1499,10 +1496,26 @@ func newFakeClient() *fakeClient {
 		flows: make(map[string]tams.Flow), segments: make(map[string]map[string]tams.Segment),
 		objects: make(map[string][]byte), backends: []tams.StorageBackend{{ID: "storage", DefaultStorage: true}},
 		flowOrder: make(map[string]int),
+		profiles:  make(map[string]tams.Profile),
 	}
 }
 
+func (c *fakeClient) Profile(_ context.Context, id string) (tams.Profile, error) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	c.profileReads++
+	profile := c.profiles[id]
+	if profile == nil {
+		return nil, &tams.HTTPError{Method: http.MethodGet, URL: "service/profiles/" + id,
+			StatusCode: http.StatusNotFound, Status: "404 Not Found"}
+	}
+	return profile, nil
+}
+
 func (c *fakeClient) Service(context.Context) (map[string]any, error) {
+	c.lock.Lock()
+	c.serviceReads++
+	c.lock.Unlock()
 	if c.serviceDocument != nil {
 		return c.serviceDocument, nil
 	}
@@ -1512,6 +1525,9 @@ func (c *fakeClient) Service(context.Context) (map[string]any, error) {
 }
 
 func (c *fakeClient) StorageBackends(context.Context) ([]tams.StorageBackend, error) {
+	c.lock.Lock()
+	c.backendReads++
+	c.lock.Unlock()
 	if c.backendsErr != nil {
 		return nil, c.backendsErr
 	}
@@ -1543,6 +1559,9 @@ func (c *fakeClient) PutFlow(_ context.Context, id string, flow tams.Flow) (tams
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	c.putFlowCalls++
+	if status, _ := flow["status"].(string); status != "" {
+		c.flowStatusWrites = append(c.flowStatusWrites, status)
+	}
 	if c.putFlowErrAt > 0 && c.putFlowCalls == c.putFlowErrAt {
 		return nil, errors.New("injected Flow PUT failure")
 	}
@@ -1551,8 +1570,21 @@ func (c *fakeClient) PutFlow(_ context.Context, id string, flow tams.Flow) (tams
 		// already registered in the service.
 		c.flowOrder[id] = len(c.flowOrder)
 	}
-	c.flows[id] = flow
-	return flow, nil
+	stored := make(tams.Flow, len(flow)+len(profileTechnicalFields))
+	for key, value := range flow {
+		stored[key] = value
+	}
+	if profileID, _ := flow["profile_id"].(string); profileID != "" {
+		if profile := c.profiles[profileID]; profile != nil {
+			if metadata, ok := profile["flow_metadata"].(map[string]any); ok {
+				for key, value := range metadata {
+					stored[key] = value
+				}
+			}
+		}
+	}
+	c.flows[id] = stored
+	return stored, nil
 }
 
 func (c *fakeClient) record(call string) {
@@ -1561,10 +1593,12 @@ func (c *fakeClient) record(call string) {
 	c.lock.Unlock()
 }
 
-func (c *fakeClient) AllocateStorage(_ context.Context, _ string, request tams.StorageRequest) (tams.StorageResponse, error) {
+func (c *fakeClient) AllocateStorage(_ context.Context, flowID string, request tams.StorageRequest) (tams.StorageResponse, error) {
 	c.record(fmt.Sprintf("allocate:%d", len(request.ObjectIDs)))
 	c.lock.Lock()
 	c.allocations++
+	status, _ := c.flows[flowID]["status"].(string)
+	c.allocationStatuses = append(c.allocationStatuses, status)
 	c.maxAllocationObjects = max(c.maxAllocationObjects, len(request.ObjectIDs))
 	c.lock.Unlock()
 	response := tams.StorageResponse{MediaObjects: make([]tams.AllocatedObject, len(request.ObjectIDs))}
@@ -2130,14 +2164,16 @@ func TestIngestChecksTheStoreAPIVersion(t *testing.T) {
 			document: map[string]any{"api_version": "8.7"},
 		},
 		{
-			name:     "an older minor version is accepted",
+			name:     "a version below the compatibility floor is refused",
 			document: map[string]any{"api_version": "8.0"},
+			wantErr:  "supports TAMS 8.1",
 		},
 		{
-			// Required by the specification, but refusing a store that omits it
-			// would be a stricter rule than clients are asked to apply.
-			name:     "a missing version does not stop the ingest",
+			// Without the required capability boundary the client cannot safely
+			// choose between the 8.1 and 8.2 write representations.
+			name:     "a missing version is refused before mutation",
 			document: map[string]any{"name": "store"},
+			wantErr:  "did not report api_version",
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

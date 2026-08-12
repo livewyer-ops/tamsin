@@ -18,8 +18,9 @@ func TestCommandTreeExposesEveryAddressableCommand(t *testing.T) {
 
 	want := map[string][]string{
 		"tamsin":                     {"api", "completion", "config", "doctor", "ingest", "profiles"},
-		"tamsin api":                 {"flow", "object", "request", "segment", "service", "storage", "storage-backends"},
+		"tamsin api":                 {"flow", "flow-profile", "object", "request", "segment", "service", "storage", "storage-backends"},
 		"tamsin api flow":            {"get", "put"},
+		"tamsin api flow-profile":    {"create", "get", "list"},
 		"tamsin api storage":         {"allocate"},
 		"tamsin api segment":         {"delete", "list", "register"},
 		"tamsin api object":          {"get", "instance"},

@@ -2,7 +2,12 @@
 set -Eeuo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-contract="$root/contracts/tams-v8.1.json"
+contract_name="${TAMSIN_E2E_CONTRACT:-tams-v8.2.json}"
+case "$contract_name" in
+  tams-v8.1.json|tams-v8.2.json) ;;
+  *) echo "Unsupported TAMS E2E contract: $contract_name" >&2; exit 2 ;;
+esac
+contract="$root/contracts/$contract_name"
 
 require() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -27,6 +32,11 @@ PROFILE="$(contract_value '.tamoss.profile')"
 AQUA_VERSION="v2.60.1"
 PROJECT_NAME="tamsin-e2e"
 IMAGE="${IMAGE:-tamsin:dev}"
+prune_builder_cache="${TAMSIN_E2E_PRUNE_BUILDER_CACHE:-${CI:-false}}"
+case "$prune_builder_cache" in
+  true|false) ;;
+  *) echo "TAMSIN_E2E_PRUNE_BUILDER_CACHE must be true or false" >&2; exit 2 ;;
+esac
 # Use a dedicated loopback port so unrelated local ingress controllers cannot capture the matrix traffic.
 HTTPS_PORT="${TAMSIN_E2E_HTTPS_PORT:-18443}"
 API_URL="https://api.tamoss.localtest.me:$HTTPS_PORT"
@@ -229,13 +239,16 @@ EOF
 # instance disables the UI. On GitHub's runner that dead image, plus the build
 # cache for all three TAMOSS images and Tamsin itself, left too little space in
 # the Kind node to unpack PostgreSQL. Patch the pinned harness narrowly: omit
-# only the two UI image commands, and release unreferenced builder cache after
-# the API/operator images have been side-loaded. Retained images are not
-# pruned; the matrix still uses Tamsin from the host and TAMOSS from Kind.
-python3 - "$tamoss/.tasks/kind.yaml" <<'EOF'
+# only the two UI image commands. On CI, also release unreferenced builder cache
+# after the API/operator images have been side-loaded; local retries retain it
+# unless TAMSIN_E2E_PRUNE_BUILDER_CACHE explicitly requests pruning. Retained
+# images are never pruned; the matrix uses Tamsin from the host and TAMOSS from
+# Kind.
+python3 - "$tamoss/.tasks/kind.yaml" "$prune_builder_cache" <<'EOF'
 import sys
 
 path = sys.argv[1]
+prune_builder_cache = sys.argv[2] == "true"
 with open(path) as handle:
     contents = handle.read()
 
@@ -243,21 +256,30 @@ ui_commands = (
     '        task_kind_build_image "TAMOSS UI" "{{.UI_IMAGE}}" "" "src/app/frontend"\n',
     '        task_kind_load_image "{{.PROJECT_NAME}}" "TAMOSS UI" "{{.UI_IMAGE}}"\n',
 )
-for command in ui_commands:
-    if contents.count(command) != 1:
-        raise SystemExit(f"expected one pinned TAMOSS UI command, found {contents.count(command)}: {command.strip()}")
-    contents = contents.replace(command, "", 1)
-
 create_end = '          OPERATOR_IMAGE: "{{.OPERATOR_IMAGE}}"\n\n  delete:'
-if contents.count(create_end) != 1:
-    raise SystemExit("could not locate the end of pinned TAMOSS kind:create")
-contents = contents.replace(
-    create_end,
+patched_end = (
     '          OPERATOR_IMAGE: "{{.OPERATOR_IMAGE}}"\n'
     '      - docker builder prune --all --force\n\n'
-    '  delete:',
-    1,
+    '  delete:'
 )
+command_counts = [contents.count(command) for command in ui_commands]
+if command_counts == [1, 1]:
+    for command in ui_commands:
+        contents = contents.replace(command, "", 1)
+elif command_counts != [0, 0]:
+    raise SystemExit(f"pinned TAMOSS kind task has partial UI commands: counts={command_counts}")
+
+original_end_count = contents.count(create_end)
+patched_end_count = contents.count(patched_end)
+if original_end_count + patched_end_count != 1:
+    raise SystemExit(
+        "pinned TAMOSS kind task has an unexpected create-task ending: "
+        f"original={original_end_count}, patched={patched_end_count}"
+    )
+if prune_builder_cache and original_end_count == 1:
+    contents = contents.replace(create_end, patched_end, 1)
+elif not prune_builder_cache and patched_end_count == 1:
+    contents = contents.replace(patched_end, create_end, 1)
 
 with open(path, "w") as handle:
     handle.write(contents)
@@ -492,7 +514,7 @@ run_ingest() {
     -e TAMSIN_ENDPOINT -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_TOKEN \
     -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_LOG_LEVEL -e TAMSIN_FORMAT \
     -v "$fixtures:/fixtures:ro" -v "$journal_dir:/journals" \
-    "$IMAGE" --journal "/journals/$name.jsonl" "$@" >"$fixtures/$name.events.jsonl" || {
+    "$IMAGE" --profile essence-segments --journal "/journals/$name.jsonl" "$@" >"$fixtures/$name.events.jsonl" || {
       status=$?
       cat "$fixtures/$name.events.jsonl" >&2
       return "$status"
@@ -512,7 +534,7 @@ assert_ingest_artifacts() {
     .[0].type == "hello" and .[-1].type == "run.finished" and
     ([.[].seq] == [range(0; length)]) and
     ([.[].run_id] | unique | length) == 1 and
-    all(.[]; .protocol == "tamsin.ingest.events" and .protocol_version == "1.0") and
+    all(.[]; .protocol == "tamsin.ingest.events" and .protocol_version == "2.1") and
     ([.[] | select(.type == "input.finished")] | length) == $expected and
     (.[-1].payload.outcome == "succeeded" and
      .[-1].payload.exit_code == 0 and
@@ -529,8 +551,9 @@ assert_ingest_artifacts() {
   fi
   docker run --rm -v "$journal_dir:/journals:ro" --entrypoint cat "$IMAGE" "/journals/$name.jsonl" \
     | jq -s -e '
-    (first(.[] | select(.record_type == "start"))) as $start |
-    (first(.[] | select(.record_type == "summary"))) as $terminal |
+    . as $records |
+    (first($records[] | select(.record_type == "start"))) as $start |
+    (first($records[] | select(.record_type == "summary"))) as $terminal |
     {
       schema_version: $start.schema_version,
       tool_version: $start.tool_version,
@@ -541,19 +564,46 @@ assert_ingest_artifacts() {
       total: $terminal.summary.total,
       succeeded: $terminal.summary.succeeded,
       failed: $terminal.summary.failed,
-      results: ([.[] | select(.record_type == "result")] | sort_by(.index) | map(.result))
+      results: (
+        [$records[] | select(.record_type == "input")]
+        | sort_by(.index)
+        | map(
+            . as $input
+            | .result
+            | .flows = [
+                .flows[] as $flow
+                | $flow + {
+                    objects: [
+                      $records[]
+                      | select(
+                          .record_type == "object" and
+                          .index == $input.index and
+                          .flow_id == $flow.flow_id
+                        )
+                      | .object
+                    ]
+                  }
+              ]
+          )
+      )
     }
   ' >"$fixtures/$name.json" || {
     docker run --rm -v "$journal_dir:/journals:ro" --entrypoint cat "$IMAGE" "/journals/$name.jsonl" >&2
     return 1
   }
   jq -e --argjson expected "$expected" \
-	'.schema_version == "1.0" and ((.tool_version | length) > 0) and ((.tool_commit | length) > 0) and
+	'.schema_version == "2.1" and ((.tool_version | length) > 0) and ((.tool_commit | length) > 0) and
 	 ((.profile_version | length) > 0) and ((.run_id | length) > 0) and
 	 .failed == 0 and .succeeded == $expected and (.results | length) == $expected and
 	 all(.results[]; ((.profile | length) > 0) and ((.profile_version | length) > 0) and
 	     (.status == "ingested" or .status == "resumed") and .verification == "verified" and
-	     all(.flows[]; .disposition == "written" or .disposition == "unchanged") and
+	     all(.flows[];
+	       (.disposition == "written" or .disposition == "unchanged") and
+	       all((.objects // [])[];
+	         (.disposition == "ingested" or .disposition == "resumed") and
+	         .verification_status == "verified"
+	       )
+	     ) and
 	     ((((.flows | map((.objects // []) | length) | add) // 0) > 0)))' \
     "$fixtures/$name.json" >/dev/null || {
       cat "$fixtures/$name.json" >&2
@@ -613,10 +663,11 @@ assert_flow_conformance() {
     return 1
   }
 
-  # flow-core: generation 0 means the content came straight from its source. The
-  # matrix never passes --ffmpeg-arg, so every ingest here is a stream copy.
-  jq -e '.generation == 0' <<<"$flow" >/dev/null || {
-    printf 'e2e: %s Flow should record generation 0 for stream copy, got %s\n' \
+  # flow-core: generation records source lineage, which a local stream copy
+  # cannot infer. The matrix does not supply it, so Tamsin must leave it unset
+  # rather than claiming the input came directly from an originating device.
+  jq -e 'has("generation") | not' <<<"$flow" >/dev/null || {
+    printf 'e2e: %s Flow should leave operator-owned generation unset, got %s\n' \
       "$name" "$(jq -c '.generation' <<<"$flow")" >&2
     return 1
   }
@@ -706,7 +757,7 @@ assert_flow_conformance() {
 run_ingest local-file 1 -i /fixtures/single/demo.ts
 run_ingest local-file-resume 1 -i /fixtures/single/demo.ts
 jq -e '.results[0].status == "resumed" and .results[0].verification == "verified" and
-       all(.results[0].flows[]; all((.objects // [])[]; .status == "resumed"))' \
+       all(.results[0].flows[]; all((.objects // [])[]; .disposition == "resumed"))' \
   "$fixtures/local-file-resume.json" >/dev/null
 for flow_id in $(result_flow_ids "$fixtures/local-file.json"); do
   assert_flow_conformance local-file "$flow_id"
@@ -809,7 +860,7 @@ cat "$fixtures/single/demo.ts" \
       -e TAMSIN_ENDPOINT -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_TOKEN \
       -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_LOG_LEVEL -e TAMSIN_FORMAT \
       -v "$journal_dir:/journals" \
-      "$IMAGE" --journal /journals/stdin.jsonl -i - --stdin-name event.ts >"$fixtures/stdin.events.jsonl"
+      "$IMAGE" --profile essence-segments --journal /journals/stdin.jsonl -i - --stdin-name event.ts >"$fixtures/stdin.events.jsonl"
 assert_ingest_artifacts stdin 1
 # This is deliberately the same media and treatment as local-file above.
 # Locator-independent identity must therefore resume the existing graph even
@@ -844,7 +895,7 @@ docker run --rm --network host "${docker_host_args[@]}" \
   -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_LOG_LEVEL -e TAMSIN_FORMAT \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
   -v "$journal_dir:/journals" \
-  "$IMAGE" --journal /journals/s3.jsonl -i s3://tamsin-inputs/ --s3-endpoint "$S3_URL" --s3-path-style >"$fixtures/s3.events.jsonl"
+  "$IMAGE" --profile essence-segments --journal /journals/s3.jsonl -i s3://tamsin-inputs/ --s3-endpoint "$S3_URL" --s3-path-style >"$fixtures/s3.events.jsonl"
 assert_ingest_artifacts s3 1
 jq -e '.failed == 0 and .succeeded == 1 and .results[0].status == "ingested"' "$fixtures/s3.json" >/dev/null
 
@@ -866,5 +917,5 @@ TAMSIN_AUTH_MODE=oauth-client docker run --rm --network host "${docker_host_args
   -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_FORMAT \
   "$IMAGE" api service >/dev/null
 
-printf 'TAMOSS %s end-to-end matrix passed with profile %s: local, deterministic resume, Object instances, directory, manifest, HTTP, stdin, S3, whole-file, MPEG-TS segments, Segment retraction, bearer, URL token, and OAuth client credentials.\nFlows read back from the live service satisfied AppNote 0003 tag naming, AppNote 0006 container and collection rules, and flow-core generation.\n' \
+printf 'TAMOSS %s end-to-end matrix passed with profile %s: local, deterministic resume, Object instances, directory, manifest, HTTP, stdin, S3, whole-file, MPEG-TS segments, Segment retraction, bearer, URL token, and OAuth client credentials.\nFlows read back from the live service satisfied AppNote 0003 tag naming, AppNote 0006 container and collection rules, and operator-owned generation handling.\n' \
   "$TAMOSS_RELEASE" "$PROFILE"

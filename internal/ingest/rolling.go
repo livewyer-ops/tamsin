@@ -298,6 +298,7 @@ func (p *Pipeline) beginRollingFlowPlan(ctx context.Context, inputURI string, gr
 	// an in-memory client can make an unwritten mutation look persisted.
 	for index := range state.planned {
 		state.planned[index].effective = maps.Clone(state.planned[index].effective)
+		state.planned[index].request = maps.Clone(state.planned[index].request)
 	}
 	if err := writeFlowGraph(ctx, p, &state); err != nil {
 		return nil, err
@@ -316,7 +317,11 @@ func (p *Pipeline) finishRollingFlowMetadata(ctx context.Context, graph flowGrap
 	for index := range planned {
 		member := byID[planned[index].member.id]
 		planned[index].changed = false
-		for _, field := range []string{"avg_bit_rate", "max_bit_rate"} {
+		fields := []string{"avg_bit_rate", "max_bit_rate"}
+		if planned[index].member.profileID != "" {
+			fields = []string{"max_bit_rate"}
+		}
+		for _, field := range fields {
 			if value, present := member.flow[field]; present {
 				if planned[index].effective[field] != value {
 					planned[index].effective[field] = value
@@ -324,9 +329,14 @@ func (p *Pipeline) finishRollingFlowMetadata(ctx context.Context, graph flowGrap
 				}
 			}
 		}
-		if err := contracts.ValidateFlow(planned[index].effective); err != nil {
+		planned[index].request = flowPutProjection(planned[index].effective, planned[index].member.profileID)
+		if err := contracts.ValidateFlowGet(p.apiVersion, planned[index].effective); err != nil {
 			return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
 				fmt.Errorf("final rolling Flow metadata for %s is invalid at %w", member.id, err))
+		}
+		if err := contracts.ValidateFlowPut(p.apiVersion, planned[index].request); err != nil {
+			return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
+				fmt.Errorf("final rolling Flow PUT metadata for %s is invalid at %w", member.id, err))
 		}
 	}
 	if err := validateFlowGraph(graph, planned); err != nil {
@@ -368,8 +378,8 @@ func rollingResultStatus(result Result) ResultStatus {
 
 func (p *Pipeline) ingestMuxedRolling(ctx context.Context, itemLabel string, staged stagedFile,
 	flow tams.Flow, flowInfo media.FlowInfo, flowID, sourceID, storageID string,
-	collected []collectedFlow, ffmpegVersion, toolchainFingerprint string) (Result, error) {
-	result := Result{
+	collected []collectedFlow, ffmpegVersion, toolchainFingerprint string) (result Result, returnErr error) {
+	result = Result{
 		Input: itemLabel, Profile: p.config.Profile, ProfileVersion: p.config.ProfileVersion,
 		FFmpegVersion: ffmpegVersion, MediaToolchain: toolchainFingerprint,
 		RootFlowID: flowID, Bytes: staged.size, SHA256: staged.sha256,
@@ -405,6 +415,7 @@ func (p *Pipeline) ingestMuxedRolling(ctx context.Context, itemLabel string, sta
 	if err != nil {
 		return result, err
 	}
+	defer p.finishRollingFlowStatus(ctx, graph, &returnErr)
 
 	state := &rollingFlowState{
 		flowID: flowID, resultIndex: rootIndex, flow: flow,
@@ -454,8 +465,8 @@ func rollingExecutionError(renderErr, finishErr error) error {
 }
 
 func (p *Pipeline) ingestIndependentRolling(ctx context.Context, itemLabel string, staged stagedFile,
-	collector tams.Flow, flowInfo media.FlowInfo, collectorID, collectorSourceID, storageID string) (Result, error) {
-	result := Result{
+	collector tams.Flow, flowInfo media.FlowInfo, collectorID, collectorSourceID, storageID string) (result Result, returnErr error) {
+	result = Result{
 		Input: itemLabel, Profile: p.config.Profile, ProfileVersion: p.config.ProfileVersion,
 		RootFlowID: collectorID, Bytes: staged.size, SHA256: staged.sha256,
 		Status: ResultStatusPlanned, Verification: p.initialVerificationStatus(),
@@ -477,9 +488,6 @@ func (p *Pipeline) ingestIndependentRolling(ctx context.Context, itemLabel strin
 		mergeFlow(flow, p.config.FlowMetadata)
 		flow["id"] = flowID
 		flow["source_id"] = sourceID
-		if len(p.config.FFmpegArgs) == 0 {
-			flow["generation"] = 0
-		}
 		flow["segment_duration"] = durationRational(p.config.SegmentDuration)
 		if container := p.config.SegmentFormat.ContainerMIME(); container != "" {
 			flow["container"] = container
@@ -504,9 +512,6 @@ func (p *Pipeline) ingestIndependentRolling(ctx context.Context, itemLabel strin
 	collector["source_id"] = collectorSourceID
 	collector["flow_collection"] = collectionItems
 	delete(collector, "container")
-	if len(p.config.FFmpegArgs) == 0 {
-		collector["generation"] = 0
-	}
 	graph.flows = append(graph.flows, graphFlow{id: collectorID, role: "multi", flow: collector})
 	if !staged.owned {
 		if err := ensureStagedInputUnchanged(ctx, staged); err != nil {
@@ -517,6 +522,7 @@ func (p *Pipeline) ingestIndependentRolling(ctx context.Context, itemLabel strin
 	if err != nil {
 		return result, err
 	}
+	defer p.finishRollingFlowStatus(ctx, graph, &returnErr)
 
 	window := p.rollingStagingWindow(staged)
 	execution := newRollingExecution(p, ctx, &result, storageID, window, states...)

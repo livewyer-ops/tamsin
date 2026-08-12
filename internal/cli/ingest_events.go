@@ -227,7 +227,7 @@ func (o *ingestEventOutput) FlowPlanned(index int, plan ingest.FlowPlan) error {
 	event := ingestevent.FlowPlanned{
 		FlowID: plan.FlowID, SourceID: plan.SourceID, Kind: kind, Role: plan.Role,
 		Root: plan.Root, ParentFlowID: plan.ParentFlowID,
-		Format: plan.Format, Container: plan.Container,
+		Format: plan.Format, Container: plan.Container, TAMSFlowProfileID: plan.TAMSFlowProfileID,
 	}
 	if o.plannedFlows[index] == nil {
 		o.plannedFlows[index] = make(map[string]ingestevent.FlowPlanned)
@@ -408,7 +408,8 @@ func (o *ingestEventOutput) resultLocked(index int, result ingest.Result) error 
 		}
 		if err := o.emitLocked(ingestevent.FlowScope(index, flow.FlowID), ingestevent.FlowResult{
 			FlowID: flow.FlowID, SourceID: flow.SourceID, Kind: planned.Kind, Role: planned.Role,
-			Disposition: ingestevent.FlowDisposition(flow.Disposition), ObjectSummary: eventObjectSummary(flow.ObjectSummary),
+			TAMSFlowProfileID: flow.TAMSFlowProfileID,
+			Disposition:       ingestevent.FlowDisposition(flow.Disposition), ObjectSummary: eventObjectSummary(flow.ObjectSummary),
 		}); err != nil {
 			return err
 		}

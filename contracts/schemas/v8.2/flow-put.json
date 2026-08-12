@@ -1,0 +1,42 @@
+{
+    "type": "object",
+    "description": "Describes a Flow",
+    "title": "Flow",
+    "allOf": [
+        {
+            "$ref": "flow-common.json"
+        },
+        {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "title": "Flow Profile",
+                    "required": [
+                        "profile_id"
+                    ],
+                    "properties": {
+                        "profile_id": {
+                            "description": "Profile identifier that was used to create the flow.  When supplying a profile_id no metadata which can be contained in a Profile should also be provided, doing so will result in a 400 validation error.  Trying to create a Flow using a Profile ID that does not exist should also provide a 400 validation error",
+                            "$ref": "uuid.json"
+                        }
+                    }
+                },
+                {
+                    "$ref": "flow-video.json"
+                },
+                {
+                    "$ref": "flow-audio.json"
+                },
+                {
+                    "$ref": "flow-image.json"
+                },
+                {
+                    "$ref": "flow-data.json"
+                },
+                {
+                    "$ref": "flow-multi.json"
+                }
+            ]
+        }
+    ]
+}

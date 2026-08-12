@@ -244,7 +244,7 @@ func TestRendererEpochAndByteProfilesDeriveStableFlowIDs(t *testing.T) {
 	newProfile := config
 	newProfile.ProfileVersion = "2"
 	differentProfileVersion := namedID("flow", "input", flowProfile("bytes-one", newProfile))
-	differentRendererEpoch := namedID("flow", "input", flowProfileForRendererEpoch("bytes-one", config, "2"))
+	differentRendererEpoch := namedID("flow", "input", flowProfileForRendererEpoch("bytes-one", config, "3"))
 	for label, id := range map[string]string{
 		"different bytes": differentBytes, "different semantic profile": differentProfileVersion,
 		"different renderer epoch": differentRendererEpoch,
@@ -253,7 +253,7 @@ func TestRendererEpochAndByteProfilesDeriveStableFlowIDs(t *testing.T) {
 			t.Fatalf("%s derived the same Flow ID %s", label, id)
 		}
 	}
-	if rendererIdentityEpoch != "1" {
+	if rendererIdentityEpoch != "2" {
 		t.Fatalf("renderer identity epoch changed without an explicit migration: %q", rendererIdentityEpoch)
 	}
 }

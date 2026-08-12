@@ -23,14 +23,15 @@ const (
 // transfer begins. Exact Object totals arrive incrementally instead of making
 // planning retain or predict an entire rendered output.
 type FlowPlan struct {
-	FlowID       string
-	SourceID     string
-	Kind         FlowKind
-	Role         string
-	Root         bool
-	ParentFlowID string
-	Format       string
-	Container    string
+	FlowID            string
+	SourceID          string
+	Kind              FlowKind
+	Role              string
+	Root              bool
+	ParentFlowID      string
+	Format            string
+	Container         string
+	TAMSFlowProfileID string
 }
 
 // LifecycleObserver separates durable process lifecycle from optional
@@ -135,6 +136,14 @@ func publicObjectResult(object ObjectResult) ObjectResult {
 }
 
 func (p *Pipeline) observeFlowPlans(ctx context.Context, graph flowGraph, planned []plannedFlowWrite, results []FlowResult) error {
+	for _, write := range planned {
+		for resultIndex := range results {
+			if results[resultIndex].FlowID == write.member.id {
+				results[resultIndex].TAMSFlowProfileID = write.member.profileID
+				break
+			}
+		}
+	}
 	if p.config.LifecycleObserver == nil {
 		return nil
 	}
@@ -142,7 +151,6 @@ func (p *Pipeline) observeFlowPlans(ctx context.Context, graph flowGraph, planne
 	if !ok {
 		return fmt.Errorf("publish Flow plan: input index is missing")
 	}
-	_ = results
 	rootID := graph.collectorID
 	if rootID == "" && len(graph.flows) == 1 {
 		rootID = graph.flows[0].id
@@ -151,7 +159,8 @@ func (p *Pipeline) observeFlowPlans(ctx context.Context, graph flowGraph, planne
 		plan := FlowPlan{
 			FlowID: write.member.id, SourceID: stringField(write.effective, "source_id"),
 			Kind: flowPlanKind(graph, write.member), Format: stringField(write.effective, "format"),
-			Container: stringField(write.effective, "container"),
+			Container:         stringField(write.effective, "container"),
+			TAMSFlowProfileID: write.member.profileID,
 		}
 		plan.Role = flowPlanRole(plan.Kind, write.member.role, plan.Format)
 		plan.Root = plan.FlowID == rootID

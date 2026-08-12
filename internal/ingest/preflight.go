@@ -112,35 +112,41 @@ func selectStorage(state *startupState) error {
 }
 
 // APICompatibility is the result of comparing a service document with the
-// pinned TAMS specification. Unknown is deliberately non-fatal for parity with
-// ingest: api_version is required upstream, but older deployed services have
-// omitted it and the operations may still be usable.
+// pinned TAMS specification. api_version is a required capability boundary:
+// missing or malformed values fail before any mutation rather than making the
+// client guess which wire contract to send.
 type APICompatibility struct {
 	StoreVersion  string
 	TargetVersion string
 	Relationship  string
 	Warning       string
+	Version       tams.APIVersion
 }
 
 // AssessAPIVersion applies the startup compatibility policy shared by ingest
-// and doctor. A different major revision is incompatible; older and newer
-// minor revisions remain usable and are made visible to the operator.
+// and doctor. TAMS 8.1 is the compatibility floor, 8.2 is the target, and
+// newer 8.x revisions retain the additive-minor compatibility rule.
 func AssessAPIVersion(service map[string]any) (APICompatibility, error) {
 	assessment := APICompatibility{
 		TargetVersion: fmt.Sprintf("%d.%d", tams.SpecMajor, tams.SpecMinor),
 	}
 	version, err := tams.ParseAPIVersion(service)
 	if err != nil {
-		assessment.Relationship = "unknown"
-		assessment.Warning = err.Error()
-		return assessment, nil
+		assessment.Relationship = "invalid"
+		return assessment, err
 	}
+	assessment.Version = version
 	assessment.StoreVersion = version.String()
 	if !version.SupportsSpec() {
 		assessment.Relationship = "incompatible"
+		if version.Major != tams.SpecMajor {
+			return assessment, fmt.Errorf(
+				"this store implements TAMS %s, and tamsin is written against %s; a differing major version is not compatible",
+				version, assessment.TargetVersion)
+		}
 		return assessment, fmt.Errorf(
-			"this store implements TAMS %s, and tamsin is written against %s; a differing major version is not compatible",
-			version, assessment.TargetVersion)
+			"this store implements TAMS %s; tamsin supports TAMS %d.%d and newer %d.x revisions",
+			version, tams.SpecMajor, tams.CompatibilityMinor, tams.SpecMajor)
 	}
 	switch {
 	case version.Predates():

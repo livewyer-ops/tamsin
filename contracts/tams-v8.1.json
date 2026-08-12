@@ -213,10 +213,10 @@
       "asserted_by": "cli.TestCLIAPISegmentListDownloadURLsAreOptIn, ingest.TestListingsOnlyRequestDownloadURLsWhenRead"
     },
     {
-      "id": "generation-records-transcode",
+      "id": "generation-remains-operator-owned",
       "source": "schema/flow-core",
-      "requirement": "generation is 0 where content came straight from its source and is incremented per lossy transcode.",
-      "asserted_by": "ingest.TestPipelineRecordsGeneration"
+      "requirement": "generation is optional source lineage metadata; Tamsin does not invent a value from its local treatment profile because it cannot know the upstream generation.",
+      "asserted_by": "ingest.TestPipelineDoesNotInventGeneration"
     },
     {
       "id": "verify-then-retract",
@@ -257,8 +257,8 @@
     {
       "id": "no-post-pin-properties",
       "source": "schema/flow-segment-post",
-      "requirement": "Properties absent from the pinned schemas, such as init_object_id and init_segments, are not sent.",
-      "asserted_by": "contracts.TestSegmentRequestOmitsPostPinnedFields"
+      "requirement": "Properties absent from the 8.1 schema remain omitted on the 8.1 compatibility path; init_object_id is only emitted when explicitly supplied to an 8.2 service.",
+      "asserted_by": "contracts.TestSegmentRequestOmitsUnsetInitObjectID"
     },
     {
       "id": "independent-essences-own-objects",

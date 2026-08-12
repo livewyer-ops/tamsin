@@ -117,7 +117,7 @@ func flowIdentityFields(flow tams.Flow) tams.Flow {
 	technical := make(tams.Flow, len(flow))
 	for key, value := range flow {
 		switch key {
-		case "id", "source_id", "label", "description", "tags":
+		case "id", "source_id", "label", "description", "tags", "status":
 			continue
 		default:
 			technical[key] = value

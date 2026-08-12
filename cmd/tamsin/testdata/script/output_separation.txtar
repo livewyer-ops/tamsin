@@ -12,7 +12,7 @@ stderr 'preparing input'
 cp stdout events.ndjson
 checkevents events.ndjson succeeded 1 0 planned
 exec cat events.ndjson
-stdout '^\{"protocol":"tamsin.ingest.events","protocol_version":"2.0","type":"hello","seq":0,'
+stdout '^\{"protocol":"tamsin.ingest.events","protocol_version":"2.1","type":"hello","seq":0,'
 stdout '"type":"object.result".*"disposition":"planned".*"verification_status":"not_reached"'
 stdout '"type":"input.finished".*"status":"planned"'
 stdout '"type":"run.finished".*"outcome":"succeeded".*"exit_code":0'
@@ -41,7 +41,7 @@ exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format human --
 exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format human --verbose --color never --log-level error -d 0 --dry-run=exact -i input.mp4
 stdout '^    disposition planned$'
 stdout '^    planned object [0-9a-f-]+$'
-stdout '^  result schema 2.0$'
+stdout '^  result schema 2.1$'
 ! stdout '\x1b'
 
 # Explicit colour is honoured even when stdout is redirected; auto/never are

@@ -9,7 +9,8 @@
 !contracts/
 !contracts/**/*.go
 !contracts/schemas/
-!contracts/schemas/*.json
+!contracts/schemas/**/
+!contracts/schemas/**/*.json
 !ingestevent/
 !ingestevent/**/*.go
 !internal/

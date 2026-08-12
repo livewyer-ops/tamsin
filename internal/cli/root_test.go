@@ -407,6 +407,54 @@ func TestCLIAPIService(t *testing.T) {
 	}
 }
 
+func TestCLIAPIFlowProfileOperations(t *testing.T) {
+	t.Parallel()
+	const profileID = "33333333-3333-4333-8333-333333333333"
+	var created map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/service/profiles":
+			if request.URL.Query().Get("format") != "urn:x-nmos:format:video" || request.URL.Query().Get("codec") != "video/h264" || request.URL.Query().Get("label") != "house" {
+				http.Error(writer, "missing filters", http.StatusBadRequest)
+				return
+			}
+			_, _ = io.WriteString(writer, `[{"id":"`+profileID+`","label":"house","flow_metadata":{"format":"urn:x-nmos:format:video"}}]`)
+		case request.Method == http.MethodGet && request.URL.Path == "/service/profiles/"+profileID:
+			_, _ = io.WriteString(writer, `{"id":"`+profileID+`","label":"house","flow_metadata":{"format":"urn:x-nmos:format:video"}}`)
+		case request.Method == http.MethodPost && request.URL.Path == "/service/profiles/"+profileID:
+			if err := json.NewDecoder(request.Body).Decode(&created); err != nil {
+				t.Errorf("decode profile: %v", err)
+			}
+			writer.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(writer).Encode(created)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	run := func(arguments []string, input string) string {
+		t.Helper()
+		base := []string{"--endpoint", server.URL, "--auth", "none", "--format", "json", "api", "flow-profile"}
+		var stdout, stderr bytes.Buffer
+		if code := Execute(context.Background(), append(base, arguments...), strings.NewReader(input), &stdout, &stderr); code != ExitOK {
+			t.Fatalf("%v exit = %d; stdout=%s stderr=%s", arguments, code, stdout.String(), stderr.String())
+		}
+		return stdout.String()
+	}
+	if output := run([]string{"list", "--format", "urn:x-nmos:format:video", "--codec", "video/h264", "--label", "house"}, ""); !strings.Contains(output, profileID) {
+		t.Fatalf("list output = %s", output)
+	}
+	if output := run([]string{"get", profileID}, ""); !strings.Contains(output, `"label":"house"`) {
+		t.Fatalf("get output = %s", output)
+	}
+	run([]string{"create", profileID}, `{"id":"ignored","label":"new","flow_metadata":{"format":"urn:x-nmos:format:video"}}`)
+	if created["id"] != profileID || created["label"] != "new" {
+		t.Fatalf("created profile = %#v", created)
+	}
+}
+
 func TestCLIAPIStorageAllocationRequiresOneMode(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {
@@ -447,6 +495,37 @@ func TestCLIAPIStorageAllocationRequiresOneMode(t *testing.T) {
 				t.Fatalf("request body = %#v", requestBody)
 			}
 		})
+	}
+}
+
+func TestCLIAPIStorageAllocationSupportsTAMS82Options(t *testing.T) {
+	t.Parallel()
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/flows/flow/storage" {
+			http.NotFound(writer, request)
+			return
+		}
+		if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(writer, `{"media_objects":[]}`)
+	}))
+	defer server.Close()
+
+	arguments := []string{
+		"--endpoint", server.URL, "--auth", "none", "--format", "json",
+		"api", "storage", "allocate", "flow", "--object-id", "object-1",
+		"--content-type", "video/mp4", "--presigned=false",
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Execute(context.Background(), arguments, strings.NewReader(""), &stdout, &stderr); code != ExitOK {
+		t.Fatalf("exit = %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if requestBody["content_type"] != "video/mp4" || requestBody["presigned"] != false {
+		t.Fatalf("request body = %#v", requestBody)
 	}
 }
 

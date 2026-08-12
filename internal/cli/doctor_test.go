@@ -316,7 +316,7 @@ func TestDoctorOnlineChecksAPIVersionWithoutMutation(t *testing.T) {
 		wantStatus   string
 		relationship string
 	}{
-		{version: "8.0", wantCode: ExitOK, wantStatus: doctorPass, relationship: "older"},
+		{version: "8.0", wantCode: ExitRemote, wantStatus: doctorFail, relationship: "incompatible"},
 		{version: "8.7", wantCode: ExitOK, wantStatus: doctorPass, relationship: "newer"},
 		{version: "9.0", wantCode: ExitRemote, wantStatus: doctorFail, relationship: "incompatible"},
 	} {

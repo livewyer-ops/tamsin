@@ -449,6 +449,11 @@ func (r *Reducer) applyFlowPlanned(scope *Scope, value FlowPlanned) error {
 			return fmt.Errorf("parent_flow_id must be a UUID: %w", err)
 		}
 	}
+	if value.TAMSFlowProfileID != "" {
+		if _, err := uuid.Parse(value.TAMSFlowProfileID); err != nil {
+			return fmt.Errorf("tams_flow_profile_id must be a UUID: %w", err)
+		}
+	}
 	if _, duplicate := input.PlannedFlows[value.FlowID]; duplicate {
 		return fmt.Errorf("flow %s was already planned", value.FlowID)
 	}
@@ -601,7 +606,8 @@ func (r *Reducer) applyFlowResult(scope *Scope, value FlowResult) error {
 		return fmt.Errorf("flow %s already has a terminal result", value.FlowID)
 	}
 	if planned, exists := input.PlannedFlows[value.FlowID]; exists {
-		if planned.SourceID != value.SourceID || planned.Kind != value.Kind || planned.Role != value.Role {
+		if planned.SourceID != value.SourceID || planned.Kind != value.Kind || planned.Role != value.Role ||
+			planned.TAMSFlowProfileID != value.TAMSFlowProfileID {
 			return fmt.Errorf("flow %s terminal identity differs from its plan", value.FlowID)
 		}
 	}

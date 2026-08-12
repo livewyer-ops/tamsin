@@ -42,11 +42,12 @@ const multiOutputEssenceThreshold = 4
 // rendererIdentityEpoch changes only when TAMSin deliberately changes the
 // semantics of media it writes. Package rebuilds and FFmpeg patch releases are
 // provenance, not a new ingest policy, and must not manufacture a new Flow.
-const rendererIdentityEpoch = "1"
+const rendererIdentityEpoch = "2"
 
 type TAMSClient interface {
 	Service(context.Context) (map[string]any, error)
 	StorageBackends(context.Context) ([]tams.StorageBackend, error)
+	Profile(context.Context, string) (tams.Profile, error)
 	Flow(context.Context, string) (tams.Flow, error)
 	PutFlow(context.Context, string, tams.Flow) (tams.Flow, error)
 	AllocateStorage(context.Context, string, tams.StorageRequest) (tams.StorageResponse, error)
@@ -79,6 +80,7 @@ type graphFlow struct {
 	flow             tams.Flow
 	ownsMedia        bool
 	containerMapping map[string]any
+	profileID        string
 }
 
 type flowGraph struct {
@@ -90,6 +92,7 @@ type flowGraph struct {
 type plannedFlowWrite struct {
 	member    graphFlow
 	effective tams.Flow
+	request   tams.Flow
 	existed   bool
 	changed   bool
 }
@@ -146,6 +149,9 @@ type Config struct {
 	FlowID            string
 	SourceID          string
 	FlowMetadata      tams.Flow
+	// TAMSFlowProfiles assigns immutable TAMS 8.2 Flow Profiles using
+	// [format[:index]=]UUID selectors.
+	TAMSFlowProfiles []string
 }
 
 type Pipeline struct {
@@ -164,6 +170,12 @@ type Pipeline struct {
 	// mediaProcesses is shared by FFprobe and FFmpeg. Ordinary probes and
 	// stream-copy renders take one token; custom FFmpeg work takes both.
 	mediaProcesses *semaphore.Weighted
+	// rollingRenders prevents two live FFmpeg segmenters from each occupying
+	// one media-process token and then both waiting forever for their sink's
+	// nested FFprobe to acquire the other. A rolling render keeps one process
+	// slot available for measurement while preserving the global two-process
+	// ceiling.
+	rollingRenders chan struct{}
 	// graphLocks serializes inputs that converge on the same generated Flow
 	// graph. URI-based identities happened to keep differently located copies
 	// apart; content-based identities deliberately do not, so two workers in one
@@ -174,6 +186,12 @@ type Pipeline struct {
 	// limits are what the store says about how long the things it hands out
 	// last. Set once before any work starts, then only read.
 	limits               tams.ServiceLimits
+	apiVersion           tams.APIVersion
+	profileAssignments   []flowProfileAssignment
+	profileMu            sync.Mutex
+	profileCache         map[string]tams.Profile
+	flowStatusMu         sync.Mutex
+	flowStatuses         map[string]string
 	client               TAMSClient
 	prober               media.Prober
 	segmenter            media.Segmenter
@@ -276,12 +294,13 @@ type ObjectSummary struct {
 // in Result.Flows; Result.RootFlowID points at the Flow which represents the
 // input as a whole rather than duplicating it at the Result level.
 type FlowResult struct {
-	FlowID        string          `json:"flow_id"`
-	SourceID      string          `json:"source_id"`
-	Role          string          `json:"role,omitempty"`
-	Disposition   FlowDisposition `json:"disposition"`
-	ObjectSummary ObjectSummary   `json:"object_summary"`
-	Objects       []ObjectResult  `json:"-"`
+	FlowID            string          `json:"flow_id"`
+	SourceID          string          `json:"source_id"`
+	Role              string          `json:"role,omitempty"`
+	TAMSFlowProfileID string          `json:"tams_flow_profile_id,omitempty"`
+	Disposition       FlowDisposition `json:"disposition"`
+	ObjectSummary     ObjectSummary   `json:"object_summary"`
+	Objects           []ObjectResult  `json:"-"`
 	// Kind prevents terminal consumers from inferring media ownership from an
 	// empty role or Object count.
 	Kind FlowKind `json:"kind"`
@@ -323,7 +342,7 @@ const (
 	// the strict schema rejects unknown properties, so even an optional field
 	// cannot be added under the same version. Profile versions are carried by
 	// each result and batch independently of the executable and result schema.
-	ResultSchemaVersion = "2.0"
+	ResultSchemaVersion = "2.1"
 )
 
 // Failure is the stable, disclosure-safe terminal explanation shared by the
@@ -458,6 +477,11 @@ func New(config Config, client TAMSClient, prober media.Prober, segmenter media.
 	if err := validateFlowMetadataOverrides(config.FlowMetadata); err != nil {
 		return nil, err
 	}
+	profileAssignments, normalizedProfiles, err := parseFlowProfileAssignments(config.TAMSFlowProfiles)
+	if err != nil {
+		return nil, err
+	}
+	config.TAMSFlowProfiles = normalizedProfiles
 	for _, identifier := range [...]struct {
 		label string
 		value string
@@ -473,8 +497,8 @@ func New(config Config, client TAMSClient, prober media.Prober, segmenter media.
 			return nil, fmt.Errorf("%s must be a UUID: %w", identifier.label, err)
 		}
 	}
-	if !config.DryRun && client == nil {
-		return nil, errors.New("TAMS client is required unless dry-run is enabled")
+	if (!config.DryRun || len(profileAssignments) > 0) && client == nil {
+		return nil, errors.New("TAMS client is required unless dry-run is enabled without a TAMS Flow Profile")
 	}
 	if prober == nil {
 		return nil, errors.New("media prober is required")
@@ -503,7 +527,12 @@ func New(config Config, client TAMSClient, prober media.Prober, segmenter media.
 		observability: run, baseLogger: baseLogger, ownsObservability: ownsObservability,
 		reporter: reporter, transfers: make(chan struct{}, config.Transfers),
 		probes: make(chan struct{}, config.ProbeConcurrency), mediaProcesses: semaphore.NewWeighted(2),
+		rollingRenders:              make(chan struct{}, 1),
 		graphLocks:                  make(map[string]*graphLock),
+		apiVersion:                  tams.APIVersion{Major: tams.SpecMajor, Minor: tams.SpecMinor},
+		profileAssignments:          profileAssignments,
+		profileCache:                make(map[string]tams.Profile),
+		flowStatuses:                make(map[string]string),
 		registrationRecoveryTimeout: retractionTimeout,
 		verificationRecoveryTimeout: retractionTimeout,
 	}, nil
@@ -539,6 +568,12 @@ func (p *Pipeline) Run(ctx context.Context, items []source.Item) (BatchResult, e
 // run concurrently. A caller can therefore durably append results without
 // waiting for the whole batch or adding its own synchronization.
 func (p *Pipeline) RunObserved(ctx context.Context, items []source.Item, observe ResultObserver) (BatchResult, error) {
+	p.profileMu.Lock()
+	clear(p.profileCache)
+	p.profileMu.Unlock()
+	p.flowStatusMu.Lock()
+	clear(p.flowStatuses)
+	p.flowStatusMu.Unlock()
 	// Media provenance belongs to this invocation. A Pipeline is deliberately
 	// reusable, but its configured executable may have been patched between
 	// runs, and a transient version lookup failure in one run must not poison
@@ -583,6 +618,10 @@ func (p *Pipeline) RunObserved(ctx context.Context, items []source.Item, observe
 			return p.failAll(items, err, observe)
 		}
 		storageID = resolvedStorageID
+	} else if len(p.profileAssignments) > 0 {
+		if err := p.runFlowProfilePreflight(ctx); err != nil {
+			return p.failAll(items, err, observe)
+		}
 	}
 
 	runCtx, cancel := context.WithCancelCause(ctx)
@@ -908,18 +947,6 @@ func (p *Pipeline) ingestOne(ctx context.Context, item source.Item, storageID st
 			collectionItem["container_mapping"] = collected.ContainerMapping
 		}
 		collectionItems = append(collectionItems, collectionItem)
-	}
-
-	// Stream copy carries the coded essence through untouched, so the Flow is
-	// the same generation as its source. An explicit FFmpeg profile may re-encode,
-	// and nothing here can tell whether a given argument list does; rather than
-	// assert a generation that might be wrong, leave it unset for the operator
-	// to supply through --flow-metadata.
-	if len(p.config.FFmpegArgs) == 0 {
-		flow["generation"] = 0
-		for _, collected := range flowInfo.Collected {
-			collected.Flow["generation"] = 0
-		}
 	}
 
 	mergeFlow(flow, p.config.FlowMetadata)
@@ -1365,9 +1392,6 @@ func (p *Pipeline) ingestIndependently(ctx context.Context, item source.Item, st
 		mergeFlow(flow, p.config.FlowMetadata)
 		flow["id"] = flowID
 		flow["source_id"] = sourceID
-		if len(p.config.FFmpegArgs) == 0 {
-			flow["generation"] = 0
-		}
 		if p.config.SegmentDuration > 0 {
 			flow["segment_duration"] = durationRational(p.config.SegmentDuration)
 		}
@@ -1417,10 +1441,6 @@ func (p *Pipeline) ingestIndependently(ctx context.Context, item source.Item, st
 	collector["source_id"] = collectorSourceID
 	collector["flow_collection"] = collectionItems
 	delete(collector, "container")
-	if len(p.config.FFmpegArgs) == 0 {
-		collector["generation"] = 0
-	}
-
 	graph := flowGraph{
 		flows:       make([]graphFlow, 0, len(planned)+1),
 		collectorID: collectorID,
@@ -1534,15 +1554,10 @@ func (p *Pipeline) probeInput(ctx context.Context, path string) (media.Probe, er
 // of every service upgrade. An older one is allowed but said out loud.
 func (p *Pipeline) checkAPIVersion(service map[string]any) error {
 	assessment, err := AssessAPIVersion(service)
-	if assessment.Relationship == "unknown" {
-		// The property is required, but a store that omits it is not thereby
-		// unusable, and refusing to work with one would be a stricter rule than
-		// the specification asks of a client.
-		p.logger.Warn("could not determine the TAMS API version of this store", "cause", assessment.Warning)
-	}
 	if err != nil {
 		return err
 	}
+	p.apiVersion = assessment.Version
 	if assessment.Relationship == "older" {
 		p.logger.Warn("store implements an older TAMS revision than tamsin targets",
 			"store_api_version", assessment.StoreVersion,
@@ -1589,16 +1604,29 @@ func (p *Pipeline) rejectUnusableMediaOptions() error {
 // graph in the service, and it makes preservation decisions from one coherent
 // read of the graph rather than interleaving reads with replacements.
 func (p *Pipeline) planFlowGraph(ctx context.Context, graph flowGraph) ([]plannedFlowWrite, error) {
+	var err error
+	graph, err = p.assignFlowProfiles(graph)
+	if err != nil {
+		return nil, err
+	}
 	planned := make([]plannedFlowWrite, 0, len(graph.flows))
 	for _, member := range graph.flows {
+		member, err = p.expandFlowProfile(ctx, member)
+		if err != nil {
+			return nil, err
+		}
 		plan, err := p.planFlowWrite(ctx, member)
 		if err != nil {
 			return nil, err
 		}
-		if err := contracts.ValidateFlow(plan.effective); err != nil {
+		if err := contracts.ValidateFlowGet(p.apiVersion, plan.effective); err != nil {
 			return nil, fmt.Errorf(
 				"final Flow metadata for %s (%s) is not valid against pinned TAMS %d.%d at %w",
 				member.id, member.role, tams.SpecMajor, tams.SpecMinor, err)
+		}
+		if err := contracts.ValidateFlowPut(p.apiVersion, plan.request); err != nil {
+			return nil, fmt.Errorf("flow PUT metadata for %s (%s) is not valid against TAMS %s at %w",
+				member.id, member.role, p.apiVersion, err)
 		}
 		planned = append(planned, plan)
 	}
@@ -1614,6 +1642,7 @@ func (p *Pipeline) planFlowGraph(ctx context.Context, graph flowGraph) ([]planne
 // value as-is.
 func (p *Pipeline) planFlowWrite(ctx context.Context, member graphFlow) (plannedFlowWrite, error) {
 	plan := plannedFlowWrite{member: member, effective: member.flow, changed: true}
+	plan.request = flowPutProjection(member.flow, member.profileID)
 	if p.config.DryRun {
 		return plan, nil
 	}
@@ -1629,7 +1658,14 @@ func (p *Pipeline) planFlowWrite(ctx context.Context, member graphFlow) (planned
 	}
 
 	plan.existed = true
+	existingProfileID := stringField(existing, "profile_id")
+	if existingProfileID != member.profileID {
+		return plannedFlowWrite{}, fmt.Errorf(
+			"flow %s already exists with profile_id %q; refusing to attach, repoint, or remove immutable Profile identity %q",
+			member.id, existingProfileID, member.profileID)
+	}
 	plan.effective = preserveForeignMetadata(existing, member.flow, p.config.FlowMetadata)
+	plan.request = flowPutProjection(plan.effective, member.profileID)
 	plan.changed = !reflect.DeepEqual(plan.effective, existing)
 	return plan, nil
 }
@@ -1646,7 +1682,7 @@ func (p *Pipeline) writeFlow(ctx context.Context, plan plannedFlowWrite) error {
 		action, verb = "updating", "update"
 	}
 	p.logger.Info(action+" flow", "flow_id", plan.member.id, "role", plan.member.role)
-	if _, err := p.client.PutFlow(ctx, plan.member.id, plan.effective); err != nil {
+	if _, err := p.client.PutFlow(ctx, plan.member.id, plan.request); err != nil {
 		return fmt.Errorf("%s flow %s: %w", verb, plan.member.id, err)
 	}
 	return nil
@@ -2245,6 +2281,15 @@ func (p *Pipeline) acquireMediaProcess(ctx context.Context, weight int64) (func(
 	return func() { p.mediaProcesses.Release(weight) }, nil
 }
 
+func (p *Pipeline) acquireRollingRender(ctx context.Context) (func(), error) {
+	select {
+	case p.rollingRenders <- struct{}{}:
+		return func() { <-p.rollingRenders }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // retractionTimeout bounds cleanup. Retraction runs detached from the caller's
 // context so cancellation cannot skip it, which means it needs a deadline of
 // its own or a wedged service could hang a run that is already finishing.
@@ -2396,6 +2441,9 @@ func (p *Pipeline) registerPreparedObjects(ctx context.Context, flowID string, o
 	if len(missing) == 0 {
 		return nil
 	}
+	if err := p.setFlowStatus(ctx, flowID, flowStatusIngesting); err != nil {
+		return fmt.Errorf("mark Flow ingesting before Object allocation: %w", err)
+	}
 
 	// Media Objects are committed in batches rather than all at once. A store
 	// collects an Object that is not registered against a Segment in time, and
@@ -2470,12 +2518,22 @@ func (p *Pipeline) renderSegmentsTo(ctx context.Context, staged stagedFile, flow
 		staged.lease.removeArtifact(directory)
 	}
 	segmentCtx, cancelSegment := context.WithCancel(ctx)
+	releaseRolling := func() {}
+	if window != nil {
+		releaseRolling, err = p.acquireRollingRender(segmentCtx)
+		if err != nil {
+			cancelSegment()
+			cleanup()
+			return func() {}, err
+		}
+	}
 	processWeight := int64(1)
 	if len(additionalArgs) > 0 && window == nil {
 		processWeight = 2
 	}
 	releaseProcess, err := p.acquireMediaProcess(segmentCtx, processWeight)
 	if err != nil {
+		releaseRolling()
 		cancelSegment()
 		cleanup()
 		return func() {}, err
@@ -2489,6 +2547,7 @@ func (p *Pipeline) renderSegmentsTo(ctx context.Context, staged stagedFile, flow
 		Directory: directory, AdditionalArgs: additionalArgs, StagingWindow: window,
 	}, sink)
 	releaseProcess()
+	releaseRolling()
 	close(monitorDone)
 	monitorErr := <-monitorResult
 	cancelSegment()
@@ -2888,6 +2947,7 @@ func flowProfileForRendererEpoch(digest string, config Config, rendererEpoch str
 		strconv.Itoa(len(config.FFmpegArgs)),
 	}
 	parts = append(parts, config.FFmpegArgs...)
+	parts = append(parts, config.TAMSFlowProfiles...)
 	parts = append(parts, rendererEpoch)
 	return identityFingerprint("media-treatment/v1", parts...)
 }

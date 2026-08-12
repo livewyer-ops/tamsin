@@ -95,6 +95,7 @@ func configDefinitions() []configDefinition {
 		{key: "ingest.staging_byte_budget", kind: configString, defaultValue: "auto", fileAllowed: true},
 		{key: "ingest.start", kind: configString, defaultValue: "0:0", fileAllowed: true},
 		{key: "ingest.storage_id", kind: configString, defaultValue: "", fileAllowed: true},
+		{key: "ingest.tams_flow_profiles", kind: configStrings, defaultValue: []string{}, fileAllowed: true},
 		{key: "ingest.temp_directory", kind: configString, defaultValue: "", fileAllowed: true},
 		{key: "ingest.transfers", kind: configInt, defaultValue: 0, fileAllowed: true},
 		{key: "ingest.verify", kind: configString, defaultValue: string(ingest.VerificationAuto), fileAllowed: true},

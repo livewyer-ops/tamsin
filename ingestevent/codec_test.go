@@ -41,7 +41,7 @@ func (futureEvent) EventType() Type { return "ui.hint" }
 
 func testHello(maxBytes uint64) Hello {
 	return Hello{
-		ToolVersion: "v1.0.0", ToolCommit: "abc123", ResultSchemaVersion: "2.0",
+		ToolVersion: "v1.0.0", ToolCommit: "abc123", ResultSchemaVersion: "2.1",
 		ProfilePolicyVersion: "1", MaxEventBytes: maxBytes,
 		Capabilities: []string{"progress", "terminal_results", "graceful_cancel"},
 	}

@@ -50,7 +50,7 @@ func TestPublishedIngestEventSchemaAcceptsEveryRuntimePayload(t *testing.T) {
 	concurrency, transfers := uint64(2), uint64(8)
 	emitContractEvent(t, encoder, nil, ingestevent.Hello{
 		ToolVersion: "v1.0.0", ToolCommit: "abc123", ToolBuildDate: "2026-08-09T08:00:00Z",
-		ResultSchemaVersion: "2.0", ProfilePolicyVersion: "1", MaxEventBytes: ingestevent.DefaultMaxEventBytes,
+		ResultSchemaVersion: "2.1", ProfilePolicyVersion: "1", MaxEventBytes: ingestevent.DefaultMaxEventBytes,
 		Capabilities: []string{"progress", "terminal_results", "graceful_cancel"},
 	})
 	emitContractEvent(t, encoder, nil, ingestevent.RunStarted{
@@ -112,7 +112,7 @@ func TestPublishedIngestEventSchemaAcceptsEveryRuntimePayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	emitContractEvent(t, interrupted, nil, ingestevent.Hello{
-		ToolVersion: "v1.0.0", ToolCommit: "abc123", ResultSchemaVersion: "2.0", ProfilePolicyVersion: "1",
+		ToolVersion: "v1.0.0", ToolCommit: "abc123", ResultSchemaVersion: "2.1", ProfilePolicyVersion: "1",
 		MaxEventBytes: ingestevent.DefaultMaxEventBytes, Capabilities: []string{"graceful_cancel"},
 	})
 	emitContractEvent(t, interrupted, nil, ingestevent.RunStarted{StartedAt: started})
@@ -141,7 +141,7 @@ func TestPublishedSchemaAllowsStartupFailureAndCompatibleMinorExtensions(t *test
 		t.Fatal(err)
 	}
 	emitContractEvent(t, encoder, nil, ingestevent.Hello{
-		ToolVersion: "v1.0.0", ToolCommit: "abc123", ResultSchemaVersion: "2.0", ProfilePolicyVersion: "1",
+		ToolVersion: "v1.0.0", ToolCommit: "abc123", ResultSchemaVersion: "2.1", ProfilePolicyVersion: "1",
 		MaxEventBytes: ingestevent.DefaultMaxEventBytes, Capabilities: []string{},
 	})
 	emitContractEvent(t, encoder, nil, ingestevent.RunStarted{StartedAt: time.Now().UTC()})

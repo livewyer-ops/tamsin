@@ -13,17 +13,29 @@ import (
 // the CLI also accepts operator-supplied extension fields.
 type Flow map[string]any
 
+// Profile remains open for the same reason as Flow: flow_metadata is selected
+// by media format and services may preserve extension metadata.
+type Profile map[string]any
+
 type StorageBackend struct {
-	ID             string `json:"id"`
-	Label          string `json:"label,omitempty"`
-	DefaultStorage bool   `json:"default_storage,omitempty"`
-	Type           string `json:"type,omitempty"`
+	ID               string            `json:"id"`
+	Label            string            `json:"label,omitempty"`
+	DefaultStorage   bool              `json:"default_storage,omitempty"`
+	Type             string            `json:"type,omitempty"` // TAMS 8.1/TAMOSS compatibility.
+	StoreType        string            `json:"store_type,omitempty"`
+	Provider         string            `json:"provider,omitempty"`
+	Region           string            `json:"region,omitempty"`
+	AvailabilityZone string            `json:"availability_zone,omitempty"`
+	StoreProduct     string            `json:"store_product,omitempty"`
+	Tags             map[string]string `json:"tags,omitempty"`
 }
 
 type StorageRequest struct {
-	Limit     int      `json:"limit,omitempty"`
-	ObjectIDs []string `json:"object_ids,omitempty"`
-	StorageID string   `json:"storage_id,omitempty"`
+	Limit       int      `json:"limit,omitempty"`
+	ObjectIDs   []string `json:"object_ids,omitempty"`
+	StorageID   string   `json:"storage_id,omitempty"`
+	ContentType string   `json:"content_type,omitempty"`
+	Presigned   *bool    `json:"presigned,omitempty"`
 }
 
 type StorageResponse struct {
@@ -31,8 +43,9 @@ type StorageResponse struct {
 }
 
 type AllocatedObject struct {
-	ObjectID string       `json:"object_id"`
-	PutURL   PresignedURL `json:"put_url"`
+	ObjectID  string       `json:"object_id"`
+	PutURL    PresignedURL `json:"put_url"`
+	Presigned *bool        `json:"presigned,omitempty"`
 }
 
 // UploadReceipt describes the bytes accepted by one successful PUT attempt.
@@ -113,6 +126,7 @@ func validHTTPHeaderName(name string) bool {
 
 type SegmentRequest struct {
 	ObjectID        string `json:"object_id"`
+	InitObjectID    string `json:"init_object_id,omitempty"`
 	Timerange       string `json:"timerange"`
 	ObjectTimerange string `json:"object_timerange,omitempty"`
 	TSOffset        string `json:"ts_offset,omitempty"`
@@ -162,7 +176,13 @@ type Segment struct {
 	ObjectTimerange string         `json:"object_timerange,omitempty"`
 	TSOffset        string         `json:"ts_offset,omitempty"`
 	GetURLs         []PresignedURL `json:"get_urls,omitempty"`
+	InitObject      *ObjectCore    `json:"init_object,omitempty"`
 }
+
+// ObjectCore is the object metadata nested under an 8.2 Segment for an
+// initialisation object. Extra storage metadata is retained without forcing
+// the client to know every provider-specific field.
+type ObjectCore map[string]any
 
 // SegmentDeleteOptions identifies the exact Segment or set of Segments to
 // remove. Integrity cleanup supplies both fields so an overlapping Segment
