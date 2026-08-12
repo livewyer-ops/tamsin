@@ -4,7 +4,8 @@ Use this guide when a downstream system explicitly requires short MPEG-TS
 Objects. Select the named profile:
 
 ```sh
-tamsin --profile mpegts-segments -i programme.mov -o https://tams.example.com
+tamsin --profile mpegts-segments --verbose \
+  -i programme.mov -o https://tams.example.com
 ```
 
 `mpegts-segments@1` stores each essence independently, targets two-second
@@ -19,12 +20,10 @@ incompatible codec compatible.
 ## Check the actual Segment cadence
 
 The two-second value is a target, not a guarantee. Cuts land on source
-keyframes, so a long group of pictures produces longer Segments. Inspect the
-timeranges TAMSin registered:
-
-```sh
-tamsctl segment list "$FLOW_ID" --output json | jq '[.[].timerange]'
-```
+keyframes, so a long group of pictures produces longer Segments. The verbose
+permanent receipt records the timerange of every verified Object TAMSin
+registered. General Segment queries after the ingest use the service's own
+inspection interface and are outside TAMSin's command surface.
 
 If a consumer requires a precise decoder-refresh cadence, encode the source
 with keyframes at that cadence before ingest.

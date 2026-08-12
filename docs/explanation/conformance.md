@@ -29,9 +29,9 @@ The target inventory is [`contracts/tams-v8.2.json`](../../contracts/tams-v8.2.j
 | `GET_objects` | Registered Object verification |
 
 General TAMS discovery, inspection, administration and vendor-extension
-requests belong to the separate `tamsctl` client. Keeping those operations out
-of TAMSin makes this inventory an exact account of the ingest product rather
-than a growing general API surface.
+requests are outside TAMSin. Keeping those operations out makes this inventory
+an exact account of the ingest product rather than a growing general API
+surface.
 
 Segment listing implements the paging and `get_urls` controls on the pinned
 operation rather than treating its first response as complete. Each `rel=next`
@@ -66,7 +66,7 @@ before use; invalid or case-duplicate names are rejected, and the newer
 - End-to-end CLI behaviour is covered by [`testscript`](https://github.com/rogpeppe/go-internal) archives in [`cmd/tamsin/testdata/script/`](../../cmd/tamsin/testdata/script/), the harness the Go team uses for the `go` command itself. Each archive is a readable transcript asserting real arguments, exit codes, and the separation of stdout presentation/event records from diagnostic stderr, with fixtures inlined as `txtar` members. Scripts run the CLI in-process, so coverage remains attributable to the packages under test. Run `go test ./cmd/tamsin -update` to refresh golden output after an intentional change.
 - The race detector covers concurrent batch execution.
 - `make test` passes `-coverpkg=./internal/...` so coverage is attributed to the package a statement lives in rather than to the package whose test ran it; without it the contract and CLI suites, which drive `internal/` from outside, report nothing. Read the aggregate with `make coverage`. The per-package lines are each test binary's share of the whole internal tree and are easy to misread as a regression.
-- `make e2e` provisions both pinned TAMOSS contracts and exercises the native TAMS storage allocation/upload/registration/readback path from the OCI image. Every ingested Flow is read back and checked against that service revision rather than against TAMSin's own output. The 8.2 run additionally exercises the Flow status lifecycle; 8.1 proves those additive writes do not leak across the compatibility boundary. The matrix covers whole-file ingest, an explicit `--segment-format`, both essence-storage arrangements against a genuine multiplex, and exact Segment retraction against the live service.
+- The E2E workflow runs `make e2e-existing` against both pinned TAMOSS contracts and exercises the native TAMS storage allocation/upload/registration/readback path from the OCI image. Every ingested Flow is read back and checked against that service revision rather than against TAMSin's own output. The 8.2 run additionally exercises the Flow status lifecycle; 8.1 proves those additive writes do not leak across the compatibility boundary. The matrix covers whole-file ingest, an explicit `--segment-format`, both essence-storage arrangements against a genuine multiplex, and the live service's exact Segment-deletion semantics. TAMSin's verification-failure retraction path, including asynchronous deletion-request monitoring, is exercised against deterministic HTTP integration servers.
 - The live matrix covers local file plus deterministic resume, directory, text manifest, HTTP, stdin, and S3 sources plus bearer, URL-token, and OAuth client-credential authentication. Basic and authorization-code behaviour use deterministic local identity/API servers because the TAMOSS local profile does not expose those grants as unattended test principals. Unit regressions additionally bind every credential-bearing request to the configured TAMS origin and reject cross-origin HTTPS redirects before token injection.
 
 ## Specification rules

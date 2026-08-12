@@ -15,7 +15,7 @@ Use a small typed Go client over `net/http` for every TAMS operation involved in
 upload and ingest. Keep the compatibility inventory and target delta
 machine-readable in `contracts/tams-v8.1.json` and `contracts/tams-v8.2.json`,
 and compile behaviour tests against each typed method. General resource
-administration and vendor extensions belong to the separate `tamsctl` client.
+administration and vendor extensions remain outside TAMSin.
 
 Implement only TAMS-specific timeline formatting and checked nanosecond/rational conversion locally. Continue using maintained libraries for OAuth, S3, HTTP input retries, UUIDs, CLI/configuration, and media inspection.
 

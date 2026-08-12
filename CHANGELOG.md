@@ -11,6 +11,15 @@ pin automation to a reviewed release and read this file before upgrading.
 This public release-candidate series establishes TAMSin's supported product,
 automation, compatibility, and supply-chain contracts.
 
+### Changes since v1.0.0-rc.2
+
+- Pin exact JSON-number decoding at the TAMS Profile HTTP boundary, including
+  technical metadata integers larger than 2^53, and strengthen CLI credential
+  redaction coverage across bearer, URL-token and Basic authentication.
+- Keep TAMSin documentation independent of a particular general TAMS control
+  client, clarify the layered Segment-retraction test boundary, and make the
+  retired `api` help path explain its migration rather than showing bare usage.
+
 ### Changes since v1.0.0-rc.1
 
 - Move general TAMS discovery and administration from `tamsin api` to the
@@ -30,7 +39,7 @@ automation, compatibility, and supply-chain contracts.
   the first write; both pinned TAMOSS implementations run in the release gate.
 - Support immutable TAMS 8.2 Flow Profiles through
   `--tams-flow-profile [FORMAT[:INDEX]=]UUID` ingest assignment, with general
-  Profile discovery and administration provided by the separate `tamsctl`.
+  Profile discovery and administration remaining outside TAMSin.
   Profile-backed Flow writes use the compact `profile_id` form, while planning,
   collision checks, results, and reads use expanded technical metadata.
 - Apply the 8.2 Flow lifecycle without extra resume churn: `ingesting` before

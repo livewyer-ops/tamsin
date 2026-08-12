@@ -98,6 +98,64 @@ func TestRegisterSegmentsReturnsStructuredPartialResult(t *testing.T) {
 	}
 }
 
+func TestClientProfilePreservesLargeJSONNumbers(t *testing.T) {
+	t.Parallel()
+	const profileID = "60d9df18-6d9d-4b86-84bf-d1dcf14b3a28"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/service/profiles/"+profileID {
+			http.NotFound(writer, request)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{
+			"id":"`+profileID+`",
+			"flow_metadata":{
+				"sample_rate":9007199254740993,
+				"segment_duration":{"numerator":10,"denominator":1},
+				"frame_rate":{"numerator":30000,"denominator":1001}
+			}
+		}`)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{Endpoint: server.URL, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := client.Profile(context.Background(), profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, ok := profile["flow_metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("flow_metadata = %T %#v, want JSON object", profile["flow_metadata"], profile["flow_metadata"])
+	}
+	segmentDuration, ok := metadata["segment_duration"].(map[string]any)
+	if !ok {
+		t.Fatalf("segment_duration = %T %#v, want JSON object", metadata["segment_duration"], metadata["segment_duration"])
+	}
+	frameRate, ok := metadata["frame_rate"].(map[string]any)
+	if !ok {
+		t.Fatalf("frame_rate = %T %#v, want JSON object", metadata["frame_rate"], metadata["frame_rate"])
+	}
+	for _, value := range []struct {
+		name string
+		got  any
+		want string
+	}{
+		{name: "sample_rate", got: metadata["sample_rate"], want: "9007199254740993"},
+		{name: "segment_duration/numerator", got: segmentDuration["numerator"], want: "10"},
+		{name: "segment_duration/denominator", got: segmentDuration["denominator"], want: "1"},
+		{name: "frame_rate/numerator", got: frameRate["numerator"], want: "30000"},
+		{name: "frame_rate/denominator", got: frameRate["denominator"], want: "1001"},
+	} {
+		number, ok := value.got.(json.Number)
+		if !ok || number.String() != value.want {
+			t.Errorf("%s = %T %v, want json.Number(%q)", value.name, value.got, value.got, value.want)
+		}
+	}
+}
+
 func TestClientIngestOperations(t *testing.T) {
 	t.Parallel()
 	var baseURL string

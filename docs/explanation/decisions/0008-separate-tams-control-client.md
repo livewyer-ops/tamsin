@@ -32,8 +32,9 @@ It shares no release lifecycle or media-tool dependency with TAMSin.
 - The TAMSin command tree and compatibility inventory describe one finite
   product surface.
 - `tamsctl` can develop independently towards a complete TAMS control client.
-- Existing `tamsin api ...` scripts must install `tamsctl` and remove the `api`
-  command segment.
+- Existing `tamsin api ...` scripts must migrate to a dedicated TAMS control
+  client. The tombstone identifies `tamsctl` as the destination of the removed
+  command surface, but TAMSin does not install or release it.
 - A hidden non-functional tombstone rejects the old prefix with that migration
   instruction so it cannot fall through to TAMSin's implicit ingest syntax.
 - Some authentication and HTTP foundations exist in both repositories until a

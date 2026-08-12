@@ -116,12 +116,10 @@ tamsin ingest --profile essence-segments \
 ```
 
 On TAMS 8.2, assign an immutable service Flow Profile when the generated
-technical metadata must conform to an operator-managed contract:
+technical metadata must conform to an operator-managed contract. Obtain the
+Profile UUIDs from the service operator or its administration interface:
 
 ```sh
-export TAMSCTL_ENDPOINT=https://tams.example.com
-export TAMSCTL_AUTH_TOKEN="$TAMSIN_AUTH_TOKEN"
-tamsctl flow-profile list --format urn:x-nmos:format:video
 tamsin ingest --profile essence-segments \
   --tams-flow-profile video=60d9df18-6d9d-4b86-84bf-d1dcf14b3a28 \
   --tams-flow-profile audio:0=8d5a25eb-35cb-423b-8e80-72258195ac2c \
@@ -133,9 +131,9 @@ constrains one generated essence Flow. Bare UUID assignment is accepted only
 when exactly one eligible Flow exists; repeated formats require zero-based
 selectors such as `audio:0` and `audio:1`.
 
-General TAMS resource inspection and administration use the separate
-implementation-independent `tamsctl` client. TAMSin itself retains only the
-operations required to plan, write, resume and verify an ingest.
+General TAMS resource inspection and administration are intentionally outside
+TAMSin. It retains only the operations required to plan, write, resume and
+verify an ingest.
 
 The `essence-segments` profile stores a multiplexed input as one Flow per essence plus an
 empty collector Flow. A successful command ends with a permanent receipt that
@@ -143,7 +141,7 @@ identifies the collection, essence Flows, verified Objects and bytes, profile,
 input digest, and run.
 
 New to TAMSin? Follow [your first ingest](docs/tutorials/first-ingest.md) for a
-dry run, real ingest, result inspection, and retry.
+dry run, real ingest, receipt review, and retry.
 
 ## Automation and Kubernetes
 

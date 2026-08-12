@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -646,24 +647,70 @@ func TestDoctorOnlineReportsRedactedEndpointAndResolvedAuthMode(t *testing.T) {
 
 func TestDoctorOnlineAuthenticationFailureDoesNotLeakSecrets(t *testing.T) {
 	t.Parallel()
-	const token = "bearer-doctor-secret"
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		http.Error(writer, "server-response-secret "+token, http.StatusUnauthorized)
-	}))
-	defer server.Close()
-	arguments := doctorArgs(t, "json")
-	arguments = append([]string{
-		"--endpoint", server.URL, "--auth", "bearer", "--token", token, "--allow-insecure-auth-loopback",
-	}, arguments...)
-	arguments = append(arguments, "--online")
-	code, result, stdout, stderr := executeDoctor(t, arguments)
-	if code != ExitAuth || checkNamed(t, result, "authentication").Status != doctorFail {
-		t.Fatalf("exit/auth = %d/%#v; stdout = %s; stderr = %s", code, checkNamed(t, result, "authentication"), stdout, stderr)
+	const responseSecret = "server-response-secret"
+	basicCredential := base64.StdEncoding.EncodeToString([]byte("basic-user:basic-secret"))
+	basicAuthorization := "Basic " + basicCredential
+	tests := []struct {
+		name              string
+		endpointQuery     string
+		authArguments     []string
+		wantAuthorization string
+		wantQueryToken    string
+		secrets           []string
+	}{
+		{
+			name:              "bearer",
+			authArguments:     []string{"--auth", "bearer", "--token", "bearer-doctor-secret"},
+			wantAuthorization: "Bearer bearer-doctor-secret",
+			secrets:           []string{"bearer-doctor-secret"},
+		},
+		{
+			name:           "URL token",
+			endpointQuery:  "?access_token=url-doctor-secret",
+			authArguments:  []string{"--auth", "url-token"},
+			wantQueryToken: "url-doctor-secret",
+			secrets:        []string{"url-doctor-secret"},
+		},
+		{
+			name:              "Basic",
+			authArguments:     []string{"--auth", "basic", "--username", "basic-user", "--password", "basic-secret"},
+			wantAuthorization: basicAuthorization,
+			secrets:           []string{"basic-user", "basic-secret", basicCredential},
+		},
 	}
-	for _, secret := range []string{token, "server-response-secret"} {
-		if strings.Contains(stdout, secret) || strings.Contains(stderr, secret) {
-			t.Fatalf("doctor leaked %q; stdout = %s; stderr = %s", secret, stdout, stderr)
-		}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if got := request.Header.Get("Authorization"); got != testCase.wantAuthorization {
+					t.Errorf("Authorization = %q, want %q", got, testCase.wantAuthorization)
+				}
+				if got := request.URL.Query().Get("access_token"); got != testCase.wantQueryToken {
+					t.Errorf("access_token = %q, want %q", got, testCase.wantQueryToken)
+				}
+				http.Error(writer, strings.Join([]string{
+					responseSecret,
+					request.Header.Get("Authorization"),
+					request.URL.RawQuery,
+				}, " "), http.StatusUnauthorized)
+			}))
+			defer server.Close()
+
+			arguments := doctorArgs(t, "json")
+			globalArguments := []string{"--endpoint", server.URL + testCase.endpointQuery, "--allow-insecure-auth-loopback"}
+			globalArguments = append(globalArguments, testCase.authArguments...)
+			arguments = append(globalArguments, arguments...)
+			arguments = append(arguments, "--online")
+			code, result, stdout, stderr := executeDoctor(t, arguments)
+			if code != ExitAuth || checkNamed(t, result, "authentication").Status != doctorFail {
+				t.Fatalf("exit/auth = %d/%#v; stdout = %s; stderr = %s", code, checkNamed(t, result, "authentication"), stdout, stderr)
+			}
+			secrets := append([]string{responseSecret}, testCase.secrets...)
+			for _, secret := range secrets {
+				if strings.Contains(stdout, secret) || strings.Contains(stderr, secret) {
+					t.Fatalf("doctor leaked %q; stdout = %s; stderr = %s", secret, stdout, stderr)
+				}
+			}
+		})
 	}
 }
 
