@@ -72,7 +72,7 @@ verify it against `SHA256SUMS` and its GitHub build attestation, then place it o
 `PATH`. For example, on Linux amd64:
 
 ```sh
-version=v0.1.0-rc.1
+version=v0.1.0-rc.3
 asset=tamsin-linux-amd64
 base="https://github.com/livewyer-ops/tamsin/releases/download/${version}"
 
@@ -88,8 +88,8 @@ The release also publishes a non-root multi-platform image. OCI tags omit the
 Git tag's leading `v`:
 
 ```sh
-docker pull ghcr.io/livewyer-ops/tamsin:0.1.0-rc.1
-docker run --rm ghcr.io/livewyer-ops/tamsin:0.1.0-rc.1 --version
+docker pull ghcr.io/livewyer-ops/tamsin:0.1.0-rc.3
+docker run --rm ghcr.io/livewyer-ops/tamsin:0.1.0-rc.3 --version
 ```
 
 Replace the example version with the release you intend to deploy. Pin
