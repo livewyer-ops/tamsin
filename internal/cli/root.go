@@ -211,13 +211,16 @@ func (a *application) rootCommand() *cobra.Command {
 // an implicit ingest of a local file named "api". It is hidden because it has
 // no functionality and is not part of TAMSin's command surface.
 func retiredAPICommand() *cobra.Command {
+	const migration = "tamsin api has moved to tamsctl; remove the api command segment (for example: tamsctl flow get ...)"
 	return &cobra.Command{
 		Use:                "api",
+		Short:              migration,
+		Long:               migration,
 		Hidden:             true,
 		DisableFlagParsing: true,
 		Annotations:        map[string]string{configIndependentAnnotation: "true"},
 		RunE: func(*cobra.Command, []string) error {
-			return withExit(ExitUsage, errors.New("tamsin api has moved to tamsctl; remove the api command segment (for example: tamsctl flow get ...)"))
+			return withExit(ExitUsage, errors.New(migration))
 		},
 	}
 }

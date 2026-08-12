@@ -24,8 +24,9 @@ Invoking `tamsin` with no subcommand runs `ingest`, so
 `tamsin ingest --profile essence-segments -i input.mp4 -o URL` are equivalent.
 
 General TAMS inspection and administration are intentionally outside this
-ingest CLI. Use the separate `tamsctl` client for Flow, Profile, Segment,
-Object, storage-backend and raw API operations.
+ingest CLI. Use the inspection and administration tooling provided for your
+TAMS service for Flow, Profile, Segment, Object, storage-backend and raw API
+operations.
 
 ## Configuration commands
 

@@ -101,9 +101,11 @@ Run `tamsin profiles` to compare the built-ins and their resource impact.
 A muxed ingest produces a media-owning Flow that collects other Flows. An
 independent ingest produces media-owning essence Flows and an empty collector:
 
-```sh
-tamsctl flow get "$FLOW_ID" --output json | jq '{format, container, flow_collection}'
-```
+Run the ingest with `--verbose` to retain each Flow UUID, kind, role and Object
+record in the permanent receipt. Inspect `format`, `container` and
+`flow_collection` through the service's own administration interface when you
+need to audit the stored TAMS metadata; general resource reads are outside
+TAMSin's ingest command surface.
 
 For muxed storage, each parent `flow_collection` item carries the
 `container_mapping`; the collected child carries neither a mapping nor a

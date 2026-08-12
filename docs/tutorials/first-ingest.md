@@ -1,8 +1,13 @@
 # Your first ingest
 
-By the end of this tutorial you will have put a piece of media into a Time-addressable Media Store and read it back out, using nothing but a local file and a terminal. You do not need to understand TAMS to follow it. Everything is explained as you go, and nothing is left for you to decide.
+By the end of this tutorial you will have put a piece of media into a
+Time-addressable Media Store, verified its stored bytes, and reviewed the
+permanent ingest receipt using nothing but a local file and a terminal. You do
+not need to understand TAMS to follow it. Everything is explained as you go,
+and nothing is left for you to decide.
 
-You will need TAMSin and `tamsctl` on your `PATH`, FFmpeg installed, and a TAMS endpoint you can write to. TAMSin performs the ingest; `tamsctl` provides the optional read-back inspection in step 6.
+You will need TAMSin on your `PATH`, FFmpeg installed, and a TAMS endpoint you
+can write to.
 
 ## 1. Check your tools
 
@@ -27,9 +32,6 @@ TAMSin reads its endpoint and credentials from the environment, which keeps them
 export TAMSIN_ENDPOINT='https://tams.example.com'
 export TAMSIN_AUTH_MODE='bearer'
 export TAMSIN_AUTH_TOKEN='your-token-here'
-export TAMSCTL_ENDPOINT="$TAMSIN_ENDPOINT"
-export TAMSCTL_AUTH_MODE="$TAMSIN_AUTH_MODE"
-export TAMSCTL_AUTH_TOKEN="$TAMSIN_AUTH_TOKEN"
 ```
 
 Confirm TAMSin can reach the store and that your credentials work:
@@ -122,42 +124,29 @@ with independent storage still has to demultiplex the essences.
 Now do it for real:
 
 ```sh
-tamsin --profile essence-segments -i first-ingest.ts
+tamsin --profile essence-segments --verbose -i first-ingest.ts
 ```
 
 TAMSin separates the two essences, cuts each into Flow Segments, uploads them,
 and registers them. Its default `auto` integrity policy accepts trustworthy
 storage SHA-256 evidence when the upload provides it and otherwise downloads
-the registered Object for a byte-for-byte check. Live progress shows `storing` and `verifying` separately; the permanent
-receipt begins `INGESTED AND VERIFIED` when that has all succeeded.
+the registered Object for a byte-for-byte check. Live progress shows `storing`
+and `verifying` separately; the permanent receipt begins
+`INGESTED AND VERIFIED` when that has all succeeded.
 
-Copy the UUID on the receipt's `video` row — you will need it next. The
-`collection` UUID is the root Flow and owns no Segments in independent mode:
+## 6. Review the result
 
-```sh
-export FLOW_ID='paste-a-flow-id-here'
-```
+The verbose receipt names the root `collection` Flow and its `video` and
+`audio` children. The collection owns no Objects in independent mode; each
+essence row carries its own Flow UUID and expands to the verified Media Objects
+stored for it.
 
-## 6. Read it back
-
-The media is now in the store, described by TAMS metadata. Inspect what TAMSin wrote with the implementation-independent TAMS client:
-
-```sh
-tamsctl flow get "$FLOW_ID" --output json
-```
-
-You will see the Flow's `format` (`urn:x-nmos:format:video` or `:audio`), the `container` its media is stored in, and `essence_parameters` describing the picture or sound. Now list where that media sits on the timeline:
-
-```sh
-tamsctl segment list "$FLOW_ID" --output json
-```
-
-Each Flow Segment maps a Media Object onto a `timerange` such as `[0:0_4:0)` — from zero seconds, up to but not including four. That mapping is what makes the store *time-addressable*: you ask for a period of time, not for a file.
-
-The default listing deliberately omits storage URLs. If you need an immediate
-download rather than timeline metadata, add `--include-download-urls`; treat
-the returned presigned URLs as short-lived credentials and do not save them in
-logs.
+Each Object record includes a `timerange` such as `[0:0_4:0)` — from zero
+seconds, up to but not including four — together with its byte count and
+SHA-256 digest. The receipt therefore records exactly what this ingest
+committed and verified without turning TAMSin into a general TAMS inspection
+client. Later service-side inspection and administration use the tooling
+provided for that service and are outside TAMSin's command interface.
 
 ## 7. Prove the retry is safe
 
@@ -177,8 +166,8 @@ TAMSin safe to put in a job that might be retried.
 
 You checked your tooling, planned an ingest without touching the store,
 ingested a multiplexed file as two independently addressable essence Flows plus
-their collector, inspected the metadata and timeline that resulted, and saw
-that re-running is safe.
+their collector, reviewed the verified Objects in the permanent receipt, and
+saw that re-running is safe.
 
 From here:
 

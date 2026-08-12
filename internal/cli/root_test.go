@@ -350,6 +350,16 @@ func TestRetiredAPIInvocationPointsToTamsctl(t *testing.T) {
 	}
 }
 
+func TestRetiredAPIHelpPointsToTamsctl(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"help", "api"}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitOK || !strings.Contains(stdout.String(), "moved to tamsctl") ||
+		strings.Contains(stdout.String(), "profile is required") || stderr.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestCLINumericFlowProfileMatchesByJSONSemanticsBeforeMutation(t *testing.T) {
 	const profileID = "60d9df18-6d9d-4b86-84bf-d1dcf14b3a28"
 	var mismatch atomic.Bool
