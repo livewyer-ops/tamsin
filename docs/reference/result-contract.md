@@ -12,7 +12,7 @@ array, enclosing batch document, ANSI control sequence, carriage return, or
 human footer.
 
 This streaming contract applies only to `ingest`. Finite commands such as
-`api`, `doctor`, `profiles`, and `config show --effective` continue to write one
+`doctor`, `profiles`, and `config show --effective` continue to write one
 command-specific JSON document when `--format json` is selected. In
 particular, the [doctor report](doctor.md) has its own schema and is not an
 ingest event stream.

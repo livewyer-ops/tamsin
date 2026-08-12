@@ -6,34 +6,39 @@ pin automation to a reviewed release and read this file before upgrading.
 
 ## Unreleased
 
-### Fixed
+## [1.0.0] - 2026-08-12
 
+This public release-candidate series establishes TAMSin's supported product,
+automation, compatibility, and supply-chain contracts.
+
+### Changes since v1.0.0-rc.1
+
+- Move general TAMS discovery and administration from `tamsin api` to the
+  separate lightweight `tamsctl` client. TAMSin now retains only ingest,
+  treatment profiles, diagnostics, configuration and shell completion, and no
+  longer carries general Flow, Segment, Object, storage or raw-request commands.
 - Compare generated Flow metadata with TAMS 8.2 Flow Profiles using JSON value
   semantics. Numerically equal metadata now matches across Go integer,
   `json.Number`, and exactly equivalent finite floating-point representations
   without losing precision for integers larger than 2^53; all non-numeric
   structure and value checks remain strict.
 
-## [1.0.0] - 2026-08-12
-
-This first public release candidate establishes TAMSin's supported product,
-automation, compatibility, and supply-chain contracts.
-
 ### TAMS compatibility
 
 - Target BBC TAMS 8.2 while retaining TAMS 8.1 as the compatibility floor.
   Missing, malformed, 8.0, or different-major `api_version` values fail before
   the first write; both pinned TAMOSS implementations run in the release gate.
-- Support immutable TAMS 8.2 Flow Profiles through typed list/get/create
-  commands and `--tams-flow-profile [FORMAT[:INDEX]=]UUID` ingest assignment.
+- Support immutable TAMS 8.2 Flow Profiles through
+  `--tams-flow-profile [FORMAT[:INDEX]=]UUID` ingest assignment, with general
+  Profile discovery and administration provided by the separate `tamsctl`.
   Profile-backed Flow writes use the compact `profile_id` form, while planning,
   collision checks, results, and reads use expanded technical metadata.
 - Apply the 8.2 Flow lifecycle without extra resume churn: `ingesting` before
   Object allocation, `closed_complete` after success, and `awaiting_content`
   after a failed written graph. TAMS 8.1 requests remain unchanged.
-- Retain typed support for 8.2 storage allocation options, richer backend
-  metadata, and `init_object_id`. High-level fragmented-MP4 preparation remains
-  deliberately out of scope for this release.
+- Retain the 8.2 storage-allocation, richer backend-metadata, and
+  `init_object_id` fields used by ingest. High-level fragmented-MP4 preparation
+  remains deliberately out of scope for this release.
 - Stop inventing `generation: 0` from local stream-copy policy. Generation is
   upstream lineage metadata and is preserved or supplied by the operator.
 
@@ -51,7 +56,7 @@ automation, compatibility, and supply-chain contracts.
 ### Release and supply chain
 
 - Publish four CGO-free binaries and one non-root amd64/arm64 OCI index for
-  `v1.0.0-rc.1`; prereleases never move the `latest` image tag.
+  `v1.0.0-rc.2`; prereleases never move the `latest` image tag.
 - Build the application on the immutable
   `tamsin-ffmpeg-runtime:5.1.9-bookworm-r1` base. Its Debian snapshot, FFmpeg
   package, two architectures, SPDX SBOM, and provenance are revisioned once so

@@ -11,28 +11,6 @@ are flags only.
 | Command | Purpose |
 | --- | --- |
 | `tamsin ingest` | Create one Flow graph per resolved input and ingest its media |
-| `tamsin api` | Execute TAMS upload and ingest API operations |
-| `tamsin api service` | Get TAMS service information |
-| `tamsin api storage-backends` | List TAMS storage backends |
-| `tamsin api flow-profile` | List, inspect, or create immutable TAMS 8.2 Flow Profiles |
-| `tamsin api flow-profile list` | List Flow Profiles with optional format, codec, and label filters |
-| `tamsin api flow-profile get` | Get one Flow Profile |
-| `tamsin api flow-profile create` | Create one immutable Flow Profile from JSON |
-| `tamsin api flow` | Get or create a TAMS Flow |
-| `tamsin api flow get` | Get Flow metadata |
-| `tamsin api flow put` | Create or replace Flow metadata |
-| `tamsin api storage` | Allocate TAMS Media Object storage |
-| `tamsin api storage allocate` | Allocate upload URLs for a Flow |
-| `tamsin api segment` | List, register, or delete TAMS Flow Segments |
-| `tamsin api segment list` | List Flow Segments |
-| `tamsin api segment register` | Register a Flow Segment |
-| `tamsin api segment delete` | Delete the exact Flow Segment selected by Object ID and timerange |
-| `tamsin api object` | Inspect Objects and manage Object instances |
-| `tamsin api object get` | Get Object information |
-| `tamsin api object instance` | Register or delete Object instances |
-| `tamsin api object instance register` | Register a controlled or external Object instance |
-| `tamsin api object instance delete` | Delete one Object instance |
-| `tamsin api request` | Execute a raw JSON request against the pinned TAMS API |
 | `tamsin config` | Validate and inspect configuration |
 | `tamsin config validate` | Validate the effective configuration without running an ingest |
 | `tamsin config show` | Show redacted effective values and their provenance |
@@ -44,6 +22,10 @@ are flags only.
 Invoking `tamsin` with no subcommand runs `ingest`, so
 `tamsin --profile essence-segments -i input.mp4 -o URL` and
 `tamsin ingest --profile essence-segments -i input.mp4 -o URL` are equivalent.
+
+General TAMS inspection and administration are intentionally outside this
+ingest CLI. Use the separate `tamsctl` client for Flow, Profile, Segment,
+Object, storage-backend and raw API operations.
 
 ## Configuration commands
 
@@ -147,27 +129,6 @@ always use readback because their original upload evidence is no longer
 available. `--verify=readback` forces downloads and `--verify=none` is an
 explicit integrity opt-out.
 
-## Segment-list flags
-
-`tamsin api segment list FLOW_ID` follows every page of the Segment listing.
-By default it asks TAMS for a lean response with no `get_urls`; this avoids
-generating or printing presigned storage URLs when only Object IDs and
-timeranges are needed. TAMSin also removes any `get_urls` a non-conforming
-service returns despite that request, on every page of the listing.
-
-| Flag | Type | Description |
-| --- | --- | --- |
-| `--object-id` | string | filter by Object ID |
-| `--include-download-urls` | bool | include presigned download URLs and verbose storage metadata |
-
-Use `--include-download-urls` only when the output will be used immediately;
-presigned URLs are credentials with a service-defined short lifetime. Paging
-cursors may be absolute, path-relative, or query-only, but TAMSin follows them
-only when RFC URL resolution keeps them on the configured API origin and under
-its base path. Collection is all-or-nothing and stops with an error rather than
-returning a partial list if it would exceed 1,000 pages, 100,000 Segments, or
-64 MiB of successful JSON page bodies.
-
 ## Global flags
 
 These apply to every command.
@@ -218,32 +179,7 @@ flags belong only to the command named in the first column.
 
 | Command | Flag | Short | Type | Description |
 | --- | --- | --- | --- | --- |
-| `api flow-profile list` | `--format` |  | string | filter by single-essence format URN |
-| `api flow-profile list` | `--codec` |  | string | filter by codec media type |
-| `api flow-profile list` | `--label` |  | string | filter by exact Profile label |
-| `api flow-profile create` | `--file` | `-f` | string | Profile JSON file or `-` for stdin (default "-") |
-| `api flow put` | `--file` | `-f` | string | Flow JSON file or `-` for stdin (default "-") |
-| `api storage allocate` | `--object-id` |  | stringArray | requested Object ID (repeatable) |
-| `api storage allocate` | `--storage-id` |  | string | storage backend ID |
-| `api storage allocate` | `--limit` |  | int | number of server-assigned Object IDs |
-| `api storage allocate` | `--content-type` |  | string | initialisation Object media type (TAMS 8.2) |
-| `api storage allocate` | `--presigned` |  | bool | request presigned upload URLs; use `--presigned=false` to refuse them (TAMS 8.2) |
-| `api segment list` | `--object-id` |  | string | filter by Object ID |
-| `api segment list` | `--include-download-urls` |  |  | include presigned download URLs and verbose storage metadata |
-| `api segment register` | `--file` | `-f` | string | Segment JSON file or `-` for stdin (default "-") |
-| `api segment delete` | `--timerange` |  | string | required TAMS timerange to delete, or `_` for the whole Flow |
-| `api segment delete` | `--object-id` |  | string | required exact Object ID |
-| `api object instance register` | `--storage-id` |  | string | controlled storage backend ID |
-| `api object instance register` | `--url` |  | string | external Object URL |
-| `api object instance register` | `--label` |  | string | instance label; required with `--url` |
-| `api object instance delete` | `--storage-id` |  | string | controlled storage backend ID |
-| `api object instance delete` | `--label` |  | string | external instance label |
-| `api request` | `--file` | `-f` | string | JSON request body file or `-` for stdin |
 | `config show` | `--effective` |  |  | show resolved values after precedence is applied |
-
-`api storage allocate` requires exactly one allocation mode: repeat
-`--object-id` for caller-selected identifiers, or supply one positive `--limit`
-to request server-selected identifiers. The two modes cannot be combined.
 
 For ingest, `--format human` writes grouped permanent receipts. `--verbose`
 adds safe locators, Source IDs, dispositions, Object records, toolchain
@@ -253,7 +189,7 @@ warning, failure, action-required state, or non-zero process status.
 
 Ingest `--format json` writes the `tamsin.ingest.events` NDJSON process
 protocol. Its stdout is machine-only; human progress is disabled regardless of
-`--progress`. Finite `api`, `doctor`, `profiles`, and `config` commands retain one
+`--progress`. Finite `doctor`, `profiles`, and `config` commands retain one
 command-specific JSON document. `--log-format` and `--log-level` independently
 control sanitised support logs on stderr. See [ingest output protocol and
 durable journal](result-contract.md) and [run and retry

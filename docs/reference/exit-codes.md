@@ -14,7 +14,7 @@ process exits nonzero.
 | 4 | partial | At least one batch item failed. Inspect every `input.finished` and its structured failure code. |
 | 5 | source | Input resolution, manifest, directory, HTTP source, or S3 listing failed before batch execution. |
 | 6 | media | FFprobe or FFmpeg is missing or fails a `doctor` runtime check. Batch media failures use code 4 with per-item structured failures. |
-| 7 | remote | A low-level `api` command or preflight TAMS request failed. |
+| 7 | remote | A TAMS preflight, ingest metadata request, or media transfer failed. |
 | 8 | interrupted | Context deadline, SIGINT, or SIGTERM cancelled the operation. |
 
 Wrappers should treat only `0` as success. Code `4` is intentionally distinct so an orchestrator can persist successful Flow IDs while routing failed items for retry.

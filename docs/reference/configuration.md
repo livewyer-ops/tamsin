@@ -291,8 +291,8 @@ AWS_REGION=eu-west-1
 
 `format` controls result stdout. `human` is the default. For ingest, `json`
 means the versioned `tamsin.ingest.events` NDJSON stream, with one flushed
-event per line; it does not mean one final batch document. Finite `api`,
-`doctor`, and `config` operations continue to use one command-specific JSON
+event per line; it does not mean one final batch document. Finite `doctor`,
+`profiles`, and `config` operations continue to use one command-specific JSON
 document. A wrapper should parse stdout and drain stderr concurrently as opaque
 operator diagnostics.
 

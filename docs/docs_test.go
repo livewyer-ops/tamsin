@@ -315,7 +315,7 @@ func TestCLIReferenceDescribesEveryFlag(t *testing.T) {
 	}{
 		{name: "ingest", args: []string{"ingest"}, helpSection: "Flags:", docSection: "## Ingest flags"},
 		{name: "doctor", args: []string{"doctor"}, helpSection: "Flags:", docSection: "## Doctor flags"},
-		{name: "global", args: []string{"api"}, helpSection: "Global Flags:", docSection: "## Global flags"},
+		{name: "global", args: []string{"doctor"}, helpSection: "Global Flags:", docSection: "## Global flags"},
 	} {
 		expected := helpFlagsInSection(helpText(t, binary, section.args...), section.helpSection)
 		docBody := markdownSection(documented, section.docSection)

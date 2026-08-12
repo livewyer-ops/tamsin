@@ -78,7 +78,7 @@ For a development service listening directly on the same machine, plaintext auth
 ```sh
 tamsin --allow-insecure-auth-loopback \
   --endpoint http://127.0.0.1:8000 \
-  --auth bearer --token "$DEV_TOKEN" api service
+  --auth bearer --token "$DEV_TOKEN" doctor --online
 ```
 
 The exception accepts only the exact hostname `localhost` (case-insensitive), an address in `127.0.0.0/8`, or IPv6 `::1`. It does not permit private-network addresses, localhost-like suffixes, abbreviated or integer IPv4 spellings, or remote HTTP even when the flag is set. Unauthenticated TAMS endpoints may still use HTTP.

@@ -17,28 +17,12 @@
   "authentication": [],
   "ingest_operations": [
     {
-      "operation_id": "GET_profiles",
-      "method": "GET",
-      "path": "/service/profiles",
-      "cli": "api flow-profile list",
-      "implemented_by": "internal/tams.Client.Profiles",
-      "tested_by": "internal/tams.TestProfilesFollowsPaging, internal/cli.TestCLIAPIFlowProfileOperations"
-    },
-    {
       "operation_id": "GET_profiles-profileId",
       "method": "GET",
       "path": "/service/profiles/{profileId}",
-      "cli": "api flow-profile get",
+      "cli": "ingest --tams-flow-profile",
       "implemented_by": "internal/tams.Client.Profile",
-      "tested_by": "internal/tams.TestClientFlowProfileOperations, internal/cli.TestCLIAPIFlowProfileOperations"
-    },
-    {
-      "operation_id": "POST_profiles-profileId",
-      "method": "POST",
-      "path": "/service/profiles/{profileId}",
-      "cli": "api flow-profile create",
-      "implemented_by": "internal/tams.Client.CreateProfile",
-      "tested_by": "internal/tams.TestClientFlowProfileOperations, internal/cli.TestCLIAPIFlowProfileOperations"
+      "tested_by": "internal/ingest.TestProfileBackedFlowPlansExpandedReadsAndCompactWrites, internal/cli.TestCLINumericFlowProfileMatchesByJSONSemanticsBeforeMutation"
     }
   ],
   "spec_review": {
@@ -63,12 +47,6 @@
       "asserted_by": "ingest.TestProfileBackedFlowPlansExpandedReadsAndCompactWrites, ingest.TestAssignFlowProfilesRequiresIndexedDuplicateFormats"
     },
     {
-      "id": "selectable-presigned-storage-urls",
-      "source": "adr/0054",
-      "requirement": "Storage allocation may explicitly request presigned or non-presigned PUT URLs and reports which mode each returned URL uses.",
-      "asserted_by": "contracts.TestStorageRequestMatchesPinnedSchema, cli.TestCLIAPIStorageAllocationSupportsTAMS82Options"
-    },
-    {
       "id": "storage-backend-authorisation-metadata",
       "source": "adr/0055",
       "requirement": "Storage Backend responses retain store type, provider, product, location, and read-only tags so authorisation policy can be evaluated without a lossy client model.",
@@ -82,6 +60,10 @@
     }
   ],
   "not_applicable": [
+    {
+      "source": "adr/0054",
+      "reason": "Explicit presigned allocation mode is a low-level storage-administration choice; Tamsin uses the service-selected allocation response for ingest."
+    },
     {
       "source": "adr/0049",
       "reason": "Source collected_by query filtering is a discovery operation outside the ingest write path."
