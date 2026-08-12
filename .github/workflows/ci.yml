@@ -71,8 +71,8 @@ jobs:
         run: |
           image_ref="ghcr.io/livewyer-ops/tamsin:ci"
           runtime_tag="$(jq -er '.image | select(type == "string" and length > 0)' contracts/ffmpeg-runtime.json)"
-          runtime_ref="$(./scripts/resolve-image-reference.sh \
-            "$runtime_tag")"
+          runtime_ref="$(IMAGE_RESOLVE_ATTEMPTS=90 IMAGE_RESOLVE_DELAY_SECONDS=10 \
+            ./scripts/resolve-image-reference.sh "$runtime_tag")"
           build_epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
           build_date="$(date --utc --date="@$build_epoch" +%Y-%m-%dT%H:%M:%SZ)"
           make dist \

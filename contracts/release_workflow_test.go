@@ -286,7 +286,8 @@ func TestReleaseBuildCreatesAndSmokesExactlyTwoPlatformsOnce(t *testing.T) {
 		"docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
 		"moby/buildkit:v0.26.2@sha256:de10faf919fc71ba4eb1dd7bd6449566d012b0c9436b1c61bfee21d621b009aa",
 		"make dist", "IMAGE_PLATFORMS=\"linux/amd64,linux/arm64\"",
-		"resolve-image-reference.sh", "FFMPEG_RUNTIME_IMAGE=",
+		"resolve-image-reference.sh", "IMAGE_RESOLVE_ATTEMPTS=90", "IMAGE_RESOLVE_DELAY_SECONDS=10",
+		"FFMPEG_RUNTIME_IMAGE=",
 		"build-supply-chain-bundle.py", "tamsin-supply-chain.tar.gz",
 		"verify-oci-layout.sh record", "smoke-release-image.sh",
 		"git show -s --format=%ct", "SOURCE_DATE_EPOCH")

@@ -7,9 +7,29 @@ if [ "$#" -ne 1 ] || [[ "$1" == *@* ]] || [[ "${1##*/}" != *:* ]]; then
 fi
 
 image_tag="$1"
+attempts="${IMAGE_RESOLVE_ATTEMPTS:-1}"
+delay_seconds="${IMAGE_RESOLVE_DELAY_SECONDS:-5}"
+if ! [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || ! [[ "$delay_seconds" =~ ^[0-9]+$ ]]; then
+  echo "IMAGE_RESOLVE_ATTEMPTS must be positive and IMAGE_RESOLVE_DELAY_SECONDS must be non-negative" >&2
+  exit 2
+fi
+
 temporary="$(mktemp)"
-trap 'rm -f "$temporary"' EXIT
-docker buildx imagetools inspect "$image_tag" --raw > "$temporary"
+error_log="$(mktemp)"
+trap 'rm -f "$temporary" "$error_log"' EXIT
+
+for ((attempt = 1; attempt <= attempts; attempt++)); do
+  if docker buildx imagetools inspect "$image_tag" --raw > "$temporary" 2> "$error_log"; then
+    break
+  fi
+  if [ "$attempt" -eq "$attempts" ]; then
+    cat "$error_log" >&2
+    exit 1
+  fi
+  printf '%s is not available yet (attempt %d/%d); retrying in %ss\n' \
+    "$image_tag" "$attempt" "$attempts" "$delay_seconds" >&2
+  sleep "$delay_seconds"
+done
 
 python3 - "$image_tag" "$temporary" <<'PY'
 import hashlib
