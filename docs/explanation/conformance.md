@@ -14,25 +14,24 @@ The target inventory is [`contracts/tams-v8.2.json`](../../contracts/tams-v8.2.j
 
 ## Upload and ingest operation coverage
 
-| Operation | High-level use | Low-level command |
-| --- | --- | --- |
-| `GET_service` | Ingest and `doctor --online` compatibility/lifetime preflight | `api service` |
-| `GET_storage-backends` | Ingest and `doctor --online` backend selection | `api storage-backends` |
-| `GET_profiles` | Flow Profile discovery and filtered paging | `api flow-profile list` |
-| `GET_profiles-profileId` | Profile-backed ingest and inspection | `api flow-profile get` |
-| `POST_profiles-profileId` | Operator-managed immutable Profile creation | `api flow-profile create` |
-| `PUT_flows-flowId` | Deterministic Flow creation | `api flow put` |
-| `GET_flows-flowId` | Created Flow verification | `api flow get` |
-| `POST_flows-flowId-storage` | Media Object allocation | `api storage allocate` |
-| `POST_flows-flowId-segments` | Segment registration | `api segment register` |
-| `GET_flows-flowId-segments` | Resume and checksum verification | `api segment list` |
-| `DELETE_flows-flowId-segments` | Retraction of a Segment that failed verification | `api segment delete` |
-| `GET_flow-delete-requests-request-id` | Monitor asynchronous Segment retraction | `api segment delete` |
-| `GET_objects` | Registered Object verification | `api object get` |
-| `POST_objects-instances` | Controlled/external instance registration | `api object instance register` |
-| `DELETE_objects-instances` | Instance removal | `api object instance delete` |
+| Operation | Ingest use |
+| --- | --- |
+| `GET_service` | Compatibility and lifetime preflight; also used by `doctor --online` |
+| `GET_storage-backends` | Backend selection; also used by `doctor --online` |
+| `GET_profiles-profileId` | Validate an assigned TAMS 8.2 Flow Profile before mutation |
+| `PUT_flows-flowId` | Deterministic Flow creation |
+| `GET_flows-flowId` | Collision, resume and created-Flow verification |
+| `POST_flows-flowId-storage` | Media Object allocation |
+| `POST_flows-flowId-segments` | Segment registration |
+| `GET_flows-flowId-segments` | Resume and checksum verification |
+| `DELETE_flows-flowId-segments` | Retract a Segment that failed verification |
+| `GET_flow-delete-requests-request-id` | Monitor asynchronous Segment retraction |
+| `GET_objects` | Registered Object verification |
 
-`api request` remains available for vendor extensions without weakening typed behaviour for the pinned operations.
+General TAMS discovery, inspection, administration and vendor-extension
+requests belong to the separate `tamsctl` client. Keeping those operations out
+of TAMSin makes this inventory an exact account of the ingest product rather
+than a growing general API surface.
 
 Segment listing implements the paging and `get_urls` controls on the pinned
 operation rather than treating its first response as complete. Each `rel=next`
@@ -48,12 +47,10 @@ rejected before credentials are attached; cycles are rejected. Collection is
 atomic and bounded to 1,000 pages, 100,000 Segments, and 64 MiB of successful
 JSON page bodies, so an endlessly novel or oversized cursor stream cannot
 return a plausible partial result or grow memory without a fixed limit.
-Listings are lean by default through an empty `accept_get_urls`;
-`api segment list --include-download-urls` is the explicit presigned and
-verbose-storage opt-in. Without that opt-in TAMSin removes any unexpected
-`get_urls` from every response page, including pages whose cursor replaced the
-original query. Ingest callers request fresh download URLs only at the points
-that immediately verify media. Presigned response headers are canonicalized
+Identity-only ingest listings are lean through an empty `accept_get_urls` and
+discard any unexpected `get_urls`, including on pages whose cursor replaced the
+original query. Verification paths request fresh download URLs only at the
+points that immediately consume them. Presigned response headers are canonicalized
 before use; invalid or case-duplicate names are rejected, and the newer
 `headers` object takes precedence over the legacy `content-type` member.
 
@@ -70,7 +67,7 @@ before use; invalid or case-duplicate names are rejected, and the newer
 - The race detector covers concurrent batch execution.
 - `make test` passes `-coverpkg=./internal/...` so coverage is attributed to the package a statement lives in rather than to the package whose test ran it; without it the contract and CLI suites, which drive `internal/` from outside, report nothing. Read the aggregate with `make coverage`. The per-package lines are each test binary's share of the whole internal tree and are easy to misread as a regression.
 - `make e2e` provisions both pinned TAMOSS contracts and exercises the native TAMS storage allocation/upload/registration/readback path from the OCI image. Every ingested Flow is read back and checked against that service revision rather than against TAMSin's own output. The 8.2 run additionally exercises the Flow status lifecycle; 8.1 proves those additive writes do not leak across the compatibility boundary. The matrix covers whole-file ingest, an explicit `--segment-format`, both essence-storage arrangements against a genuine multiplex, and exact Segment retraction against the live service.
-- The live matrix covers local file plus deterministic resume, Object-instance registration/removal, directory, text manifest, HTTP, stdin, and S3 sources plus bearer, URL-token, and OAuth client-credential authentication. Basic and authorization-code behaviour use deterministic local identity/API servers because the TAMOSS local profile does not expose those grants as unattended test principals. Unit regressions additionally bind every credential-bearing request to the configured TAMS origin and reject cross-origin HTTPS redirects before token injection.
+- The live matrix covers local file plus deterministic resume, directory, text manifest, HTTP, stdin, and S3 sources plus bearer, URL-token, and OAuth client-credential authentication. Basic and authorization-code behaviour use deterministic local identity/API servers because the TAMOSS local profile does not expose those grants as unattended test principals. Unit regressions additionally bind every credential-bearing request to the configured TAMS origin and reject cross-origin HTTPS redirects before token injection.
 
 ## Specification rules
 

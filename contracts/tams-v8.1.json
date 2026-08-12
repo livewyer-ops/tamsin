@@ -50,7 +50,7 @@
       "operation_id": "GET_service",
       "method": "GET",
       "path": "/service",
-      "cli": "api service",
+      "cli": "ingest, doctor --online",
       "implemented_by": "internal/tams.Client.Service",
       "tested_by": "internal/tams.TestClientIngestOperations, internal/cli.TestDoctorOnlineChecksAPIVersionWithoutMutation"
     },
@@ -58,7 +58,7 @@
       "operation_id": "GET_storage-backends",
       "method": "GET",
       "path": "/service/storage-backends",
-      "cli": "api storage-backends",
+      "cli": "ingest, doctor --online",
       "implemented_by": "internal/tams.Client.StorageBackends",
       "tested_by": "internal/tams.TestClientIngestOperations, internal/cli.TestDoctorOnlineResolvesDefaultAndRequestedStorage"
     },
@@ -66,7 +66,7 @@
       "operation_id": "GET_flows-flowId",
       "method": "GET",
       "path": "/flows/{flowId}",
-      "cli": "api flow get",
+      "cli": "ingest",
       "implemented_by": "internal/tams.Client.Flow",
       "tested_by": "internal/tams.TestClientIngestOperations"
     },
@@ -74,7 +74,7 @@
       "operation_id": "PUT_flows-flowId",
       "method": "PUT",
       "path": "/flows/{flowId}",
-      "cli": "api flow put",
+      "cli": "ingest",
       "implemented_by": "internal/tams.Client.PutFlow",
       "tested_by": "internal/tams.TestClientIngestOperations"
     },
@@ -82,15 +82,15 @@
       "operation_id": "GET_flows-flowId-segments",
       "method": "GET",
       "path": "/flows/{flowId}/segments",
-      "cli": "api segment list",
+      "cli": "ingest",
       "implemented_by": "internal/tams.Client.ListSegments",
-      "tested_by": "internal/tams.TestSegmentsResolvesPagingAgainstThePreviousPage, internal/tams.TestSegmentsParsesAllRFCLinkFieldValues, internal/tams.TestSegmentsEnforcesAtomicCollectionLimits, internal/cli.TestCLIAPISegmentListDownloadURLsAreOptIn"
+      "tested_by": "internal/tams.TestSegmentsResolvesPagingAgainstThePreviousPage, internal/tams.TestSegmentsParsesAllRFCLinkFieldValues, internal/tams.TestSegmentsEnforcesAtomicCollectionLimits, internal/ingest.TestListingsOnlyRequestDownloadURLsWhenRead"
     },
     {
       "operation_id": "POST_flows-flowId-segments",
       "method": "POST",
       "path": "/flows/{flowId}/segments",
-      "cli": "api segment register",
+      "cli": "ingest",
       "implemented_by": "internal/tams.Client.RegisterSegment",
       "tested_by": "internal/tams.TestClientIngestOperations"
     },
@@ -98,7 +98,7 @@
       "operation_id": "POST_flows-flowId-storage",
       "method": "POST",
       "path": "/flows/{flowId}/storage",
-      "cli": "api storage allocate",
+      "cli": "ingest",
       "implemented_by": "internal/tams.Client.AllocateStorage",
       "tested_by": "internal/tams.TestClientIngestOperations"
     },
@@ -106,31 +106,15 @@
       "operation_id": "GET_objects",
       "method": "GET",
       "path": "/objects/{objectId}",
-      "cli": "api object get",
+      "cli": "ingest",
       "implemented_by": "internal/tams.Client.Object",
-      "tested_by": "internal/tams.TestClientIngestOperations"
-    },
-    {
-      "operation_id": "POST_objects-instances",
-      "method": "POST",
-      "path": "/objects/{objectId}/instances",
-      "cli": "api object instance register",
-      "implemented_by": "internal/tams.Client.RegisterObjectInstance",
-      "tested_by": "internal/tams.TestClientIngestOperations"
-    },
-    {
-      "operation_id": "DELETE_objects-instances",
-      "method": "DELETE",
-      "path": "/objects/{objectId}/instances",
-      "cli": "api object instance delete",
-      "implemented_by": "internal/tams.Client.DeleteObjectInstance",
       "tested_by": "internal/tams.TestClientIngestOperations"
     },
     {
       "operation_id": "DELETE_flows-flowId-segments",
       "method": "DELETE",
       "path": "/flows/{flowId}/segments",
-      "cli": "api segment delete",
+      "cli": "ingest",
       "implemented_by": "internal/tams.Client.DeleteSegments",
       "tested_by": "internal/tams.TestClientIngestOperations, internal/tams.TestDeleteSegmentsReconcilesCommittedRequestAfterLostResponse"
     },
@@ -138,7 +122,7 @@
       "operation_id": "GET_flow-delete-requests-request-id",
       "method": "GET",
       "path": "/flow-delete-requests/{request-id}",
-      "cli": "api segment delete",
+      "cli": "ingest",
       "implemented_by": "internal/tams.Client.DeleteSegments",
       "tested_by": "internal/tams.TestDeleteSegmentsMonitorsAcceptedRequest"
     }
@@ -209,8 +193,8 @@
     {
       "id": "lean-segment-listing",
       "source": "adr/0023,openapi/GET_flows-flowId-segments",
-      "requirement": "Segment listings that need only identity omit get_urls, while callers that immediately read media explicitly request fresh presigned URLs; the low-level command is lean by default, strips unexpected get_urls from every page, and makes URL disclosure an explicit opt-in.",
-      "asserted_by": "cli.TestCLIAPISegmentListDownloadURLsAreOptIn, ingest.TestListingsOnlyRequestDownloadURLsWhenRead"
+      "requirement": "Segment listings that need only identity omit get_urls, while ingest paths that immediately read media explicitly request fresh presigned URLs.",
+      "asserted_by": "ingest.TestListingsOnlyRequestDownloadURLsWhenRead"
     },
     {
       "id": "generation-remains-operator-owned",
@@ -235,12 +219,6 @@
       "source": "adr/0009",
       "requirement": "Segment overlap was rejected; Segment timeranges form a non-overlapping sequence.",
       "asserted_by": "contracts.TestSegmentTimerangesDoNotOverlap"
-    },
-    {
-      "id": "uncontrolled-instance-label",
-      "source": "adr/0042",
-      "requirement": "label is mandatory when registering an uncontrolled Object Instance, and meaningless for a controlled one.",
-      "asserted_by": "cli.TestCLIObjectInstanceLabelRules"
     },
     {
       "id": "object-timerange-not-deprecated-fields",
@@ -414,15 +392,15 @@
     },
     {
       "source": "adr/0027,adr/0038",
-      "reason": "The objects and object instance endpoints are covered as ingest operations; they add no rule about what tamsin writes."
+      "reason": "Object metadata reads support ingest verification; Object-instance administration does not constrain the finite ingest workflow."
     },
     {
       "source": "adr/0028,adr/0035,appnote/0016",
       "reason": "Authentication and authorisation are covered by the authentication section above."
     },
     {
-      "source": "adr/0030",
-      "reason": "External media objects are covered by the adr/0042 uncontrolled instance label rule."
+      "source": "adr/0030,adr/0042",
+      "reason": "External Object-instance registration and its label rules are general storage administration outside the finite ingest workflow."
     },
     {
       "source": "adr/0032",
@@ -458,7 +436,7 @@
     },
     {
       "source": "appnote/0018",
-      "reason": "Managing multiple Object instances is a storage operation covered by the object instance endpoints."
+      "reason": "Managing multiple Object instances is general storage administration outside the finite ingest workflow."
     }
   ],
   "open_findings": []

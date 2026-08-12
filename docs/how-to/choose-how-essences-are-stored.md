@@ -102,7 +102,7 @@ A muxed ingest produces a media-owning Flow that collects other Flows. An
 independent ingest produces media-owning essence Flows and an empty collector:
 
 ```sh
-tamsin api flow get "$FLOW_ID" --format json | jq '{format, container, flow_collection}'
+tamsctl flow get "$FLOW_ID" --output json | jq '{format, container, flow_collection}'
 ```
 
 For muxed storage, each parent `flow_collection` item carries the

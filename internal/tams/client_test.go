@@ -182,22 +182,6 @@ func TestClientIngestOperations(t *testing.T) {
 			} else {
 				_, _ = io.WriteString(writer, `{"object_id":"object"}`)
 			}
-		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/instances"):
-			var body ObjectInstanceRequest
-			decodeErr := json.NewDecoder(request.Body).Decode(&body)
-			controlled := body.StorageID == "storage" && body.URL == "" && body.Label == ""
-			uncontrolled := body.StorageID == "" && body.URL == "https://objects.example.test/object" && body.Label == "archive"
-			if decodeErr != nil || (!controlled && !uncontrolled) {
-				http.Error(writer, "invalid Object instance request", http.StatusBadRequest)
-				return
-			}
-			writer.WriteHeader(http.StatusCreated)
-		case request.Method == http.MethodDelete && strings.HasSuffix(request.URL.Path, "/instances"):
-			if request.URL.Query().Get("storage_id") != "storage" || request.URL.Query().Has("label") {
-				http.Error(writer, "invalid Object instance query", http.StatusBadRequest)
-				return
-			}
-			writer.WriteHeader(http.StatusNoContent)
 		default:
 			http.Error(writer, request.Method+" "+request.RequestURI, http.StatusNotFound)
 		}
@@ -264,21 +248,6 @@ func TestClientIngestOperations(t *testing.T) {
 	}
 	if remaining, err := client.Segments(ctx, "flow", "object"); err != nil || len(remaining) != 0 {
 		t.Fatalf("Segments() after delete = %#v, %v", remaining, err)
-	}
-	// Re-register so the Object-instance assertions below still have a Segment.
-	if err := client.RegisterSegment(ctx, "flow", SegmentRequest{ObjectID: "object", Timerange: "[0:0_1:0)"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.RegisterObjectInstance(ctx, "object", ObjectInstanceRequest{StorageID: "storage"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.RegisterObjectInstance(ctx, "object", ObjectInstanceRequest{
-		URL: "https://objects.example.test/object", Label: "archive",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.DeleteObjectInstance(ctx, "object", "storage", ""); err != nil {
-		t.Fatal(err)
 	}
 }
 

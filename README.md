@@ -29,7 +29,7 @@ and versioned NDJSON events are projections of the same ingest result.
 - Human receipts, terminal-aware progress, and a bounded NDJSON event protocol
 - Strict configuration precedence, typed exit codes, and a read-only doctor
 - BBC TAMS 8.2 target with an 8.1 compatibility floor and dual TAMOSS gates
-- Optional immutable TAMS Flow Profile assignment with typed discovery commands
+- Optional immutable TAMS Flow Profile assignment
 
 ## Core model
 
@@ -75,7 +75,7 @@ verify it against `SHA256SUMS` and its GitHub build attestation, then place it o
 `PATH`. For example, on Linux amd64:
 
 ```sh
-version=v1.0.0-rc.1
+version=v1.0.0-rc.2
 asset=tamsin-linux-amd64
 base="https://github.com/livewyer-ops/tamsin/releases/download/${version}"
 
@@ -91,8 +91,8 @@ The release also publishes a non-root multi-platform image. OCI tags omit the
 Git tag's leading `v`:
 
 ```sh
-docker pull ghcr.io/livewyer-ops/tamsin:1.0.0-rc.1
-docker run --rm ghcr.io/livewyer-ops/tamsin:1.0.0-rc.1 --version
+docker pull ghcr.io/livewyer-ops/tamsin:1.0.0-rc.2
+docker run --rm ghcr.io/livewyer-ops/tamsin:1.0.0-rc.2 --version
 ```
 
 Replace the example version with the release you intend to deploy. Pin
@@ -119,7 +119,9 @@ On TAMS 8.2, assign an immutable service Flow Profile when the generated
 technical metadata must conform to an operator-managed contract:
 
 ```sh
-tamsin api flow-profile list --format urn:x-nmos:format:video
+export TAMSCTL_ENDPOINT=https://tams.example.com
+export TAMSCTL_AUTH_TOKEN="$TAMSIN_AUTH_TOKEN"
+tamsctl flow-profile list --format urn:x-nmos:format:video
 tamsin ingest --profile essence-segments \
   --tams-flow-profile video=60d9df18-6d9d-4b86-84bf-d1dcf14b3a28 \
   --tams-flow-profile audio:0=8d5a25eb-35cb-423b-8e80-72258195ac2c \
@@ -130,6 +132,10 @@ The local `--profile` chooses how TAMSin handles bytes. A TAMS Flow Profile
 constrains one generated essence Flow. Bare UUID assignment is accepted only
 when exactly one eligible Flow exists; repeated formats require zero-based
 selectors such as `audio:0` and `audio:1`.
+
+General TAMS resource inspection and administration use the separate
+implementation-independent `tamsctl` client. TAMSin itself retains only the
+operations required to plan, write, resume and verify an ingest.
 
 The `essence-segments` profile stores a multiplexed input as one Flow per essence plus an
 empty collector Flow. A successful command ends with a permanent receipt that

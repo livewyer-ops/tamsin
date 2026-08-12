@@ -206,12 +206,6 @@ type DeletionRequest struct {
 
 type ObjectInfo map[string]any
 
-type ObjectInstanceRequest struct {
-	StorageID string `json:"storage_id,omitempty"`
-	URL       string `json:"url,omitempty"`
-	Label     string `json:"label,omitempty"`
-}
-
 type HTTPError struct {
 	Method     string
 	URL        string

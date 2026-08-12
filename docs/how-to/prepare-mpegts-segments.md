@@ -23,7 +23,7 @@ keyframes, so a long group of pictures produces longer Segments. Inspect the
 timeranges TAMSin registered:
 
 ```sh
-tamsin api segment list "$FLOW_ID" --format json | jq '[.[].timerange]'
+tamsctl segment list "$FLOW_ID" --output json | jq '[.[].timerange]'
 ```
 
 If a consumer requires a precise decoder-refresh cadence, encode the source

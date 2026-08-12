@@ -11,11 +11,11 @@ The adjacent BBC media-timestamp implementation is Python-only. Calling Python f
 
 ## Decision
 
-Use a small typed Go client over `net/http` for every TAMS 8.1/8.2 operation
-involved in upload and ingest. Keep the compatibility inventory and target
-delta machine-readable in `contracts/tams-v8.1.json` and
-`contracts/tams-v8.2.json`, compile behaviour tests against each typed method,
-and retain `tamsin api request` for vendor extensions.
+Use a small typed Go client over `net/http` for every TAMS operation involved in
+upload and ingest. Keep the compatibility inventory and target delta
+machine-readable in `contracts/tams-v8.1.json` and `contracts/tams-v8.2.json`,
+and compile behaviour tests against each typed method. General resource
+administration and vendor extensions belong to the separate `tamsctl` client.
 
 Implement only TAMS-specific timeline formatting and checked nanosecond/rational conversion locally. Continue using maintained libraries for OAuth, S3, HTTP input retries, UUIDs, CLI/configuration, and media inspection.
 

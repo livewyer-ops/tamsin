@@ -502,7 +502,6 @@ if [ ! -s "$port_file" ]; then
   exit 1
 fi
 http_url="http://127.0.0.1:$(<"$port_file")/http.ts"
-local_http_url="http://127.0.0.1:$(<"$port_file")/local.ts"
 curl -fsS "$http_url" >/dev/null
 
 run_ingest() {
@@ -610,17 +609,75 @@ assert_ingest_artifacts() {
       return 1
     }
 }
-run_api() {
-  capture_api "$@" >/dev/null
+api_component() {
+  jq -rn --arg value "$1" '$value | @uri'
 }
-# capture_api returns the API response so it can be asserted against, rather
-# than only checking that the call succeeded.
+
+# Live conformance assertions use the API directly. They verify what the
+# service retained without making TAMSin carry a general control-plane CLI.
+api_request() {
+  local method="$1" path="$2"
+  curl --ipv4 \
+    --resolve "api.tamoss.localtest.me:$HTTPS_PORT:127.0.0.1" \
+    --insecure --fail --silent --show-error \
+    --request "$method" \
+    --header "Authorization: Bearer $TAMSIN_AUTH_TOKEN" \
+    --header 'Accept: application/json' \
+    "${API_URL%/}/$path"
+}
+
+# capture_api preserves the concise resource-oriented calls used throughout
+# this test while translating them to read-only HTTP requests.
 capture_api() {
-  docker run --rm --network host "${docker_host_args[@]}" \
-    -e TAMSIN_ENDPOINT -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_TOKEN \
-    -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_LOG_LEVEL \
-    -e TAMSIN_FORMAT=json \
-    "$IMAGE" api "$@"
+  local resource="$1" action="$2" id="$3"
+  shift 3
+  case "$resource $action" in
+    'flow get')
+      api_request GET "flows/$(api_component "$id")"
+      ;;
+    'segment list')
+      local query='limit=1000&accept_get_urls=&presigned=false' object_id=''
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --object-id)
+            object_id="$2"
+            shift 2
+            ;;
+          *)
+            printf 'e2e: unsupported Segment-list argument %s\n' "$1" >&2
+            return 2
+            ;;
+        esac
+      done
+      if [ -n "$object_id" ]; then
+        query="$query&object_id=$(api_component "$object_id")"
+      fi
+      api_request GET "flows/$(api_component "$id")/segments?$query"
+      ;;
+    *)
+      printf 'e2e: unsupported direct API operation %s %s\n' "$resource" "$action" >&2
+      return 2
+      ;;
+  esac
+}
+
+retract_segment() {
+  local flow_id="$1" timerange="$2" object_id="$3"
+  api_request DELETE \
+    "flows/$(api_component "$flow_id")/segments?timerange=$(api_component "$timerange")&object_id=$(api_component "$object_id")" \
+    >/dev/null
+
+  local segments
+  for _ in {1..120}; do
+    segments="$(capture_api segment list "$flow_id" --object-id "$object_id")" || return 1
+    if jq -e --arg timerange "$timerange" --arg object_id "$object_id" \
+      'all(.[]; .timerange != $timerange or .object_id != $object_id)' <<<"$segments" >/dev/null; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  printf 'e2e: Segment %s remained on Flow %s after retraction\n' "$object_id" "$flow_id" >&2
+  return 1
 }
 
 # result_flow_ids yields every Flow an ingest produced. Both storage
@@ -762,9 +819,6 @@ jq -e '.results[0].status == "resumed" and .results[0].verification == "verified
 for flow_id in $(result_flow_ids "$fixtures/local-file.json"); do
   assert_flow_conformance local-file "$flow_id"
 done
-local_object_id="$(jq -er '[.results[0].flows[] | (.objects // [])[] | .object_id][0]' "$fixtures/local-file.json")"
-run_api object instance register "$local_object_id" --url "$local_http_url" --label tamsin-e2e
-run_api object instance delete "$local_object_id" --label tamsin-e2e
 run_ingest directory 2 -i /fixtures/directory
 for flow_id in $(result_flow_ids "$fixtures/directory.json"); do
   assert_flow_conformance directory "$flow_id"
@@ -846,9 +900,8 @@ capture_api flow get "$muxed_flow" | jq -e '.format == "urn:x-nmos:format:multi"
 retract_flow="$(jq -er '.results[0].root_flow_id' "$fixtures/whole-file.json")"
 retract_timerange="$(jq -er '.results[0] as $result | $result.flows[] | select(.flow_id == $result.root_flow_id) | .objects[0].timerange' "$fixtures/whole-file.json")"
 retract_object="$(jq -er '.results[0] as $result | $result.flows[] | select(.flow_id == $result.root_flow_id) | .objects[0].object_id' "$fixtures/whole-file.json")"
-run_api segment delete "$retract_flow" --timerange "$retract_timerange" --object-id "$retract_object"
-# The typed command monitors a 202 deletion request and, after either 202 or
-# 204, waits until the exact Object/timerange tuple is no longer listed.
+retract_segment "$retract_flow" "$retract_timerange" "$retract_object"
+# Retraction is terminal only once the exact Object/timerange tuple is absent.
 capture_api segment list "$retract_flow" --object-id "$retract_object" | jq -e 'length == 0' >/dev/null || {
   printf 'e2e: Segment %s is still present after terminal retraction from Flow %s\n' \
     "$retract_object" "$retract_flow" >&2
@@ -903,7 +956,7 @@ jq -e '.failed == 0 and .succeeded == 1 and .results[0].status == "ingested"' "$
 TAMSIN_ENDPOINT="$API_URL?access_token=$TAMSIN_AUTH_TOKEN" TAMSIN_AUTH_MODE=url-token \
   docker run --rm --network host "${docker_host_args[@]}" \
     -e TAMSIN_ENDPOINT -e TAMSIN_AUTH_MODE -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_FORMAT \
-    "$IMAGE" api service >/dev/null
+    "$IMAGE" doctor --online >/dev/null
 
 # Exercise OAuth2 client credentials against TAMOSS's managed Authentik endpoint.
 oauth_secret="$(kubectl --kubeconfig "$kubeconfig" -n tams get tamoss tamoss-kind -o 'jsonpath={.status.resolved.generatedSecrets.oauth2Credentials}')"
@@ -915,7 +968,7 @@ export TAMSIN_AUTH_CLIENT_ID TAMSIN_AUTH_CLIENT_SECRET TAMSIN_AUTH_TOKEN_URL
 TAMSIN_AUTH_MODE=oauth-client docker run --rm --network host "${docker_host_args[@]}" \
   -e TAMSIN_ENDPOINT -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_CLIENT_ID -e TAMSIN_AUTH_CLIENT_SECRET -e TAMSIN_AUTH_TOKEN_URL \
   -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_FORMAT \
-  "$IMAGE" api service >/dev/null
+  "$IMAGE" doctor --online >/dev/null
 
-printf 'TAMOSS %s end-to-end matrix passed with profile %s: local, deterministic resume, Object instances, directory, manifest, HTTP, stdin, S3, whole-file, MPEG-TS segments, Segment retraction, bearer, URL token, and OAuth client credentials.\nFlows read back from the live service satisfied AppNote 0003 tag naming, AppNote 0006 container and collection rules, and operator-owned generation handling.\n' \
+printf 'TAMOSS %s end-to-end matrix passed with profile %s: local, deterministic resume, directory, manifest, HTTP, stdin, S3, whole-file, MPEG-TS segments, Segment retraction, bearer, URL token, and OAuth client credentials.\nFlows read back from the live service satisfied AppNote 0003 tag naming, AppNote 0006 container and collection rules, and operator-owned generation handling.\n' \
   "$TAMOSS_RELEASE" "$PROFILE"

@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-// The command tree is assembled by hand across root.go, api.go and config.go, so
+// The public command tree is assembled by hand across root.go and config.go, so
 // a subcommand can be dropped from its parent without any other test noticing:
 // the constructor still exists and still compiles. This pins the whole reachable
 // tree, which is the part users actually address.
@@ -17,15 +17,8 @@ func TestCommandTreeExposesEveryAddressableCommand(t *testing.T) {
 	t.Parallel()
 
 	want := map[string][]string{
-		"tamsin":                     {"api", "completion", "config", "doctor", "ingest", "profiles"},
-		"tamsin api":                 {"flow", "flow-profile", "object", "request", "segment", "service", "storage", "storage-backends"},
-		"tamsin api flow":            {"get", "put"},
-		"tamsin api flow-profile":    {"create", "get", "list"},
-		"tamsin api storage":         {"allocate"},
-		"tamsin api segment":         {"delete", "list", "register"},
-		"tamsin api object":          {"get", "instance"},
-		"tamsin api object instance": {"delete", "register"},
-		"tamsin config":              {"show", "validate"},
+		"tamsin":        {"completion", "config", "doctor", "ingest", "profiles"},
+		"tamsin config": {"show", "validate"},
 	}
 
 	app := &application{v: viper.New()}
@@ -55,7 +48,7 @@ func TestCommandTreeExposesEveryAddressableCommand(t *testing.T) {
 func collectCommandTree(command *cobra.Command, into map[string][]string) {
 	var names []string
 	for _, child := range command.Commands() {
-		if child.Name() == "help" {
+		if child.Name() == "help" || child.Hidden {
 			continue
 		}
 		names = append(names, child.Name())

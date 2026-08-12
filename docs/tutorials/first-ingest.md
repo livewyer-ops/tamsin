@@ -2,7 +2,7 @@
 
 By the end of this tutorial you will have put a piece of media into a Time-addressable Media Store and read it back out, using nothing but a local file and a terminal. You do not need to understand TAMS to follow it. Everything is explained as you go, and nothing is left for you to decide.
 
-You will need TAMSin on your `PATH`, FFmpeg installed, and a TAMS endpoint you can write to.
+You will need TAMSin and `tamsctl` on your `PATH`, FFmpeg installed, and a TAMS endpoint you can write to. TAMSin performs the ingest; `tamsctl` provides the optional read-back inspection in step 6.
 
 ## 1. Check your tools
 
@@ -21,12 +21,15 @@ as skipped because it does not render media.
 
 ## 2. Point TAMSin at your store
 
-TAMSin reads its endpoint and credentials from the environment, which keeps them out of your shell history and out of process listings:
+TAMSin reads its endpoint and credentials from the environment, which keeps them out of your shell history and out of process listings. Give the companion TAMS client the same connection without copying secrets into arguments:
 
 ```sh
 export TAMSIN_ENDPOINT='https://tams.example.com'
 export TAMSIN_AUTH_MODE='bearer'
 export TAMSIN_AUTH_TOKEN='your-token-here'
+export TAMSCTL_ENDPOINT="$TAMSIN_ENDPOINT"
+export TAMSCTL_AUTH_MODE="$TAMSIN_AUTH_MODE"
+export TAMSCTL_AUTH_TOKEN="$TAMSIN_AUTH_TOKEN"
 ```
 
 Confirm TAMSin can reach the store and that your credentials work:
@@ -137,16 +140,16 @@ export FLOW_ID='paste-a-flow-id-here'
 
 ## 6. Read it back
 
-The media is now in the store, described by TAMS metadata. Look at what TAMSin wrote:
+The media is now in the store, described by TAMS metadata. Inspect what TAMSin wrote with the implementation-independent TAMS client:
 
 ```sh
-tamsin api flow get "$FLOW_ID" --format json
+tamsctl flow get "$FLOW_ID" --output json
 ```
 
 You will see the Flow's `format` (`urn:x-nmos:format:video` or `:audio`), the `container` its media is stored in, and `essence_parameters` describing the picture or sound. Now list where that media sits on the timeline:
 
 ```sh
-tamsin api segment list "$FLOW_ID" --format json
+tamsctl segment list "$FLOW_ID" --output json
 ```
 
 Each Flow Segment maps a Media Object onto a `timerange` such as `[0:0_4:0)` — from zero seconds, up to but not including four. That mapping is what makes the store *time-addressable*: you ask for a period of time, not for a file.

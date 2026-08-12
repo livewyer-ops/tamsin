@@ -8,9 +8,14 @@ stdout 'tamsin'
 exec tamsin --help
 stdout 'creates TAMS Flows, and uploads verified Media Objects'
 stdout 'ingest'
-stdout 'api'
 stdout 'doctor'
 stdout 'profiles'
+
+# The removed API surface cannot fall through to implicit ingest. Existing
+# automation gets an actionable migration error while the tombstone remains
+# absent from help.
+! exec tamsin api flow get some-flow
+stderr 'moved to tamsctl'
 
 # Profile discovery is config-independent and exposes the complete stable
 # catalogue to both operators and wrappers.
@@ -46,29 +51,6 @@ stdout '-v, --verbose'
 
 # --segment-duration is described in TAMS terms, not FFmpeg's.
 stdout 'Flow Segment'
-
-# The API subcommand tree covers the pinned ingest operations.
-exec tamsin api --help
-stdout 'flow'
-stdout 'segment'
-stdout 'storage'
-stdout 'object'
-stdout 'request'
-
-# Segment deletion is reachable without dropping to a raw request.
-exec tamsin api segment --help
-stdout 'delete'
-
-# Segment listings are lean unless download URLs are explicitly requested.
-exec tamsin api segment list --help
-stdout '--include-download-urls'
-
-# Deleting Segments requires an explicit timerange rather than defaulting to
-# the unbounded one, so a whole Flow cannot be emptied by omission.
-! exec tamsin api segment delete some-flow
-stderr 'timerange'
-! exec tamsin api segment delete some-flow --timerange '[0:0_1:0)'
-stderr 'object-id'
 
 # Completions are generated for every shell the docs claim.
 exec tamsin completion bash

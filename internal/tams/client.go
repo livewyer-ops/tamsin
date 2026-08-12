@@ -176,17 +176,6 @@ func (c *Client) Profile(ctx context.Context, profileID string) (Profile, error)
 	return result, nil
 }
 
-// CreateProfile creates an immutable TAMS 8.2 Flow Profile. The API uses POST
-// to an operator-selected UUID and rejects attempts to replace an existing
-// Profile.
-func (c *Client) CreateProfile(ctx context.Context, profileID string, profile Profile) (Profile, error) {
-	var result Profile
-	if err := c.doJSON(ctx, http.MethodPost, "service/profiles/"+escapeSegment(profileID), profile, &result, http.StatusCreated); err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
 func (c *Client) Flow(ctx context.Context, flowID string) (Flow, error) {
 	var result Flow
 	if err := c.doJSON(ctx, http.MethodGet, "flows/"+escapeSegment(flowID), nil, &result, http.StatusOK); err != nil {
@@ -258,41 +247,6 @@ func (c *Client) Object(ctx context.Context, objectID string) (ObjectInfo, error
 		return nil, err
 	}
 	return result, nil
-}
-
-func (c *Client) RegisterObjectInstance(ctx context.Context, objectID string, request ObjectInstanceRequest) error {
-	return c.doJSON(ctx, http.MethodPost, "objects/"+escapeSegment(objectID)+"/instances", request, nil, http.StatusCreated)
-}
-
-func (c *Client) DeleteObjectInstance(ctx context.Context, objectID, storageID, label string) error {
-	query := make(url.Values)
-	if storageID != "" {
-		query.Set("storage_id", storageID)
-	}
-	if label != "" {
-		query.Set("label", label)
-	}
-	if len(query) == 0 {
-		return errors.New("storage ID or label is required to delete an object instance")
-	}
-	return c.doJSON(ctx, http.MethodDelete, "objects/"+escapeSegment(objectID)+"/instances?"+query.Encode(), nil, nil, http.StatusNoContent)
-}
-
-// RawJSON exposes the pinned API operations without forcing callers through a
-// lossy generic map. It is used by the low-level `tamsin api` commands.
-func (c *Client) RawJSON(ctx context.Context, method, requestPath string, body []byte) ([]byte, error) {
-	var decoded json.RawMessage
-	if len(body) > 0 && !json.Valid(body) {
-		return nil, errors.New("request body is not valid JSON")
-	}
-	var payload any
-	if len(body) > 0 {
-		payload = json.RawMessage(body)
-	}
-	if err := c.doJSON(ctx, strings.ToUpper(method), strings.TrimLeft(requestPath, "/"), payload, &decoded); err != nil {
-		return nil, err
-	}
-	return decoded, nil
 }
 
 // transferContext applies the optional transfer deadline. Without one the

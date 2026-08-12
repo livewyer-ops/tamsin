@@ -98,7 +98,7 @@ func TestPinnedTAMS82TargetContractExtendsCompatibilityReview(t *testing.T) {
 		t.Fatalf("TAMOSS 8.2 preview pin is incomplete: %#v", target.TAMOSS)
 	}
 
-	wantOperations := []string{"GET_profiles", "GET_profiles-profileId", "POST_profiles-profileId"}
+	wantOperations := []string{"GET_profiles-profileId"}
 	gotOperations := make([]string, 0, len(target.IngestOperations))
 	for _, operation := range target.IngestOperations {
 		if operation.Method == "" || operation.Path == "" || operation.CLI == "" || operation.ImplementedBy == "" || operation.TestedBy == "" {
@@ -182,8 +182,8 @@ func TestPinnedTAMSIngestConformanceMatrixIsComplete(t *testing.T) {
 	}
 	sort.Strings(actualOperations)
 	expectedOperations := []string{
-		"DELETE_flows-flowId-segments", "DELETE_objects-instances", "GET_flow-delete-requests-request-id", "GET_flows-flowId", "GET_flows-flowId-segments", "GET_objects", "GET_service", "GET_storage-backends",
-		"POST_flows-flowId-segments", "POST_flows-flowId-storage", "POST_objects-instances", "PUT_flows-flowId",
+		"DELETE_flows-flowId-segments", "GET_flow-delete-requests-request-id", "GET_flows-flowId", "GET_flows-flowId-segments", "GET_objects", "GET_service", "GET_storage-backends",
+		"POST_flows-flowId-segments", "POST_flows-flowId-storage", "PUT_flows-flowId",
 	}
 	sort.Strings(expectedOperations)
 	if !reflect.DeepEqual(actualOperations, expectedOperations) {
