@@ -42,8 +42,11 @@ output must be allowed to close before it can be uploaded, so it may temporarily
 cross the rolling watermark; the global staging-capacity ledger cancels the
 render if that unavoidable overshoot cannot fit. A late renderer failure
 therefore leaves a named, resumable prefix.
-FFprobe and FFmpeg still share a two-process local budget; a rolling custom
-treatment leaves one slot for the first-Segment timestamp probe it requires.
+FFprobe and FFmpeg still share a two-process local budget. Only one rolling
+FFmpeg render runs at a time, leaving one slot for its first-Segment timestamp
+probe; uploads and verification can continue concurrently. This makes local
+process and memory use predictable, at the cost of serial rendering when a
+batch contains several inputs that all need segmentation.
 
 If you need Segments at a precise cadence, the source has to carry keyframes at that cadence — which means influencing the encoder, not the ingest.
 
@@ -81,7 +84,15 @@ This fallback keeps the required distinction between a Flow that owns Objects
 and an empty collector Flow, which must omit `container`; it is not a claim that
 the media bytes themselves have no more specific type.
 
-There is deliberately no fragmented-MP4 option. Fragmented MP4 needs a separate initialisation segment, and TAMS 8.1 at the pinned commit provides no way to reference one: both `essence_parameters.init_segments` and a Flow Segment's `init_object_id` post-date it. MPEG-TS carries decoder configuration in every Segment and so stays independently decodable without one, which is what AppNote 0005 asks for.
+There is deliberately no high-level fragmented-MP4 option in this release.
+TAMS 8.2 can associate a separately allocated initialisation Object through
+`init_object_id`, and TAMSin's typed Segment API preserves an explicitly
+supplied value. Producing fMP4 safely still needs coordinated initialisation
+Object allocation, verification, resume, retraction, and player-compatibility
+tests. Exposing a renderer flag before that lifecycle exists would create
+apparently valid Flows whose media may not be independently usable. MPEG-TS
+carries decoder configuration in every Segment and remains the supported short
+independently decodable representation.
 
 ## See also
 

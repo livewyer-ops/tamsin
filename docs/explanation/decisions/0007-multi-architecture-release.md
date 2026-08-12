@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-09
-- Last reviewed: 2026-08-11
+- Last reviewed: 2026-08-12
 
 ## Context
 
@@ -17,6 +17,16 @@ Actions artefacts already provide an immutable service-side ID and digest and
 can retain an OCI image layout without making it consumable.
 
 ## Decision
+
+The large FFmpeg dependency graph is built separately as the immutable
+amd64/arm64 runtime revision
+`ghcr.io/livewyer-ops/tamsin-ffmpeg-runtime:5.1.9-bookworm-r1`. Its Dockerfile
+pins the Debian base digest, snapshot, FFmpeg package and CA bundle, and its
+workflow publishes maximal provenance plus an SPDX SBOM. A revision tag is
+never overwritten. Application CI resolves that tag to its index digest before
+building and passes the immutable reference into the final `FROM`; the release
+metadata records the same base digest. This preserves full codec support while
+keeping the 202-package installation out of ordinary application builds.
 
 The release build exports exactly `linux/amd64` and `linux/arm64` together as a
 local OCI image layout. Buildx, BuildKit, Docker, QEMU and their setup actions
@@ -83,11 +93,14 @@ that rewrite OCI index JSON are deliberately unsupported by the release gate:
 digest continuity is stronger than accepting a semantically similar manifest.
 
 The full Debian FFmpeg installation is intentionally retained for broad codec
-and container support. At the reviewed versions it is approximately 209 MB
-compressed and 559 MB expanded per platform; clients pulling the multi-platform
-tag receive only their selected platform. Attestations add about 4 MB per
-platform to registry and release-bundle storage, but are separate metadata and
-do not increase runtime image pulls or container memory.
+and container support. The reviewed runtime is about 203 MB on amd64 and adds
+roughly 484 MB to the base filesystem. Moving it to a revisioned base improves
+cold application build time and registry reuse, but does not reduce final image
+pull size or container memory by itself. Clients pull only their platform.
+Attestations are separate metadata and do not increase runtime image pulls or
+container memory. Release assets include container metadata and a deterministic
+supply-chain archive so the application and runtime identities, SPDX documents,
+and provenance statements can be reviewed without scraping workflow logs.
 
 ## Sources
 

@@ -14,6 +14,10 @@ are flags only.
 | `tamsin api` | Execute TAMS upload and ingest API operations |
 | `tamsin api service` | Get TAMS service information |
 | `tamsin api storage-backends` | List TAMS storage backends |
+| `tamsin api flow-profile` | List, inspect, or create immutable TAMS 8.2 Flow Profiles |
+| `tamsin api flow-profile list` | List Flow Profiles with optional format, codec, and label filters |
+| `tamsin api flow-profile get` | Get one Flow Profile |
+| `tamsin api flow-profile create` | Create one immutable Flow Profile from JSON |
 | `tamsin api flow` | Get or create a TAMS Flow |
 | `tamsin api flow get` | Get Flow metadata |
 | `tamsin api flow put` | Create or replace Flow metadata |
@@ -114,6 +118,7 @@ for check and output semantics.
 | `--storage-id` |  | string | target TAMS storage backend ID |
 | `--staging-byte-budget` |  | string | global temporary-media budget: auto or a byte size such as 80GiB (default "auto") |
 | `--temp-dir` |  | string | staging directory |
+| `--tams-flow-profile` |  | stringArray | assign a TAMS 8.2 Flow Profile as `[video|audio|image|data][:INDEX]=UUID` or a bare UUID (repeatable) |
 | `--transfers` |  | int | maximum Media Object uploads and verifications in flight across the whole run (default: --concurrency) |
 | `--verify` |  | string | Object integrity policy: auto, readback, or none (default "auto") |
 
@@ -121,6 +126,16 @@ for check and output semantics.
 for every built-in profile. Bare `--dry-run` is shorthand for
 `--dry-run=fast`. Use the equals form for `--dry-run=exact`, because an optional
 flag value separated by a space is parsed as a positional argument.
+
+`--tams-flow-profile` is independent of TAMSin's local treatment `--profile`.
+It fetches an immutable TAMS 8.2 technical profile and requires the generated
+Flow to match it exactly, except that the profile's target `avg_bit_rate` may
+differ from measured output. A bare UUID requires exactly one eligible essence
+Flow. Use `video=UUID`, `audio=UUID`, or zero-based selectors such as
+`audio:1=UUID` when the graph contains several candidates. Assignment becomes
+part of deterministic Flow identity. In dry-run this option permits only the
+otherwise necessary `GET /service` and selected Profile GETs; it never reads
+storage backends or mutates TAMS.
 
 `--verify=auto` accepts trustworthy SHA-256 evidence returned by storage for a
 new upload and falls back to downloading the registered Object. Resumed Objects
@@ -199,10 +214,16 @@ flags belong only to the command named in the first column.
 
 | Command | Flag | Short | Type | Description |
 | --- | --- | --- | --- | --- |
+| `api flow-profile list` | `--format` |  | string | filter by single-essence format URN |
+| `api flow-profile list` | `--codec` |  | string | filter by codec media type |
+| `api flow-profile list` | `--label` |  | string | filter by exact Profile label |
+| `api flow-profile create` | `--file` | `-f` | string | Profile JSON file or `-` for stdin (default "-") |
 | `api flow put` | `--file` | `-f` | string | Flow JSON file or `-` for stdin (default "-") |
 | `api storage allocate` | `--object-id` |  | stringArray | requested Object ID (repeatable) |
 | `api storage allocate` | `--storage-id` |  | string | storage backend ID |
 | `api storage allocate` | `--limit` |  | int | number of server-assigned Object IDs |
+| `api storage allocate` | `--content-type` |  | string | initialisation Object media type (TAMS 8.2) |
+| `api storage allocate` | `--presigned` |  | bool | request presigned upload URLs; use `--presigned=false` to refuse them (TAMS 8.2) |
 | `api segment list` | `--object-id` |  | string | filter by Object ID |
 | `api segment list` | `--include-download-urls` |  |  | include presigned download URLs and verbose storage metadata |
 | `api segment register` | `--file` | `-f` | string | Segment JSON file or `-` for stdin (default "-") |

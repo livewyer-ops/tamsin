@@ -96,6 +96,7 @@ The keys most often set from the environment:
 | `quiet` | `TAMSIN_QUIET` | `--quiet`, `-q` |
 | `verbose` | `TAMSIN_VERBOSE` | `--verbose`, `-v` |
 | `ingest.profile` | `TAMSIN_INGEST_PROFILE` | `--profile` |
+| `ingest.tams_flow_profiles` | `TAMSIN_INGEST_TAMS_FLOW_PROFILES` | `--tams-flow-profile` |
 | `ingest.segment_duration` | `TAMSIN_INGEST_SEGMENT_DURATION` | `--segment-duration`, `-d` |
 | `ingest.segment_format` | `TAMSIN_INGEST_SEGMENT_FORMAT` | `--segment-format` |
 | `ingest.essence_storage` | `TAMSIN_INGEST_ESSENCE_STORAGE` | `--essence-storage` |
@@ -158,6 +159,11 @@ ingest:
   # A version may be pinned as essence-segments@1. Explicit media settings below
   # override it and a differing combination reports custom@1.
   profile: essence-segments
+  # Optional immutable TAMS 8.2 technical contracts. A bare UUID is valid for
+  # exactly one eligible Flow; repeated formats need a zero-based selector.
+  tams_flow_profiles:
+    - video=60d9df18-6d9d-4b86-84bf-d1dcf14b3a28
+    - audio:0=8d5a25eb-35cb-423b-8e80-72258195ac2c
   # Optional stable root identities. Each is valid only when expansion resolves
   # exactly one input; an omitted identity is derived from the content.
   flow_id: ""
@@ -179,11 +185,13 @@ ingest:
   # single large file and many small ones draw on the same budget.
   transfers: 4
   # FFprobe measurements queued across the whole run. Defaults to two.
-  # FFprobe and FFmpeg share a two-process local budget. Rolling custom
-  # treatments leave one slot for their required timestamp probe.
+  # FFprobe and FFmpeg share a two-process local budget. Rolling FFmpeg renders
+  # serialise so one slot remains available for the first-Segment probe.
   probe_concurrency: 2
   # off mutates TAMS; fast validates without rendering; exact performs the
   # complete local renderer/Object preparation path without TAMS access.
+  # TAMS Flow Profile assignment is the exception: both modes read /service
+  # and the selected immutable Profiles, but make no other TAMS request.
   dry_run: off
   # auto accepts trustworthy upload-side SHA-256 evidence and reads back when
   # evidence is unavailable; readback always downloads; none opts out.

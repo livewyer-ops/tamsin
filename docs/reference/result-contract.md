@@ -69,7 +69,7 @@ Every record has the same envelope:
 ```json
 {
   "protocol": "tamsin.ingest.events",
-  "protocol_version": "2.0",
+  "protocol_version": "2.1",
   "type": "progress.snapshot",
   "seq": 17,
   "run_id": "0a853551-fb19-40d6-8f17-15dd3562e6d4",
@@ -95,7 +95,7 @@ for readability.
 | Field | Meaning |
 | --- | --- |
 | `protocol` | Always `tamsin.ingest.events`. Do not confuse the stream with a finite-command result or the durable journal. |
-| `protocol_version` | Wire-protocol major and minor version. Version `2.0` is independent of the media profile and terminal-result versions. |
+| `protocol_version` | Wire-protocol major and minor version. Version `2.1` adds optional TAMS Flow Profile identity and is independent of media-profile policy versions. |
 | `type` | Stable event name. Consumers branch on this value, not on a display message. |
 | `seq` | Globally contiguous sequence, starting at zero, in actual emission order. It is authoritative when timestamps tie or clocks differ. |
 | `run_id` | UUID shared by the whole stream, support diagnostics, and the optional journal. Together, `run_id` and `seq` identify one event. |
@@ -185,6 +185,11 @@ durable journal. A UI should preserve them rather than flattening every
 non-success into `failed`.
 
 Each Flow result has a mutation `disposition`:
+
+When assigned, `tams_flow_profile_id` is the immutable TAMS 8.2 Flow Profile
+UUID on both `flow.planned` and the matching terminal Flow result. Consumers
+should retain it with the Flow ID: changing the assignment changes generated
+identity, and an existing deterministic Flow is never silently repointed.
 
 | Disposition | Meaning |
 | --- | --- |

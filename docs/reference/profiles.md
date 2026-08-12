@@ -6,6 +6,12 @@ small, versioned ingest profiles. A profile is a reproducible contract over
 essence storage, Segment duration, Segment container, and compatibility checks;
 it is not a claim that every combination FFmpeg can mux is interoperable.
 
+These are TAMSin treatment profiles, not TAMS 8.2 Flow Profiles. A treatment
+profile decides what local work is performed and how bytes are packaged. An
+optional `--tams-flow-profile` selects an immutable service-owned technical
+contract for a particular generated essence Flow. The two choices are explicit
+and neither is inferred from the other.
+
 ## Named profiles
 
 | Profile | Essence storage | Segment target | Stored container | Intended use |
