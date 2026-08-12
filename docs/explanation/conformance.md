@@ -101,7 +101,9 @@ document.
 - TAMS Flow Profiles are distinct immutable 8.2 technical contracts. Assignment
   is explicit, participates in generated identity, requires an exact technical
   match except for measured average bit rate, and is never inferred from the
-  local treatment profile or silently changed on an existing Flow.
+  local treatment profile or silently changed on an existing Flow. Numeric
+  metadata is compared by exact JSON value rather than by its in-memory Go type;
+  presence, non-numeric types, object fields, and array order remain strict.
 - Generated Flow identity contains staged content, resolved media treatment,
   and the normalised technical graph, never an input locator, display label, or
   credential. Child Flows derive from the root. Canonical credential-free

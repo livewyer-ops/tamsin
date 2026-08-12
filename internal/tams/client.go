@@ -669,9 +669,19 @@ func (c *Client) doJSONResponse(ctx context.Context, method, requestPath string,
 			if output == nil || len(bytes.TrimSpace(responseBody)) == 0 {
 				return result, nil
 			}
-			if err := json.Unmarshal(responseBody, output); err != nil {
+			decoder := json.NewDecoder(bytes.NewReader(responseBody))
+			decoder.UseNumber()
+			if err := decoder.Decode(output); err != nil {
 				result.AmbiguousMutation = method == http.MethodDelete
 				return result, fmt.Errorf("decode %s response: %w", method, err)
+			}
+			var trailing any
+			if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+				result.AmbiguousMutation = method == http.MethodDelete
+				if err == nil {
+					return result, fmt.Errorf("decode %s response: response contains multiple JSON values", method)
+				}
+				return result, fmt.Errorf("decode trailing %s response content: %w", method, err)
 			}
 			return result, nil
 		}

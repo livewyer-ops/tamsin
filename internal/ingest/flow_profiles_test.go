@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +17,7 @@ import (
 const (
 	testVideoProfileID = "60d9df18-6d9d-4b86-84bf-d1dcf14b3a28"
 	testAudioProfileID = "8d5a25eb-35cb-423b-8e80-72258195ac2c"
+	testDataProfileID  = "21d83c46-9254-42f5-a0ab-c2feaf962c59"
 )
 
 func TestFlowProfileAssignmentsAreCanonicalAndUnambiguous(t *testing.T) {
@@ -133,6 +135,106 @@ func TestProfileBackedFlowPlansExpandedReadsAndCompactWrites(t *testing.T) {
 	}
 	if client.profileReads != 1 {
 		t.Fatalf("Profile reads = %d, want one", client.profileReads)
+	}
+}
+
+func TestProfileBackedDataFlowRetainsStrictNonNumericMetadata(t *testing.T) {
+	t.Parallel()
+	flow := tams.Flow{
+		"id": "f3b1a8de-6c1e-4a0b-9d2f-1c7e5a904bb1", "source_id": "9a2c4e60-71bd-4f3a-8e15-2d6b0c8a7f43",
+		"format": "urn:x-nmos:format:data", "codec": "application/json", "container": "application/json",
+		"essence_parameters": map[string]any{"data_type": "urn:x-tams:data:bounding-box"},
+	}
+	client := newFakeClient()
+	client.profiles[testDataProfileID] = tams.Profile{
+		"id": testDataProfileID,
+		"flow_metadata": map[string]any{
+			"format": "urn:x-nmos:format:data", "codec": "application/json", "container": "application/json",
+			"essence_parameters": map[string]any{"data_type": "urn:x-tams:data:bounding-box"},
+		},
+	}
+	pipeline := &Pipeline{client: client, profileCache: make(map[string]tams.Profile)}
+	expanded, err := pipeline.expandFlowProfile(context.Background(), graphFlow{
+		id: stringField(flow, "id"), flow: flow, profileID: testDataProfileID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for field, want := range map[string]any{
+		"profile_id": testDataProfileID,
+		"codec":      "application/json",
+		"container":  "application/json",
+	} {
+		if got := expanded.flow[field]; got != want {
+			t.Errorf("expanded data Flow %q = %v, want %v", field, got, want)
+		}
+	}
+}
+
+func TestProfileMismatchReportsNestedJSONPointerAndPresence(t *testing.T) {
+	t.Parallel()
+	flow := tams.Flow{
+		"format": "urn:x-nmos:format:video", "codec": "video/h264", "container": "video/mp4",
+		"segment_duration": map[string]any{"numerator": int64(10), "denominator": int64(1)},
+		"essence_parameters": map[string]any{
+			"frame_width": 64, "frame_height": 64,
+			"frame_rate": map[string]any{"numerator": int64(25), "denominator": int64(1)},
+		},
+	}
+	client := newFakeClient()
+	client.profiles[testVideoProfileID] = tams.Profile{
+		"id": testVideoProfileID,
+		"flow_metadata": map[string]any{
+			"format": "urn:x-nmos:format:video", "codec": "video/h264", "container": "video/mp4",
+			"segment_duration": map[string]any{"numerator": json.Number("10"), "denominator": json.Number("1")},
+			"essence_parameters": map[string]any{
+				"frame_width": json.Number("64"), "frame_height": json.Number("64"),
+				"frame_rate": map[string]any{"numerator": json.Number("24"), "denominator": json.Number("1")},
+			},
+		},
+	}
+	pipeline := &Pipeline{client: client, profileCache: make(map[string]tams.Profile)}
+	_, err := pipeline.expandFlowProfile(context.Background(), graphFlow{
+		id: "f3b1a8de-6c1e-4a0b-9d2f-1c7e5a904bb1", flow: flow, profileID: testVideoProfileID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "/flow_metadata/essence_parameters/frame_rate/numerator") ||
+		!strings.Contains(err.Error(), "generated=25 profile=24") {
+		t.Fatalf("nested mismatch = %v", err)
+	}
+
+	delete(client.profiles[testVideoProfileID]["flow_metadata"].(map[string]any), "container")
+	delete(pipeline.profileCache, testVideoProfileID)
+	_, err = pipeline.expandFlowProfile(context.Background(), graphFlow{
+		id: "f3b1a8de-6c1e-4a0b-9d2f-1c7e5a904bb1", flow: flow, profileID: testVideoProfileID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "/flow_metadata/container") ||
+		!strings.Contains(err.Error(), `generated="video/mp4" profile=<missing>`) {
+		t.Fatalf("presence mismatch = %v", err)
+	}
+}
+
+func TestEquivalentNumericFlowDoesNotCauseResumeWrite(t *testing.T) {
+	t.Parallel()
+	flowID := "f3b1a8de-6c1e-4a0b-9d2f-1c7e5a904bb1"
+	generated := tams.Flow{
+		"id": flowID, "source_id": "9a2c4e60-71bd-4f3a-8e15-2d6b0c8a7f43",
+		"format": "urn:x-nmos:format:video", "codec": "video/h264", "container": "video/mp4",
+		"essence_parameters": map[string]any{"frame_width": int64(64), "frame_height": int32(64)},
+	}
+	existing := tams.Flow{
+		"id": flowID, "source_id": "9a2c4e60-71bd-4f3a-8e15-2d6b0c8a7f43",
+		"format": "urn:x-nmos:format:video", "codec": "video/h264", "container": "video/mp4",
+		"essence_parameters": map[string]any{"frame_width": json.Number("64"), "frame_height": float64(64)},
+	}
+	client := newFakeClient()
+	client.flows[flowID] = existing
+	pipeline := &Pipeline{client: client}
+	plan, err := pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: generated, ownsMedia: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.changed {
+		t.Fatalf("equivalent numeric Flow planned a write: %#v", plan.effective)
 	}
 }
 

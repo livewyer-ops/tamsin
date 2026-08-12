@@ -423,7 +423,9 @@ func TestCLIAPIFlowProfileOperations(t *testing.T) {
 		case request.Method == http.MethodGet && request.URL.Path == "/service/profiles/"+profileID:
 			_, _ = io.WriteString(writer, `{"id":"`+profileID+`","label":"house","flow_metadata":{"format":"urn:x-nmos:format:video"}}`)
 		case request.Method == http.MethodPost && request.URL.Path == "/service/profiles/"+profileID:
-			if err := json.NewDecoder(request.Body).Decode(&created); err != nil {
+			decoder := json.NewDecoder(request.Body)
+			decoder.UseNumber()
+			if err := decoder.Decode(&created); err != nil {
 				t.Errorf("decode profile: %v", err)
 			}
 			writer.WriteHeader(http.StatusCreated)
@@ -449,9 +451,89 @@ func TestCLIAPIFlowProfileOperations(t *testing.T) {
 	if output := run([]string{"get", profileID}, ""); !strings.Contains(output, `"label":"house"`) {
 		t.Fatalf("get output = %s", output)
 	}
-	run([]string{"create", profileID}, `{"id":"ignored","label":"new","flow_metadata":{"format":"urn:x-nmos:format:video"}}`)
-	if created["id"] != profileID || created["label"] != "new" {
+	run([]string{"create", profileID}, `{"id":"ignored","label":"new","flow_metadata":{"format":"urn:x-nmos:format:video","essence_parameters":{"frame_width":9007199254740993}}}`)
+	parameters := created["flow_metadata"].(map[string]any)["essence_parameters"].(map[string]any)
+	if created["id"] != profileID || created["label"] != "new" || parameters["frame_width"] != json.Number("9007199254740993") {
 		t.Fatalf("created profile = %#v", created)
+	}
+}
+
+func TestCLINumericFlowProfileMatchesByJSONSemanticsBeforeMutation(t *testing.T) {
+	const profileID = "60d9df18-6d9d-4b86-84bf-d1dcf14b3a28"
+	var mismatch atomic.Bool
+	var mutations, flowReads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		if request.Method != http.MethodGet {
+			mutations.Add(1)
+			http.Error(writer, "mutation forbidden", http.StatusMethodNotAllowed)
+			return
+		}
+		switch request.URL.Path {
+		case "/service":
+			_, _ = io.WriteString(writer, `{"api_version":"8.2","min_object_timeout":"300:0","min_presigned_url_timeout":"30:0"}`)
+		case "/service/storage-backends":
+			_, _ = io.WriteString(writer, `[{"id":"6ba7b810-9dad-11d1-80b4-00c04fd430c8","default_storage":true,"store_type":"memory"}]`)
+		case "/service/profiles/" + profileID:
+			numerator := "25"
+			if mismatch.Load() {
+				numerator = "24"
+			}
+			_, _ = io.WriteString(writer, `{"id":"`+profileID+`","label":"numeric video","flow_metadata":{`+
+				`"format":"urn:x-nmos:format:video","codec":"video/h264","container":"video/mp4",`+
+				`"essence_parameters":{"frame_width":64,"frame_height":64,"frame_rate":{"numerator":`+numerator+`,"denominator":1}}}}`)
+		default:
+			if strings.HasPrefix(request.URL.Path, "/flows/") {
+				flowReads.Add(1)
+			}
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	directory := t.TempDir()
+	input := filepath.Join(directory, "fixture.mp4")
+	// Supply an ISO BMFF signature containing an MP4 compatible brand so the
+	// content detector and the fake probe both describe the fixture as MP4.
+	if err := os.WriteFile(input, []byte("\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isommp41"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{
+		"--endpoint", server.URL, "--auth", "none", "--retries", "0",
+		"--format", "json", "--progress", "none", "--log-level", "error",
+		"--profile", "preserve", "--ffprobe", fakeMediaTool(t, directory),
+		"--tams-flow-profile", profileID, "--input", input,
+	}
+
+	var stdout, stderr bytes.Buffer
+	matching := append([]string{"--dry-run=exact"}, base...)
+	if code := Execute(context.Background(), matching, strings.NewReader(""), &stdout, &stderr); code != ExitOK {
+		t.Fatalf("matching Profile exit = %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	state := decodeCLIIngestEventStream(t, stdout.Bytes()).state
+	inputState := state.Inputs[0]
+	foundProfile := false
+	for _, flow := range inputState.PlannedFlows {
+		foundProfile = foundProfile || flow.TAMSFlowProfileID == profileID
+	}
+	if !foundProfile || inputState.Finished == nil || inputState.Finished.Status != ingestevent.InputPlanned {
+		t.Fatalf("matching Profile was not retained: %#v", inputState)
+	}
+
+	mismatch.Store(true)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Execute(context.Background(), base, strings.NewReader(""), &stdout, &stderr); code != ExitPartial {
+		t.Fatalf("mismatching Profile exit = %d, want %d; stdout=%s stderr=%s", code, ExitPartial, stdout.String(), stderr.String())
+	}
+	state = decodeCLIIngestEventStream(t, stdout.Bytes()).state
+	inputState = state.Inputs[0]
+	if inputState.Finished == nil || inputState.Finished.ErrorCode != ingest.FailureCodeFlowPlanFailed ||
+		inputState.Finished.Status != ingestevent.InputFailed {
+		t.Fatalf("mismatching Profile result = %#v", inputState.Finished)
+	}
+	if mutations.Load() != 0 || flowReads.Load() != 0 {
+		t.Fatalf("Profile mismatch crossed planning boundary: mutations=%d flow_reads=%d", mutations.Load(), flowReads.Load())
 	}
 }
 

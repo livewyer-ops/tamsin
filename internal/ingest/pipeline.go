@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -1666,7 +1665,7 @@ func (p *Pipeline) planFlowWrite(ctx context.Context, member graphFlow) (planned
 	}
 	plan.effective = preserveForeignMetadata(existing, member.flow, p.config.FlowMetadata)
 	plan.request = flowPutProjection(plan.effective, member.profileID)
-	plan.changed = !reflect.DeepEqual(plan.effective, existing)
+	plan.changed = !equalJSONValues(plan.effective, existing)
 	return plan, nil
 }
 
@@ -1810,7 +1809,7 @@ func validateFlowGraph(graph flowGraph, planned []plannedFlowWrite) error {
 				return fmt.Errorf("%s/container_mapping must be absent after demultiplexing", base)
 			}
 		case media.EssenceStorageMuxed, "":
-			if member.containerMapping == nil || !hasMapping || !reflect.DeepEqual(mapping, member.containerMapping) {
+			if member.containerMapping == nil || !hasMapping || !equalJSONValues(mapping, member.containerMapping) {
 				return fmt.Errorf("%s/container_mapping does not match the input track", base)
 			}
 		default:

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -200,10 +199,14 @@ func (p *Pipeline) expandFlowProfile(ctx context.Context, member graphFlow) (gra
 		}
 		generated, generatedPresent := member.flow[field]
 		required, requiredPresent := metadata[field]
-		if generatedPresent != requiredPresent || !reflect.DeepEqual(generated, required) {
+		mismatch := firstJSONValueMismatch(appendJSONPointer("/flow_metadata", field),
+			generated, generatedPresent, required, requiredPresent)
+		if mismatch != nil {
 			return graphFlow{}, fmt.Errorf(
-				"flow %s does not exactly match TAMS Flow Profile %s at /flow_metadata/%s (generated=%v profile=%v)",
-				member.id, member.profileID, field, generated, required)
+				"flow %s does not exactly match TAMS Flow Profile %s at %s (generated=%s profile=%s)",
+				member.id, member.profileID, mismatch.path,
+				formatJSONMismatchValue(mismatch.generated, mismatch.generatedPresent),
+				formatJSONMismatchValue(mismatch.profile, mismatch.profilePresent))
 		}
 	}
 	expanded := maps.Clone(member.flow)
