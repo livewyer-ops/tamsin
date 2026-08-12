@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
+
+ARG DEBIAN_SNAPSHOT=20260803T000000Z
+ARG FFMPEG_VERSION=7:5.1.9-0+deb12u1
+ARG CA_CERTIFICATES_VERSION=20230311+deb12u1
+ARG BUILD_DATE=1970-01-01T00:00:00Z
+
+LABEL org.opencontainers.image.title="TAMSin FFmpeg runtime" \
+      org.opencontainers.image.description="Pinned FFmpeg and TLS runtime for TAMSin release images" \
+      org.opencontainers.image.version="5.1.9-bookworm-r1" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.source="https://github.com/livewyer-ops/tamsin" \
+      org.opencontainers.image.licenses="Apache-2.0 AND GPL-2.0-or-later" \
+      io.livewyer.tamsin.ffmpeg.version="${FFMPEG_VERSION}" \
+      io.livewyer.tamsin.debian.snapshot="${DEBIAN_SNAPSHOT}"
+
+# The dated archive and exact direct package versions make dependency refreshes
+# explicit. BuildKit records the complete resolved package graph in the image's
+# SPDX SBOM; this layer changes only when this revisioned runtime tag changes.
+RUN sed -i \
+      -e "s|^URIs: http://deb.debian.org/debian$|URIs: http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/|" \
+      -e "s|^URIs: http://deb.debian.org/debian-security$|URIs: http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/|" \
+      -e '/^Signed-By:/a Check-Valid-Until: no' \
+      /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+      "ca-certificates=${CA_CERTIFICATES_VERSION}" "ffmpeg=${FFMPEG_VERSION}" \
+    && rm -rf /var/lib/apt/lists/* /var/log/* \
+    && groupadd --gid 65532 tamsin \
+    && useradd --uid 65532 --gid 65532 --create-home --home-dir /home/tamsin --shell /usr/sbin/nologin tamsin
+
+USER 65532:65532
+WORKDIR /home/tamsin

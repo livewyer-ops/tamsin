@@ -4,6 +4,7 @@ BINARY := bin/tamsin
 IMAGE ?= tamsin:dev
 IMAGE_PLATFORMS ?= linux/amd64,linux/arm64
 OCI_LAYOUT ?= .tmp/release-bundle/tamsin-image
+FFMPEG_RUNTIME_IMAGE ?= ghcr.io/livewyer-ops/tamsin-ffmpeg-runtime:5.1.9-bookworm-r1
 E2E_PLATFORM ?= linux/amd64
 GITLEAKS_IMAGE ?= zricethezav/gitleaks@sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854
 VERSION ?= dev
@@ -67,7 +68,7 @@ smoke: build
 verify: format-check mod-check lint test vuln secret-scan smoke
 
 image:
-	docker build --build-arg VERSION='$(VERSION)' --build-arg COMMIT='$(COMMIT)' --build-arg BUILD_DATE='$(BUILD_DATE)' --build-arg SOURCE_DATE_EPOCH='$(SOURCE_DATE_EPOCH)' -t $(IMAGE) .
+	docker build --build-arg VERSION='$(VERSION)' --build-arg COMMIT='$(COMMIT)' --build-arg BUILD_DATE='$(BUILD_DATE)' --build-arg SOURCE_DATE_EPOCH='$(SOURCE_DATE_EPOCH)' --build-arg FFMPEG_RUNTIME_IMAGE='$(FFMPEG_RUNTIME_IMAGE)' -t $(IMAGE) .
 
 # Export a registry-ready OCI image layout instead of placing a host-only image
 # in the Docker daemon. Release automation retains this directory verbatim and
@@ -85,6 +86,7 @@ oci-image:
 		--build-arg COMMIT='$(COMMIT)' \
 		--build-arg BUILD_DATE='$(BUILD_DATE)' \
 		--build-arg SOURCE_DATE_EPOCH='$(SOURCE_DATE_EPOCH)' \
+		--build-arg FFMPEG_RUNTIME_IMAGE='$(FFMPEG_RUNTIME_IMAGE)' \
 		--tag '$(IMAGE)' \
 		--output 'type=oci,dest=$(OCI_LAYOUT),tar=false,rewrite-timestamp=true' \
 		.

@@ -1,12 +1,16 @@
 package contracts
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -84,7 +88,9 @@ func TestReleasePublishesOnlyAfterExactArtifactE2E(t *testing.T) {
 	requireText(t, build,
 		"needs: verify", "make dist", `IMAGE_PLATFORMS="linux/amd64,linux/arm64"`,
 		`OCI_LAYOUT=".tmp/release-bundle/tamsin-image"`,
+		"resolve-image-reference.sh", "FFMPEG_RUNTIME_IMAGE=",
 		"build-third-party-licenses.sh", "tamsin-third-party-licenses.tar.gz",
+		"build-supply-chain-bundle.py", "tamsin-container-metadata.json", "tamsin-supply-chain.tar.gz",
 		"verify-oci-layout.sh record", "smoke-release-image.sh",
 		"image_index_digest:",
 		"artifact_id:", "artifact_digest:", "actions/upload-artifact@",
@@ -112,6 +118,7 @@ func TestReleasePublishesOnlyAfterExactArtifactE2E(t *testing.T) {
 		"publish-oci-layout.sh", "${{ needs.build.outputs.image_ref }}",
 		"${{ needs.build.outputs.image_index_digest }}",
 		"tamsin-third-party-licenses.tar.gz",
+		"tamsin-container-metadata.json", "tamsin-supply-chain.tar.gz",
 		"oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d",
 		"version: 1.3.3",
 		"release-notes.py", "gh release create", "--notes-file", "--prerelease")
@@ -279,6 +286,8 @@ func TestReleaseBuildCreatesAndSmokesExactlyTwoPlatformsOnce(t *testing.T) {
 		"docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
 		"moby/buildkit:v0.26.2@sha256:de10faf919fc71ba4eb1dd7bd6449566d012b0c9436b1c61bfee21d621b009aa",
 		"make dist", "IMAGE_PLATFORMS=\"linux/amd64,linux/arm64\"",
+		"resolve-image-reference.sh", "FFMPEG_RUNTIME_IMAGE=",
+		"build-supply-chain-bundle.py", "tamsin-supply-chain.tar.gz",
 		"verify-oci-layout.sh record", "smoke-release-image.sh",
 		"git show -s --format=%ct", "SOURCE_DATE_EPOCH")
 
@@ -322,12 +331,62 @@ func TestReleaseBuildCreatesAndSmokesExactlyTwoPlatformsOnce(t *testing.T) {
 
 	dockerfile := repositoryFile(t, "Dockerfile")
 	requireText(t, dockerfile,
-		"ARG SOURCE_DATE_EPOCH=0", "ARG DEBIAN_SNAPSHOT=20260803T000000Z",
+		"ARG SOURCE_DATE_EPOCH=0", "ARG FFMPEG_RUNTIME_IMAGE=ghcr.io/livewyer-ops/tamsin-ffmpeg-runtime:5.1.9-bookworm-r1",
+		"FROM ${FFMPEG_RUNTIME_IMAGE}", "org.opencontainers.image.base.name")
+	rejectText(t, dockerfile, "apt-get", "snapshot.debian.org")
+	runtimeDockerfile := repositoryFile(t, "Dockerfile.ffmpeg")
+	requireText(t, runtimeDockerfile,
+		"FROM debian:bookworm-slim@sha256:", "ARG DEBIAN_SNAPSHOT=20260803T000000Z",
+		"ARG FFMPEG_VERSION=7:5.1.9-0+deb12u1",
 		"snapshot.debian.org/archive/debian/", "Check-Valid-Until: no",
-		"rm -rf /var/log/*")
+		"/var/log/*")
+	runtimeWorkflow := repositoryFile(t, ".github/workflows/ffmpeg-runtime.yml")
+	requireText(t, runtimeWorkflow,
+		"contracts/ffmpeg-runtime.json", "${{ steps.contract.outputs.image }}",
+		"--platform linux/amd64,linux/arm64", "--provenance=mode=max", "--sbom=true",
+		"resolve-image-reference.sh", "push-to-registry: true", "cancel-in-progress: false")
 	dockerignore := repositoryFile(t, ".dockerignore")
 	requireText(t, dockerignore, "**", "!go.mod", "!cmd/**/*.go",
-		"!contracts/schemas/*.json", "**/*_test.go")
+		"!contracts/schemas/**/*.json", "**/*_test.go")
+}
+
+func TestFFmpegRuntimeContractPinsEveryBuildConsumer(t *testing.T) {
+	t.Parallel()
+	data := repositoryFile(t, "contracts/ffmpeg-runtime.json")
+	var runtime struct {
+		SchemaVersion         string   `json:"schema_version"`
+		Image                 string   `json:"image"`
+		Revision              string   `json:"revision"`
+		Platforms             []string `json:"platforms"`
+		DebianBase            string   `json:"debian_base"`
+		DebianSnapshot        string   `json:"debian_snapshot"`
+		FFmpegPackage         string   `json:"ffmpeg_package"`
+		CACertificatesPackage string   `json:"ca_certificates_package"`
+	}
+	if err := json.Unmarshal([]byte(data), &runtime); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.SchemaVersion != "1.0" || runtime.Revision == "" ||
+		!reflect.DeepEqual(runtime.Platforms, []string{"linux/amd64", "linux/arm64"}) {
+		t.Fatalf("invalid FFmpeg runtime contract: %#v", runtime)
+	}
+	for filename, values := range map[string][]string{
+		"Dockerfile.ffmpeg": {
+			strings.TrimPrefix(runtime.DebianBase, "debian:bookworm-slim@"),
+			"ARG DEBIAN_SNAPSHOT=" + runtime.DebianSnapshot,
+			"ARG FFMPEG_VERSION=" + runtime.FFmpegPackage,
+			"ARG CA_CERTIFICATES_VERSION=" + runtime.CACertificatesPackage,
+		},
+		"Dockerfile":                           {runtime.Image},
+		"Makefile":                             {runtime.Image},
+		".github/workflows/ci.yml":             {"contracts/ffmpeg-runtime.json"},
+		".github/workflows/release.yml":        {"contracts/ffmpeg-runtime.json"},
+		".github/workflows/ffmpeg-runtime.yml": {"contracts/ffmpeg-runtime.json", runtime.Revision},
+	} {
+		requireText(t, repositoryFile(t, filename), values...)
+	}
+	requireText(t, repositoryFile(t, "scripts/build-supply-chain-bundle.py"),
+		"DEFAULT_RUNTIME_CONTRACT", "ffmpeg-runtime.json", `runtime_contract["ffmpeg_package"]`)
 }
 
 func TestWorkflowActionsArePinnedByCommit(t *testing.T) {
@@ -337,6 +396,7 @@ func TestWorkflowActionsArePinnedByCommit(t *testing.T) {
 	for _, name := range []string{
 		".github/workflows/ci.yml",
 		".github/workflows/e2e.yml",
+		".github/workflows/ffmpeg-runtime.yml",
 		".github/workflows/release.yml",
 	} {
 		workflow := repositoryFile(t, name)
@@ -602,6 +662,84 @@ func TestOCILayoutVerifierRejectsMissingArm64Member(t *testing.T) {
 	)
 	if output, err := command.CombinedOutput(); err == nil {
 		t.Fatalf("verifier accepted an amd64-only release index:\n%s", output)
+	}
+}
+
+func TestSupplyChainBundleContainsDeterministicImageStatements(t *testing.T) {
+	t.Parallel()
+	bundle, _ := writeOCIReleaseFixture(t, true)
+	imageRef := "ghcr.io/livewyer-ops/tamsin:fixture"
+	checker := filepath.Join(repositoryRoot, "scripts", "verify-oci-layout.sh")
+	if output, err := exec.Command(checker, "record", bundle, imageRef).CombinedOutput(); err != nil {
+		t.Fatalf("record valid OCI identity: %v\n%s", err, output)
+	}
+	directory := t.TempDir()
+	metadataPath := filepath.Join(directory, "tamsin-container-metadata.json")
+	archivePath := filepath.Join(directory, "tamsin-supply-chain.tar.gz")
+	runtimeRef := "ghcr.io/livewyer-ops/tamsin-ffmpeg-runtime:5.1.9-bookworm-r1@sha256:" + strings.Repeat("a", 64)
+	command := exec.Command(
+		filepath.Join(repositoryRoot, "scripts", "build-supply-chain-bundle.py"),
+		"--bundle", bundle,
+		"--image-ref", imageRef,
+		"--runtime-ref", runtimeRef,
+		"--version", "1.0.0-rc.1",
+		"--commit", strings.Repeat("b", 40),
+		"--created", "2026-08-12T00:00:00Z",
+		"--metadata-output", metadataPath,
+		"--archive-output", archivePath,
+	)
+	command.Env = append(os.Environ(), "SOURCE_DATE_EPOCH=123")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build supply-chain bundle: %v\n%s", err, output)
+	}
+	metadataBytes, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	runtime, ok := metadata["ffmpeg_runtime"].(map[string]any)
+	if !ok || runtime["immutable_reference"] != runtimeRef {
+		t.Fatalf("runtime metadata = %#v", metadata["ffmpeg_runtime"])
+	}
+
+	archiveFile, err := os.Open(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archiveFile.Close()
+	compressed, err := gzip.NewReader(archiveFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer compressed.Close()
+	entries := map[string]bool{}
+	reader := tar.NewReader(compressed)
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if header.ModTime.Unix() != 123 || header.Uid != 0 || header.Gid != 0 {
+			t.Fatalf("non-deterministic archive header for %s: %#v", header.Name, header)
+		}
+		entries[header.Name] = true
+	}
+	for _, name := range []string{
+		"tamsin-container-metadata.json",
+		"attestations/linux-amd64-spdx-sbom.json",
+		"attestations/linux-amd64-slsa-provenance.json",
+		"attestations/linux-arm64-spdx-sbom.json",
+		"attestations/linux-arm64-slsa-provenance.json",
+	} {
+		if !entries[name] {
+			t.Errorf("supply-chain archive is missing %s", name)
+		}
 	}
 }
 
