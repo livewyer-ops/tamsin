@@ -21,6 +21,7 @@ type rule struct {
 }
 
 type matrix struct {
+	Extends      string `json:"extends"`
 	Rules        []rule `json:"rules"`
 	OpenFindings []struct {
 		ID            string `json:"id"`
@@ -66,6 +67,77 @@ type matrix struct {
 		ImplementedBy string `json:"implemented_by"`
 		TestedBy      string `json:"tested_by"`
 	} `json:"ingest_operations"`
+}
+
+func loadMatrix(t *testing.T, filename string) matrix {
+	t.Helper()
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contract matrix
+	if err := json.Unmarshal(data, &contract); err != nil {
+		t.Fatal(err)
+	}
+	return contract
+}
+
+func TestPinnedTAMS82TargetContractExtendsCompatibilityReview(t *testing.T) {
+	t.Parallel()
+	compatibility := loadMatrix(t, "tams-v8.1.json")
+	target := loadMatrix(t, "tams-v8.2.json")
+	if target.Extends != "tams-v8.1.json" {
+		t.Fatalf("TAMS 8.2 contract extends %q", target.Extends)
+	}
+	if target.TAMS.Version != "8.2" || target.TAMS.Commit != "ebb18b09cc6effe70a3464fc0282e9663d0a583f" ||
+		target.TAMS.OpenAPIGitBlob != "735a8468bda972b925bd73a45cbe360ad45d06e9" {
+		t.Fatalf("unexpected TAMS 8.2 pin: %#v", target.TAMS)
+	}
+	if target.TAMOSS.Commit != "5ec9df15f661a5db230577074e2e55d10444d4ea" ||
+		target.TAMOSS.TAMSSubmoduleCommit != target.TAMS.Commit || target.TAMOSS.Profile == "" || target.TAMOSS.Release == "" {
+		t.Fatalf("TAMOSS 8.2 preview pin is incomplete: %#v", target.TAMOSS)
+	}
+
+	wantOperations := []string{"GET_profiles", "GET_profiles-profileId", "POST_profiles-profileId"}
+	gotOperations := make([]string, 0, len(target.IngestOperations))
+	for _, operation := range target.IngestOperations {
+		if operation.Method == "" || operation.Path == "" || operation.CLI == "" || operation.ImplementedBy == "" || operation.TestedBy == "" {
+			t.Fatalf("operation %s lacks method, path, CLI, implementation, or test coverage", operation.OperationID)
+		}
+		gotOperations = append(gotOperations, operation.OperationID)
+	}
+	sort.Strings(gotOperations)
+	sort.Strings(wantOperations)
+	if !reflect.DeepEqual(gotOperations, wantOperations) {
+		t.Fatalf("TAMS 8.2 operation delta = %v, want %v", gotOperations, wantOperations)
+	}
+
+	seen := make(map[string]bool)
+	for _, entry := range target.Rules {
+		if entry.ID == "" || entry.Source == "" || entry.Requirement == "" || entry.AssertedBy == "" || seen[entry.ID] {
+			t.Fatalf("invalid or duplicate TAMS 8.2 rule: %#v", entry)
+		}
+		seen[entry.ID] = true
+	}
+	if len(target.OpenFindings) != 0 {
+		t.Fatalf("TAMS 8.2 target has unresolved release findings: %#v", target.OpenFindings)
+	}
+	if target.SpecReview.ReviewedAtCommit != target.TAMS.Commit || target.SpecReview.ADRsRead != 56 ||
+		target.SpecReview.ADRsTotal != 56 || target.SpecReview.AppNotesRead != 24 || target.SpecReview.AppNotesTotal != 24 {
+		t.Fatalf("TAMS 8.2 review is incomplete: %#v", target.SpecReview)
+	}
+	baseADRs, baseAppNotes := reviewedDocuments(compatibility)
+	targetADRs, targetAppNotes := reviewedDocuments(target)
+	for name := range targetADRs {
+		baseADRs[name] = true
+	}
+	for name := range targetAppNotes {
+		baseAppNotes[name] = true
+	}
+	if len(baseADRs) != target.SpecReview.ADRsRead || len(baseAppNotes) != target.SpecReview.AppNotesRead {
+		t.Fatalf("combined review inventory names %d ADRs and %d AppNotes, want %d and %d",
+			len(baseADRs), len(baseAppNotes), target.SpecReview.ADRsRead, target.SpecReview.AppNotesRead)
+	}
 }
 
 func TestPinnedTAMSIngestConformanceMatrixIsComplete(t *testing.T) {
@@ -222,7 +294,7 @@ func reviewedDocuments(contract matrix) (map[string]bool, map[string]bool) {
 // testing an older service while every Go check stayed green.
 func TestE2EHarnessReadsTAMSSPinsFromTheContract(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("tams-v8.1.json")
+	data, err := os.ReadFile("tams-v8.2.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,6 +307,10 @@ func TestE2EHarnessReadsTAMSSPinsFromTheContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	contents := string(script)
+	if !strings.Contains(contents, `TAMSIN_E2E_CONTRACT:-tams-v8.2.json`) ||
+		!strings.Contains(contents, `tams-v8.1.json|tams-v8.2.json`) {
+		t.Error("E2E harness does not default to 8.2 while allowlisting the 8.1 compatibility matrix")
+	}
 	for _, selector := range []string{".tams.commit", ".tamoss.commit", ".tamoss.release", ".tamoss.profile"} {
 		if !strings.Contains(contents, "contract_value '"+selector+"'") {
 			t.Errorf("E2E harness does not load %s from the conformance matrix", selector)

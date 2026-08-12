@@ -7,19 +7,19 @@
 chmod 0755 ffprobe
 
 # Diagnostics are on by default and must not contaminate the event stream.
-exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format json -d 0 --dry-run=exact -i input.mp4
+exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format json -d 0 --dry-run=exact -i input.mp4
 stderr 'preparing input'
 cp stdout events.ndjson
 checkevents events.ndjson succeeded 1 0 planned
 exec cat events.ndjson
-stdout '^\{"protocol":"tamsin.ingest.events","protocol_version":"2.0","type":"hello","seq":0,'
+stdout '^\{"protocol":"tamsin.ingest.events","protocol_version":"2.1","type":"hello","seq":0,'
 stdout '"type":"object.result".*"disposition":"planned".*"verification_status":"not_reached"'
 stdout '"type":"input.finished".*"status":"planned"'
 stdout '"type":"run.finished".*"outcome":"succeeded".*"exit_code":0'
 ! stdout 'preparing input|\r|\x1b'
 
 # Human format is a grouped permanent receipt, never a tab-separated record.
-exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format human --log-level error -d 0 --dry-run=exact -i input.mp4
+exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format human --log-level error -d 0 --dry-run=exact -i input.mp4
 stdout '^PLANNED - NO CHANGES MADE  input.mp4'
 stdout '^  video +[0-9a-f-]+ +1 media object$'
 stdout '^COMPLETE +1/1 inputs succeeded$'
@@ -27,26 +27,26 @@ stdout '^COMPLETE +1/1 inputs succeeded$'
 ! stderr .
 
 # Quietening logs must not remove machine results.
-exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error -d 0 --dry-run=exact -i input.mp4
+exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error -d 0 --dry-run=exact -i input.mp4
 ! stderr .
 cp stdout quiet-logs.ndjson
 checkevents quiet-logs.ndjson succeeded 1 0 planned
 
 # Quiet human mode suppresses a clean dry-run receipt, while verbose mode
 # expands the same result with provenance and terminal Object details.
-exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format human --quiet --log-level error -d 0 --dry-run=exact -i input.mp4
+exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format human --quiet --log-level error -d 0 --dry-run=exact -i input.mp4
 ! stdout .
 ! stderr .
 
-exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format human --verbose --color never --log-level error -d 0 --dry-run=exact -i input.mp4
+exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format human --verbose --color never --log-level error -d 0 --dry-run=exact -i input.mp4
 stdout '^    disposition planned$'
 stdout '^    planned object [0-9a-f-]+$'
-stdout '^  result schema 2.0$'
+stdout '^  result schema 2.1$'
 ! stdout '\x1b'
 
 # Explicit colour is honoured even when stdout is redirected; auto/never are
 # the modes wrappers should use for plain durable receipts.
-exec tamsin --profile editorial --ffprobe $WORK/ffprobe --format human --color always --log-level error -d 0 --dry-run=exact -i input.mp4
+exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format human --color always --log-level error -d 0 --dry-run=exact -i input.mp4
 stdout '\x1b\[1;32mPLANNED - NO CHANGES MADE\x1b\[0m'
 
 # Startup failures in JSON mode remain a complete, reducer-valid process

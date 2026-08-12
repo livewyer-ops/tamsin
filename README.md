@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/livewyer-ops/tamsin/actions/workflows/ci.yml/badge.svg)](https://github.com/livewyer-ops/tamsin/actions/workflows/ci.yml)
 [![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go)](go.mod)
-[![TAMS 8.1](https://img.shields.io/badge/BBC%20TAMS-8.1-5B2C6F)](contracts/tams-v8.1.json)
+[![TAMS 8.2](https://img.shields.io/badge/BBC%20TAMS-8.2-5B2C6F)](contracts/tams-v8.2.json)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 TAMSin is a process-oriented CLI for ingesting files and object collections
@@ -23,12 +23,13 @@ and versioned NDJSON events are projections of the same ingest result.
 
 - Local files, directories, manifests, HTTP, S3, and standard input
 - Deterministic Source and Flow identities for safe retry and resume
-- Versioned ingest profiles for preservation, editorial, and streaming use
+- Versioned ingest profiles for whole-file, segmented, muxed, and independent storage
 - Independent or multiplexed essence storage
 - Byte verification, exact Segment rollback, and durable redacted journals
 - Human receipts, terminal-aware progress, and a bounded NDJSON event protocol
 - Strict configuration precedence, typed exit codes, and a read-only doctor
-- Tested conformance with BBC TAMS 8.1 and the TAMOSS reference deployment
+- BBC TAMS 8.2 target with an 8.1 compatibility floor and dual TAMOSS gates
+- Optional immutable TAMS Flow Profile assignment with typed discovery commands
 
 ## Core model
 
@@ -56,8 +57,10 @@ Profiles put the packaging decision up front and make it reproducible.
 | Profile | Essence storage | Segment target | Stored representation | Best suited to |
 | --- | --- | --- | --- | --- |
 | `preserve@1` | muxed | whole file | source bytes | archive, interchange, and evidence preservation |
-| `editorial@1` | independent | 10 seconds | source-family remux | TAMS-native essence access and production work |
-| `streaming-ts@1` | independent | 2 seconds | MPEG-TS | independently accessible short-form delivery Segments |
+| `demux@1` | independent | whole essence | source-family remux | transcription, analysis, and downstream proxy generation |
+| `muxed-segments@1` | muxed | 10 seconds | source-family remux | time-range access when consumers need the complete multiplex |
+| `essence-segments@1` | independent | 10 seconds | source-family remux | TAMS-native essence access and production work |
+| `mpegts-segments@1` | independent | 2 seconds | MPEG-TS | systems that explicitly require short MPEG-TS Objects |
 
 Ingest requires an explicit profile; it does not silently choose how to rewrite
 or preserve media. Select one with `--profile`, then override an individual
@@ -72,7 +75,7 @@ verify it against `SHA256SUMS` and its GitHub build attestation, then place it o
 `PATH`. For example, on Linux amd64:
 
 ```sh
-version=v0.1.0-rc.3
+version=v1.0.0-rc.1
 asset=tamsin-linux-amd64
 base="https://github.com/livewyer-ops/tamsin/releases/download/${version}"
 
@@ -88,14 +91,16 @@ The release also publishes a non-root multi-platform image. OCI tags omit the
 Git tag's leading `v`:
 
 ```sh
-docker pull ghcr.io/livewyer-ops/tamsin:0.1.0-rc.3
-docker run --rm ghcr.io/livewyer-ops/tamsin:0.1.0-rc.3 --version
+docker pull ghcr.io/livewyer-ops/tamsin:1.0.0-rc.1
+docker run --rm ghcr.io/livewyer-ops/tamsin:1.0.0-rc.1 --version
 ```
 
 Replace the example version with the release you intend to deploy. Pin
 production images by the index digest shown by the release workflow. Each
-release also includes the checksummed and attested
-`tamsin-third-party-licenses.tar.gz` bundle for its compiled dependencies.
+release also includes checksummed and attested third-party licences,
+`tamsin-container-metadata.json`, and `tamsin-supply-chain.tar.gz`. The latter
+contains the amd64/arm64 SPDX and provenance statements and records the exact
+FFmpeg runtime-base digest.
 
 ## Quick start
 
@@ -105,12 +110,28 @@ credentials for your TAMS service:
 ```sh
 export TAMSIN_AUTH_TOKEN='...'
 tamsin doctor --endpoint https://tams.example.com
-tamsin ingest --profile editorial \
+tamsin ingest --profile essence-segments \
   --input ./programme.ts \
   --endpoint https://tams.example.com
 ```
 
-The editorial profile stores a multiplexed input as one Flow per essence plus an
+On TAMS 8.2, assign an immutable service Flow Profile when the generated
+technical metadata must conform to an operator-managed contract:
+
+```sh
+tamsin api flow-profile list --format urn:x-nmos:format:video
+tamsin ingest --profile essence-segments \
+  --tams-flow-profile video=60d9df18-6d9d-4b86-84bf-d1dcf14b3a28 \
+  --tams-flow-profile audio:0=8d5a25eb-35cb-423b-8e80-72258195ac2c \
+  --input ./programme.ts --endpoint https://tams.example.com
+```
+
+The local `--profile` chooses how TAMSin handles bytes. A TAMS Flow Profile
+constrains one generated essence Flow. Bare UUID assignment is accepted only
+when exactly one eligible Flow exists; repeated formats require zero-based
+selectors such as `audio:0` and `audio:1`.
+
+The `essence-segments` profile stores a multiplexed input as one Flow per essence plus an
 empty collector Flow. A successful command ends with a permanent receipt that
 identifies the collection, essence Flows, verified Objects and bytes, profile,
 input digest, and run.
@@ -153,8 +174,9 @@ explanation develops the design and trade-offs.
 
 ## Requirements
 
-- Runtime: `ffprobe` and `ffmpeg` on `PATH` for `editorial@1` and
-  `streaming-ts@1`; `preserve@1` uploads source bytes without invoking FFmpeg
+- Runtime: `ffprobe` for every profile; `ffmpeg` for every segmented profile
+  and for `demux@1` when a multiplex has more than one essence. `preserve@1`
+  uploads source bytes without invoking FFmpeg
 - S3 inputs: credentials supplied through the standard AWS credential chain
 - Development: Go 1.26 or newer
 - Multi-platform distribution: Docker Buildx and amd64/arm64 binfmt handlers
@@ -174,10 +196,12 @@ journal carry unbounded job detail.
 
 ## Conformance and integrity
 
-The repository pins its supported BBC TAMS surface in
-[`contracts/tams-v8.1.json`](contracts/tams-v8.1.json). End-to-end tests deploy
-the pinned TAMOSS profile, exercise supported sources and authentication modes,
-and read every resulting Flow and Segment back from the live service.
+The repository pins its target BBC TAMS surface in
+[`contracts/tams-v8.2.json`](contracts/tams-v8.2.json), which extends the
+[`TAMS 8.1 compatibility inventory`](contracts/tams-v8.1.json). End-to-end tests
+deploy both pinned TAMOSS revisions, exercise supported sources and
+authentication modes, and read every resulting Flow and Segment back from the
+live service.
 
 ```sh
 make e2e

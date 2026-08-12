@@ -41,7 +41,7 @@ func (futureEvent) EventType() Type { return "ui.hint" }
 
 func testHello(maxBytes uint64) Hello {
 	return Hello{
-		ToolVersion: "v1.0.0", ToolCommit: "abc123", ResultSchemaVersion: "2.0",
+		ToolVersion: "v1.0.0", ToolCommit: "abc123", ResultSchemaVersion: "2.1",
 		ProfilePolicyVersion: "1", MaxEventBytes: maxBytes,
 		Capabilities: []string{"progress", "terminal_results", "graceful_cancel"},
 	}
@@ -82,7 +82,7 @@ func TestEncoderPublishesFlushableReplayableProcessStream(t *testing.T) {
 	}{
 		{event: testHello(DefaultMaxEventBytes)},
 		{event: RunStarted{
-			StartedAt: testStartedAt, Profile: "editorial", ProfileVersion: "1",
+			StartedAt: testStartedAt, Profile: "essence-segments", ProfileVersion: "1",
 			DryRunMode: "off", VerificationMode: "readback", Concurrency: &concurrency, Transfers: &transfers,
 			RequestedInputs: KnownInputCount(1),
 		}},
@@ -125,7 +125,7 @@ func TestEncoderPublishesFlushableReplayableProcessStream(t *testing.T) {
 			},
 		}},
 		{scope: InputScope(0), event: InputFinished{
-			Input: "file:///tmp/first-ingest.ts", Profile: "editorial", ProfileVersion: "1",
+			Input: "file:///tmp/first-ingest.ts", Profile: "essence-segments", ProfileVersion: "1",
 			RootFlowID: testFlowID, Bytes: 1419776, SHA256: testDigest,
 			Status: InputIngested, Verification: VerificationVerified, FlowCount: 1, ObjectCount: 1,
 		}},
@@ -175,7 +175,7 @@ func TestReducerObjectRetentionIsExplicitAndDefaultStateIsBounded(t *testing.T) 
 	encoder := deterministicEncoder(t, sink)
 	mustEmit(t, encoder, nil, testHello(DefaultMaxEventBytes))
 	mustEmit(t, encoder, nil, RunStarted{
-		StartedAt: testStartedAt, Profile: "editorial", ProfileVersion: "1",
+		StartedAt: testStartedAt, Profile: "essence-segments", ProfileVersion: "1",
 		DryRunMode: "off", VerificationMode: "auto",
 	})
 	mustEmit(t, encoder, InputScope(0), InputDeclared{Input: "file:///long-programme.ts"})
@@ -201,7 +201,7 @@ func TestReducerObjectRetentionIsExplicitAndDefaultStateIsBounded(t *testing.T) 
 		Disposition: FlowWritten, ObjectSummary: summary,
 	})
 	mustEmit(t, encoder, InputScope(0), InputFinished{
-		Input: "file:///long-programme.ts", Profile: "editorial", ProfileVersion: "1",
+		Input: "file:///long-programme.ts", Profile: "essence-segments", ProfileVersion: "1",
 		RootFlowID: testFlowID, Status: InputIngested, Verification: VerificationVerified,
 		FlowCount: 1, ObjectCount: objectCount,
 	})
@@ -394,7 +394,7 @@ func TestUndispatchedInputCanFinishDuringGracefulCancellation(t *testing.T) {
 			mustEmit(t, encoder, nil, ManifestFinished{TotalInputs: 1})
 			mustEmit(t, encoder, nil, RunCancellationRequested{Reason: CancellationSignal})
 			mustEmit(t, encoder, InputScope(0), InputFinished{
-				Input: "file:///queued.ts", Profile: "editorial", ProfileVersion: "1", Status: InputFailed,
+				Input: "file:///queued.ts", Profile: "essence-segments", ProfileVersion: "1", Status: InputFailed,
 				Verification: verification, ErrorCode: InputErrorCodeRunInterrupted, Message: "Interrupted before dispatch.",
 			})
 			mustEmit(t, encoder, nil, RunFinished{Outcome: RunInterrupted, ExitCode: 8, Total: 1, Failed: 1})
@@ -445,7 +445,7 @@ func TestCumulativeProgressCannotDecreaseOrReopenFinalTotals(t *testing.T) {
 		t.Fatalf("invalid snapshots consumed sequence: got %d after %d", envelope.Seq, firstEnvelope.Seq)
 	}
 	mustEmit(t, encoder, InputScope(0), InputFinished{
-		Input: "file:///input.ts", Profile: "editorial", ProfileVersion: "1", Status: InputFailed,
+		Input: "file:///input.ts", Profile: "essence-segments", ProfileVersion: "1", Status: InputFailed,
 		Verification: VerificationNotReached, ErrorCode: InputErrorCodeIngestFailed, Message: "Ingest failed.",
 	})
 	mustEmit(t, encoder, nil, RunFinished{Outcome: RunFailed, ExitCode: 1, Total: 1, Failed: 1})
@@ -547,7 +547,7 @@ func TestRunLevelFailureCanFollowSuccessfulInputs(t *testing.T) {
 	mustEmit(t, encoder, nil, ManifestFinished{TotalInputs: 1})
 	mustEmit(t, encoder, InputScope(0), InputStarted{StartedAt: testStartedAt})
 	mustEmit(t, encoder, InputScope(0), InputFinished{
-		Input: "file:///dry-run.ts", Profile: "editorial", ProfileVersion: "1",
+		Input: "file:///dry-run.ts", Profile: "essence-segments", ProfileVersion: "1",
 		Status: InputPlanned, Verification: VerificationNotRequested,
 	})
 	diagnostic, err := NewDiagnostic(

@@ -12,8 +12,9 @@ import (
 // SpecMajor and SpecMinor are the TAMS API version Tamsin is written against.
 // The pinned specification and vendored schemas in contracts/ are this version.
 const (
-	SpecMajor = 8
-	SpecMinor = 1
+	SpecMajor          = 8
+	SpecMinor          = 2
+	CompatibilityMinor = 1
 )
 
 // APIVersion is the version of the TAMS specification a service implements.
@@ -37,12 +38,24 @@ func (v APIVersion) String() string {
 // newer minor version is accepted: minor revisions add to the API rather than
 // change what is already there, and refusing them would make every client an
 // obstacle to a service upgrade.
-func (v APIVersion) SupportsSpec() bool { return v.Major == SpecMajor }
+func (v APIVersion) SupportsSpec() bool {
+	return v.Major == SpecMajor && v.Minor >= CompatibilityMinor
+}
 
 // Predates reports whether the service is an older minor revision than the one
 // Tamsin targets, which is worth saying out loud because a request may then be
 // rejected for using something the service has not implemented yet.
 func (v APIVersion) Predates() bool { return v.Major == SpecMajor && v.Minor < SpecMinor }
+
+// AtLeast reports whether a service implements the requested TAMS revision.
+// Feature gates use this instead of guessing support from failed requests.
+func (v APIVersion) AtLeast(major, minor int) bool {
+	return v.Major > major || v.Major == major && v.Minor >= minor
+}
+
+// SupportsFlowProfiles reports whether the immutable Flow Profile API and the
+// compact profile-backed Flow write representation are available.
+func (v APIVersion) SupportsFlowProfiles() bool { return v.AtLeast(8, 2) }
 
 // ParseAPIVersion reads api_version from a service document.
 //

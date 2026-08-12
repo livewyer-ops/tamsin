@@ -70,6 +70,9 @@ jobs:
         id: bundle
         run: |
           image_ref="ghcr.io/livewyer-ops/tamsin:ci"
+          runtime_tag="$(jq -er '.image | select(type == "string" and length > 0)' contracts/ffmpeg-runtime.json)"
+          runtime_ref="$(IMAGE_RESOLVE_ATTEMPTS=90 IMAGE_RESOLVE_DELAY_SECONDS=10 \
+            ./scripts/resolve-image-reference.sh "$runtime_tag")"
           build_epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
           build_date="$(date --utc --date="@$build_epoch" +%Y-%m-%dT%H:%M:%SZ)"
           make dist \
@@ -77,13 +80,23 @@ jobs:
             COMMIT="${GITHUB_SHA}" \
             BUILD_DATE="$build_date" \
             SOURCE_DATE_EPOCH="$build_epoch" \
+            FFMPEG_RUNTIME_IMAGE="$runtime_ref" \
             IMAGE="$image_ref" \
             IMAGE_PLATFORMS="linux/amd64,linux/arm64"
-          (cd dist && sha256sum tamsin-* > SHA256SUMS)
-          cp -a dist .tmp/release-bundle/dist
           ./scripts/verify-oci-layout.sh record \
             .tmp/release-bundle \
             "$image_ref" >> "$GITHUB_OUTPUT"
+          SOURCE_DATE_EPOCH="$build_epoch" ./scripts/build-supply-chain-bundle.py \
+            --bundle .tmp/release-bundle \
+            --image-ref "$image_ref" \
+            --runtime-ref "$runtime_ref" \
+            --version 0.0.0-ci \
+            --commit "$GITHUB_SHA" \
+            --created "$build_date" \
+            --metadata-output dist/tamsin-container-metadata.json \
+            --archive-output dist/tamsin-supply-chain.tar.gz
+          (cd dist && sha256sum tamsin-* > SHA256SUMS)
+          cp -a dist .tmp/release-bundle/dist
       - name: Smoke the exact amd64 and arm64 index members
         run: |
           ./scripts/smoke-release-image.sh \

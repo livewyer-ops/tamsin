@@ -318,7 +318,7 @@ func TestCLIDefaultSegmentDurationIsTenSeconds(t *testing.T) {
 	}
 }
 
-func TestCLIRequiresProfileAndResolvesExplicitEditorialProfile(t *testing.T) {
+func TestCLIRequiresProfileAndResolvesExplicitEssenceSegmentsProfile(t *testing.T) {
 	t.Parallel()
 	app := &application{v: viper.New()}
 	app.configureDefaults()
@@ -327,14 +327,14 @@ func TestCLIRequiresProfileAndResolvesExplicitEditorialProfile(t *testing.T) {
 	if _, _, err := app.ingestOptions(command, []string{"input.mp4"}, raw); err == nil || !strings.Contains(err.Error(), "profile is required") {
 		t.Fatalf("ingest without a profile error = %v", err)
 	}
-	if err := command.Flags().Set("profile", ingest.ProfileEditorial); err != nil {
+	if err := command.Flags().Set("profile", ingest.ProfileEssenceSegments); err != nil {
 		t.Fatal(err)
 	}
 	options, _, err := app.ingestOptions(command, []string{"input.mp4"}, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.profile != "editorial" || options.profileVersion != "1" ||
+	if options.profile != "essence-segments" || options.profileVersion != "1" ||
 		options.segmentDuration != 10*time.Second || options.segmentFormat != "source" ||
 		options.essenceStorage != "independent" {
 		t.Fatalf("default resolved options = %#v", options)
@@ -407,6 +407,54 @@ func TestCLIAPIService(t *testing.T) {
 	}
 }
 
+func TestCLIAPIFlowProfileOperations(t *testing.T) {
+	t.Parallel()
+	const profileID = "33333333-3333-4333-8333-333333333333"
+	var created map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/service/profiles":
+			if request.URL.Query().Get("format") != "urn:x-nmos:format:video" || request.URL.Query().Get("codec") != "video/h264" || request.URL.Query().Get("label") != "house" {
+				http.Error(writer, "missing filters", http.StatusBadRequest)
+				return
+			}
+			_, _ = io.WriteString(writer, `[{"id":"`+profileID+`","label":"house","flow_metadata":{"format":"urn:x-nmos:format:video"}}]`)
+		case request.Method == http.MethodGet && request.URL.Path == "/service/profiles/"+profileID:
+			_, _ = io.WriteString(writer, `{"id":"`+profileID+`","label":"house","flow_metadata":{"format":"urn:x-nmos:format:video"}}`)
+		case request.Method == http.MethodPost && request.URL.Path == "/service/profiles/"+profileID:
+			if err := json.NewDecoder(request.Body).Decode(&created); err != nil {
+				t.Errorf("decode profile: %v", err)
+			}
+			writer.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(writer).Encode(created)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	run := func(arguments []string, input string) string {
+		t.Helper()
+		base := []string{"--endpoint", server.URL, "--auth", "none", "--format", "json", "api", "flow-profile"}
+		var stdout, stderr bytes.Buffer
+		if code := Execute(context.Background(), append(base, arguments...), strings.NewReader(input), &stdout, &stderr); code != ExitOK {
+			t.Fatalf("%v exit = %d; stdout=%s stderr=%s", arguments, code, stdout.String(), stderr.String())
+		}
+		return stdout.String()
+	}
+	if output := run([]string{"list", "--format", "urn:x-nmos:format:video", "--codec", "video/h264", "--label", "house"}, ""); !strings.Contains(output, profileID) {
+		t.Fatalf("list output = %s", output)
+	}
+	if output := run([]string{"get", profileID}, ""); !strings.Contains(output, `"label":"house"`) {
+		t.Fatalf("get output = %s", output)
+	}
+	run([]string{"create", profileID}, `{"id":"ignored","label":"new","flow_metadata":{"format":"urn:x-nmos:format:video"}}`)
+	if created["id"] != profileID || created["label"] != "new" {
+		t.Fatalf("created profile = %#v", created)
+	}
+}
+
 func TestCLIAPIStorageAllocationRequiresOneMode(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {
@@ -447,6 +495,37 @@ func TestCLIAPIStorageAllocationRequiresOneMode(t *testing.T) {
 				t.Fatalf("request body = %#v", requestBody)
 			}
 		})
+	}
+}
+
+func TestCLIAPIStorageAllocationSupportsTAMS82Options(t *testing.T) {
+	t.Parallel()
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/flows/flow/storage" {
+			http.NotFound(writer, request)
+			return
+		}
+		if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(writer, `{"media_objects":[]}`)
+	}))
+	defer server.Close()
+
+	arguments := []string{
+		"--endpoint", server.URL, "--auth", "none", "--format", "json",
+		"api", "storage", "allocate", "flow", "--object-id", "object-1",
+		"--content-type", "video/mp4", "--presigned=false",
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Execute(context.Background(), arguments, strings.NewReader(""), &stdout, &stderr); code != ExitOK {
+		t.Fatalf("exit = %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if requestBody["content_type"] != "video/mp4" || requestBody["presigned"] != false {
+		t.Fatalf("request body = %#v", requestBody)
 	}
 }
 

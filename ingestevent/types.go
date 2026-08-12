@@ -14,7 +14,7 @@ const (
 	Protocol = "tamsin.ingest.events"
 	// ProtocolVersion follows major.minor compatibility. Version 2 separates
 	// Object disposition from verification and keeps reducer memory bounded.
-	ProtocolVersion = "2.0"
+	ProtocolVersion = "2.1"
 )
 
 const (
@@ -161,14 +161,15 @@ const (
 )
 
 type FlowPlanned struct {
-	FlowID       string   `json:"flow_id"`
-	SourceID     string   `json:"source_id"`
-	Kind         FlowKind `json:"kind"`
-	Role         string   `json:"role,omitempty"`
-	Root         bool     `json:"root"`
-	ParentFlowID string   `json:"parent_flow_id,omitempty"`
-	Format       string   `json:"format,omitempty"`
-	Container    string   `json:"container,omitempty"`
+	FlowID            string   `json:"flow_id"`
+	SourceID          string   `json:"source_id"`
+	Kind              FlowKind `json:"kind"`
+	Role              string   `json:"role,omitempty"`
+	Root              bool     `json:"root"`
+	ParentFlowID      string   `json:"parent_flow_id,omitempty"`
+	Format            string   `json:"format,omitempty"`
+	Container         string   `json:"container,omitempty"`
+	TAMSFlowProfileID string   `json:"tams_flow_profile_id,omitempty"`
 }
 
 func (FlowPlanned) EventType() Type { return TypeFlowPlanned }
@@ -327,12 +328,13 @@ const (
 )
 
 type FlowResult struct {
-	FlowID        string          `json:"flow_id"`
-	SourceID      string          `json:"source_id"`
-	Kind          FlowKind        `json:"kind"`
-	Role          string          `json:"role,omitempty"`
-	Disposition   FlowDisposition `json:"disposition"`
-	ObjectSummary ObjectSummary   `json:"object_summary"`
+	FlowID            string          `json:"flow_id"`
+	SourceID          string          `json:"source_id"`
+	Kind              FlowKind        `json:"kind"`
+	Role              string          `json:"role,omitempty"`
+	TAMSFlowProfileID string          `json:"tams_flow_profile_id,omitempty"`
+	Disposition       FlowDisposition `json:"disposition"`
+	ObjectSummary     ObjectSummary   `json:"object_summary"`
 }
 
 type ObjectSummary struct {

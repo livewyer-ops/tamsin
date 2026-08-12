@@ -33,20 +33,54 @@ func TestNamedProfilesAreVersionedMediaContracts(t *testing.T) {
 		storage   media.EssenceStorage
 	}{
 		{selection: "preserve@1", name: ProfilePreserve, format: media.SegmentFormatSource, storage: media.EssenceStorageMuxed},
-		{selection: "editorial", name: ProfileEditorial, duration: 10 * time.Second, format: media.SegmentFormatSource, storage: media.EssenceStorageIndependent},
-		{selection: "streaming-ts@v1", name: ProfileStreamingTS, duration: 2 * time.Second, format: media.SegmentFormatMPEGTS, storage: media.EssenceStorageIndependent},
+		{selection: "demux", name: ProfileDemux, format: media.SegmentFormatSource, storage: media.EssenceStorageIndependent},
+		{selection: "muxed-segments@v1", name: ProfileMuxedSegments, duration: 10 * time.Second, format: media.SegmentFormatSource, storage: media.EssenceStorageMuxed},
+		{selection: "essence-segments", name: ProfileEssenceSegments, duration: 10 * time.Second, format: media.SegmentFormatSource, storage: media.EssenceStorageIndependent},
+		{selection: "mpegts-segments@v1", name: ProfileMPEGTSSegments, duration: 2 * time.Second, format: media.SegmentFormatMPEGTS, storage: media.EssenceStorageIndependent},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			profile, err := ResolveProfile(testCase.selection, ProfileOverrides{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if profile.Name != testCase.name || profile.Version != ProfileVersion ||
+			if profile.Name != testCase.name || profile.Version != "1" ||
 				profile.SegmentDuration != testCase.duration || profile.SegmentFormat != testCase.format ||
 				profile.EssenceStorage != testCase.storage {
 				t.Fatalf("resolved profile = %#v", profile)
 			}
 		})
+	}
+}
+
+func TestBuiltInProfileCatalogueIsStableAndDoesNotAliasRemovedNames(t *testing.T) {
+	t.Parallel()
+	definitions := BuiltInProfiles()
+	want := []string{ProfilePreserve, ProfileDemux, ProfileMuxedSegments, ProfileEssenceSegments, ProfileMPEGTSSegments}
+	if len(definitions) != len(want) {
+		t.Fatalf("catalogue length = %d, want %d", len(definitions), len(want))
+	}
+	for index, definition := range definitions {
+		if definition.Name != want[index] || definition.Version != "1" {
+			t.Fatalf("catalogue[%d] = %#v, want %s@1", index, definition, want[index])
+		}
+	}
+	for removed, replacement := range map[string]string{
+		"editorial": "essence-segments", "streaming-ts": "mpegts-segments",
+	} {
+		_, err := ResolveProfile(removed, ProfileOverrides{})
+		if err == nil || !strings.Contains(err.Error(), replacement) {
+			t.Fatalf("removed profile %q error = %v, want replacement %q", removed, err, replacement)
+		}
+	}
+}
+
+func TestNamedProfileVersionsAreValidatedIndependently(t *testing.T) {
+	t.Parallel()
+	for _, selection := range []string{"preserve@2", "demux@2", "muxed-segments@2", "essence-segments@2", "mpegts-segments@2"} {
+		_, err := ResolveProfile(selection, ProfileOverrides{})
+		if err == nil || !strings.Contains(err.Error(), "only version 1") {
+			t.Errorf("ResolveProfile(%q) error = %v, want profile-specific version guidance", selection, err)
+		}
 	}
 }
 
@@ -63,7 +97,7 @@ func TestTutorialPreservationTreatment(t *testing.T) {
 	}
 	if preserve.SegmentDuration != 0 || preserve.SegmentFormat != media.SegmentFormatSource ||
 		preserve.EssenceStorage != media.EssenceStorageMuxed {
-		t.Fatalf("preserve@%s = %#v, want whole-file muxed source bytes", ProfileVersion, preserve)
+		t.Fatalf("preserve@%s = %#v, want whole-file muxed source bytes", "1", preserve)
 	}
 	probe := media.Probe{Streams: []media.Stream{
 		{Index: 0, CodecType: "video"},
@@ -98,25 +132,25 @@ func TestTutorialPreservationTreatment(t *testing.T) {
 func TestProfileOverridesAreExplicitAndObservable(t *testing.T) {
 	t.Parallel()
 	duration := 4 * time.Second
-	profile, err := ResolveProfile(ProfileStreamingTS, ProfileOverrides{SegmentDuration: &duration})
+	profile, err := ResolveProfile(ProfileMPEGTSSegments, ProfileOverrides{SegmentDuration: &duration})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profile.Name != ProfileCustom || profile.Version != ProfileVersion || profile.SegmentDuration != duration {
-		t.Fatalf("resolved profile = %#v, want custom@%s with a four-second target", profile, ProfileVersion)
+	if profile.Name != ProfileCustom || profile.Version != "1" || profile.SegmentDuration != duration {
+		t.Fatalf("resolved profile = %#v, want custom@%s with a four-second target", profile, "1")
 	}
 
 	// Repeating a named setting does not turn it into a different contract.
 	format := media.SegmentFormatMPEGTS
-	profile, err = ResolveProfile(ProfileStreamingTS, ProfileOverrides{SegmentFormat: &format})
+	profile, err = ResolveProfile(ProfileMPEGTSSegments, ProfileOverrides{SegmentFormat: &format})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profile.Name != ProfileStreamingTS {
-		t.Fatalf("matching override resolved as %q, want %q", profile.Name, ProfileStreamingTS)
+	if profile.Name != ProfileMPEGTSSegments {
+		t.Fatalf("matching override resolved as %q, want %q", profile.Name, ProfileMPEGTSSegments)
 	}
 
-	profile, err = ResolveProfile(ProfileEditorial, ProfileOverrides{FFmpegArgs: true})
+	profile, err = ResolveProfile(ProfileEssenceSegments, ProfileOverrides{FFmpegArgs: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,31 +162,31 @@ func TestProfileOverridesAreExplicitAndObservable(t *testing.T) {
 func TestNamedProfileCannotMisreportDifferentSettings(t *testing.T) {
 	t.Parallel()
 	_, err := New(Config{
-		Profile: ProfileEditorial, ProfileVersion: ProfileVersion,
+		Profile: ProfileEssenceSegments, ProfileVersion: "1",
 		SegmentDuration: 2 * time.Second, SegmentFormat: media.SegmentFormatSource,
 		EssenceStorage: media.EssenceStorageIndependent, DryRun: true,
 	}, nil, fakeProber{}, fakeSegmenter{}, discardLogger(), nil)
 	if err == nil || !strings.Contains(err.Error(), "custom@1") {
 		t.Fatalf("mismatched named-profile error = %v", err)
 	}
-	if _, err := ResolveProfile("editorial@", ProfileOverrides{}); err == nil {
+	if _, err := ResolveProfile("essence-segments@", ProfileOverrides{}); err == nil {
 		t.Fatal("empty profile version was accepted")
 	}
 }
 
-func TestStreamingTSRejectsUnsupportedCodecs(t *testing.T) {
+func TestMPEGTSSegmentsRejectUnsupportedCodecs(t *testing.T) {
 	t.Parallel()
 	compatible := media.Probe{Streams: []media.Stream{
 		{Index: 0, CodecType: "video", CodecName: "h264"},
 		{Index: 1, CodecType: "audio", CodecName: "aac"},
 	}}
-	if err := validateStreamingTSCodecs(compatible); err != nil {
+	if err := validateMPEGTSSegmentCodecs(compatible); err != nil {
 		t.Fatalf("compatible transport stream rejected: %v", err)
 	}
 	unsupported := compatible
 	unsupported.Streams = append([]media.Stream(nil), compatible.Streams...)
 	unsupported.Streams[1].CodecName = "flac"
-	if err := validateStreamingTSCodecs(unsupported); err == nil || !strings.Contains(err.Error(), "audio/flac") {
+	if err := validateMPEGTSSegmentCodecs(unsupported); err == nil || !strings.Contains(err.Error(), "audio/flac") {
 		t.Fatalf("unsupported codec error = %v", err)
 	}
 }
@@ -171,7 +205,7 @@ func TestMuxerChangingArgumentsMustMatchContainerPolicy(t *testing.T) {
 	}
 }
 
-func TestStreamingTSPolicyFailsBeforeInvokingFFmpeg(t *testing.T) {
+func TestMPEGTSSegmentPolicyFailsBeforeInvokingFFmpeg(t *testing.T) {
 	directory := t.TempDir()
 	filename := directory + "/audio.flac"
 	if err := os.WriteFile(filename, []byte("flac source"), 0o600); err != nil {
@@ -182,7 +216,7 @@ func TestStreamingTSPolicyFailsBeforeInvokingFFmpeg(t *testing.T) {
 		Streams: []media.Stream{{Index: 0, CodecType: "audio", CodecName: "flac", SampleRate: "48000", Channels: 2}},
 	}}
 	pipeline, err := New(Config{
-		Profile: ProfileStreamingTS, ProfileVersion: ProfileVersion,
+		Profile: ProfileMPEGTSSegments, ProfileVersion: "1",
 		Concurrency: 1, DryRun: true, SegmentDuration: 2 * time.Second,
 		SegmentFormat: media.SegmentFormatMPEGTS, EssenceStorage: media.EssenceStorageIndependent,
 	}, nil, prober, versionedCountingSegmenter{err: errors.New("FFmpeg must not run")}, discardLogger(), nil)
@@ -194,14 +228,14 @@ func TestStreamingTSPolicyFailsBeforeInvokingFFmpeg(t *testing.T) {
 		t.Fatal(err)
 	}
 	if batch.Failed != 1 || len(batch.Results) != 1 || !strings.Contains(batch.Results[0].Error, "audio/flac") {
-		t.Fatalf("result = %#v, want an unsupported streaming codec failure", batch)
+		t.Fatalf("result = %#v, want an unsupported MPEG-TS codec failure", batch)
 	}
 }
 
 func TestRendererEpochAndByteProfilesDeriveStableFlowIDs(t *testing.T) {
 	t.Parallel()
 	config := Config{
-		Profile: ProfileEditorial, ProfileVersion: ProfileVersion,
+		Profile: ProfileEssenceSegments, ProfileVersion: "1",
 		SegmentDuration: 10 * time.Second, SegmentFormat: media.SegmentFormatSource,
 		EssenceStorage: media.EssenceStorageIndependent,
 	}
@@ -210,7 +244,7 @@ func TestRendererEpochAndByteProfilesDeriveStableFlowIDs(t *testing.T) {
 	newProfile := config
 	newProfile.ProfileVersion = "2"
 	differentProfileVersion := namedID("flow", "input", flowProfile("bytes-one", newProfile))
-	differentRendererEpoch := namedID("flow", "input", flowProfileForRendererEpoch("bytes-one", config, "2"))
+	differentRendererEpoch := namedID("flow", "input", flowProfileForRendererEpoch("bytes-one", config, "3"))
 	for label, id := range map[string]string{
 		"different bytes": differentBytes, "different semantic profile": differentProfileVersion,
 		"different renderer epoch": differentRendererEpoch,
@@ -219,7 +253,7 @@ func TestRendererEpochAndByteProfilesDeriveStableFlowIDs(t *testing.T) {
 			t.Fatalf("%s derived the same Flow ID %s", label, id)
 		}
 	}
-	if rendererIdentityEpoch != "1" {
+	if rendererIdentityEpoch != "2" {
 		t.Fatalf("renderer identity epoch changed without an explicit migration: %q", rendererIdentityEpoch)
 	}
 }
@@ -227,7 +261,7 @@ func TestRendererEpochAndByteProfilesDeriveStableFlowIDs(t *testing.T) {
 func TestWholeFileProfileIsPartOfGeneratedIdentity(t *testing.T) {
 	t.Parallel()
 	preserve := Config{
-		Profile: ProfilePreserve, ProfileVersion: ProfileVersion,
+		Profile: ProfilePreserve, ProfileVersion: "1",
 		SegmentFormat: media.SegmentFormatSource, EssenceStorage: media.EssenceStorageMuxed,
 	}
 	custom := preserve
@@ -250,7 +284,7 @@ func TestMachineResultReportsTheToolchainThatWroteMedia(t *testing.T) {
 	}
 	const report = "ffmpeg version 7.0\nconfiguration: --enable-example\nlibavformat 61.0"
 	pipeline, err := New(Config{
-		Profile: ProfileEditorial, ProfileVersion: ProfileVersion,
+		Profile: ProfileEssenceSegments, ProfileVersion: "1",
 		Concurrency: 1, Transfers: 2, DryRun: true,
 		SegmentDuration: 10 * time.Second, SegmentFormat: media.SegmentFormatSource,
 		EssenceStorage: media.EssenceStorageIndependent,
@@ -271,7 +305,7 @@ func TestMachineResultReportsTheToolchainThatWroteMedia(t *testing.T) {
 	if result.FFmpegVersion != "ffmpeg version 7.0" {
 		t.Fatalf("FFmpegVersion = %q", result.FFmpegVersion)
 	}
-	wantFingerprint := mediaToolchainFingerprint(ProfileEditorial, ProfileVersion, report)
+	wantFingerprint := mediaToolchainFingerprint(ProfileEssenceSegments, "1", report)
 	if result.MediaToolchain != wantFingerprint {
 		t.Fatalf("MediaToolchain = %q, want %q", result.MediaToolchain, wantFingerprint)
 	}

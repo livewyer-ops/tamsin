@@ -9,18 +9,30 @@
 # it matters, which is when somebody pushes a tag.
 set -Eeuo pipefail
 
-contract="${1:-contracts/tams-v8.1.json}"
+contract="${1:-contracts/tams-v8.2.json}"
 
 python3 - "$contract" <<'PY'
 import json, sys
+from pathlib import Path
 
-path = sys.argv[1]
-try:
-    with open(path) as handle:
-        findings = json.load(handle).get("open_findings", [])
-except (OSError, ValueError) as error:
-    print(f"cannot read the conformance inventory at {path}: {error}", file=sys.stderr)
-    raise SystemExit(2)
+path = Path(sys.argv[1])
+findings = []
+seen = set()
+while path:
+    resolved = path.resolve()
+    if resolved in seen:
+        print(f"conformance inventory inheritance cycle at {path}", file=sys.stderr)
+        raise SystemExit(2)
+    seen.add(resolved)
+    try:
+        with path.open() as handle:
+            document = json.load(handle)
+    except (OSError, ValueError) as error:
+        print(f"cannot read the conformance inventory at {path}: {error}", file=sys.stderr)
+        raise SystemExit(2)
+    findings.extend(document.get("open_findings", []))
+    parent = document.get("extends")
+    path = path.parent / parent if parent else None
 
 blocking = [entry for entry in findings if entry.get("blocks_release")]
 if not blocking:

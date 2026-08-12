@@ -514,7 +514,7 @@ func documentedFlags(section string) map[string]bool {
 // time.
 func TestConformancePageUsesThePinnedRevisions(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile(filepath.Join(repoRoot, "contracts", "tams-v8.1.json"))
+	targetData, err := os.ReadFile(filepath.Join(repoRoot, "contracts", "tams-v8.2.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +526,7 @@ func TestConformancePageUsesThePinnedRevisions(t *testing.T) {
 			Commit string `json:"commit"`
 		} `json:"tamoss"`
 	}
-	if err := json.Unmarshal(data, &contract); err != nil {
+	if err := json.Unmarshal(targetData, &contract); err != nil {
 		t.Fatal(err)
 	}
 	page, err := os.ReadFile(filepath.Join(repoRoot, "docs", "explanation", "conformance.md"))
@@ -539,6 +539,22 @@ func TestConformancePageUsesThePinnedRevisions(t *testing.T) {
 		}
 	}
 
+	compatibilityData, err := os.ReadFile(filepath.Join(repoRoot, "contracts", "tams-v8.1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compatibility struct {
+		TAMS struct {
+			Commit string `json:"commit"`
+		} `json:"tams"`
+	}
+	if err := json.Unmarshal(compatibilityData, &compatibility); err != nil {
+		t.Fatal(err)
+	}
+	allowedRevisions := map[string]bool{
+		contract.TAMS.Commit:      true,
+		compatibility.TAMS.Commit: true,
+	}
 	tamsRevisionLink := regexp.MustCompile(`github\.com/bbc/tams/(?:blob|commit)/([^/)]+)`)
 	for _, file := range markdownFiles(t) {
 		body, err := os.ReadFile(file)
@@ -546,8 +562,8 @@ func TestConformancePageUsesThePinnedRevisions(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, match := range tamsRevisionLink.FindAllStringSubmatch(string(body), -1) {
-			if match[1] != contract.TAMS.Commit {
-				t.Errorf("%s links to TAMS revision %q, want the pinned revision %q", file, match[1], contract.TAMS.Commit)
+			if !allowedRevisions[match[1]] {
+				t.Errorf("%s links to unpinned TAMS revision %q", file, match[1])
 			}
 		}
 	}
@@ -564,7 +580,7 @@ func TestFirstIngestTutorialStatesTheExecutableMediaContract(t *testing.T) {
 	}
 	contents := string(page)
 	for _, required := range []string{
-		"tamsin --profile editorial --dry-run=exact --format json -i first-ingest.ts",
+		"tamsin --profile essence-segments --dry-run=exact --format json -i first-ingest.ts",
 		"**three** entries", `"role": "video"`, `"role": "audio"`, "root_flow_id",
 		"tamsin --profile preserve", "--essence-storage muxed --segment-duration 0",
 	} {

@@ -12,7 +12,7 @@ array, enclosing batch document, ANSI control sequence, carriage return, or
 human footer.
 
 This streaming contract applies only to `ingest`. Finite commands such as
-`api`, `doctor`, and `config show --effective` continue to write one
+`api`, `doctor`, `profiles`, and `config show --effective` continue to write one
 command-specific JSON document when `--format json` is selected. In
 particular, the [doctor report](doctor.md) has its own schema and is not an
 ingest event stream.
@@ -69,7 +69,7 @@ Every record has the same envelope:
 ```json
 {
   "protocol": "tamsin.ingest.events",
-  "protocol_version": "2.0",
+  "protocol_version": "2.1",
   "type": "progress.snapshot",
   "seq": 17,
   "run_id": "0a853551-fb19-40d6-8f17-15dd3562e6d4",
@@ -95,7 +95,7 @@ for readability.
 | Field | Meaning |
 | --- | --- |
 | `protocol` | Always `tamsin.ingest.events`. Do not confuse the stream with a finite-command result or the durable journal. |
-| `protocol_version` | Wire-protocol major and minor version. Version `2.0` is independent of the media profile and terminal-result versions. |
+| `protocol_version` | Wire-protocol major and minor version. Version `2.1` adds optional TAMS Flow Profile identity and is independent of media-profile policy versions. |
 | `type` | Stable event name. Consumers branch on this value, not on a display message. |
 | `seq` | Globally contiguous sequence, starting at zero, in actual emission order. It is authoritative when timestamps tie or clocks differ. |
 | `run_id` | UUID shared by the whole stream, support diagnostics, and the optional journal. Together, `run_id` and `seq` identify one event. |
@@ -109,6 +109,8 @@ provenance, terminal-result and profile-policy versions, capabilities, and the
 maximum encoded event size. A parent should inspect it before depending on an
 optional capability. Sequence numbers are assigned after progress coalescing,
 so a deliberately omitted intermediate snapshot never creates a sequence gap.
+The profile-policy version describes the built-in catalogue, not the selected
+profile's independent semantic version.
 
 In `run.started`, `dry_run_mode` is `off`, `fast`, or `exact`, and
 `verification_mode` is `auto`, `readback`, or `none`. These resolved values are
@@ -140,6 +142,11 @@ identifies one input. Object and Flow terminal records precede their owning
 `input.finished`. On any graceful success, partial failure, or interruption,
 every declared input receives exactly one `input.finished`, including work
 cancelled before dispatch.
+
+If input resolution fails before a profile can be resolved, synthetic terminal
+input records use `unresolved@0`. That value is failure provenance, not a
+selectable profile. Once resolution succeeds, terminal records carry the named
+profile version or `custom@1`.
 
 `run.finished` is the last graceful record and nothing follows it. Its outcome
 is `succeeded`, `partial`, `failed`, or `interrupted`, and its `exit_code` must
@@ -178,6 +185,11 @@ durable journal. A UI should preserve them rather than flattening every
 non-success into `failed`.
 
 Each Flow result has a mutation `disposition`:
+
+When assigned, `tams_flow_profile_id` is the immutable TAMS 8.2 Flow Profile
+UUID on both `flow.planned` and the matching terminal Flow result. Consumers
+should retain it with the Flow ID: changing the assignment changes generated
+identity, and an existing deterministic Flow is never silently repointed.
 
 | Disposition | Meaning |
 | --- | --- |
@@ -274,7 +286,7 @@ UI should therefore call it at a bounded display refresh cadence, not once per
 Object or protocol event; the example below takes only the final snapshot.
 
 ```go
-cmd := exec.Command("tamsin", "ingest", "--profile", "editorial", "--format", "json", "-i", input)
+cmd := exec.Command("tamsin", "ingest", "--profile", "essence-segments", "--format", "json", "-i", input)
 stdout, err := cmd.StdoutPipe()
 if err != nil {
     return err
@@ -388,7 +400,7 @@ intentionally does not contain transient progress, retry, or diagnostic events.
 Use `--journal PATH` (or `ingest.journal`):
 
 ```sh
-tamsin ingest --profile editorial --journal /var/lib/tamsin/run-results.jsonl \
+tamsin ingest --profile essence-segments --journal /var/lib/tamsin/run-results.jsonl \
   -i /incoming -o https://tams.example.com
 ```
 

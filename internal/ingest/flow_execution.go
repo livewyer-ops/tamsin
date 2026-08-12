@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -42,7 +43,15 @@ func (p *Pipeline) executeFlowPlan(ctx context.Context, inputURI string, graph f
 	if err := writeFlowGraph(ctx, p, &state); err != nil {
 		return err
 	}
-	return registerFlowObjects(ctx, p, &state)
+	if err := registerFlowObjects(ctx, p, &state); err != nil {
+		return errors.Join(err, p.recoverFlowStatuses(ctx, graph))
+	}
+	if err := p.setFlowGraphStatus(ctx, graph, flowStatusClosedComplete); err != nil {
+		recoveryErr := p.recoverFlowStatuses(ctx, graph)
+		return withFailure(FailureCodeFlowWriteFailed, FailureMessageFlowWriteFailed, true,
+			errors.Join(fmt.Errorf("close completed Flow graph: %w", err), recoveryErr))
+	}
+	return nil
 }
 
 func planFlowWrites(ctx context.Context, p *Pipeline, state *flowExecutionState) error {

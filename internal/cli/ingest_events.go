@@ -108,7 +108,7 @@ func newIngestEventOutput(writer io.Writer, runID string, cancel context.CancelC
 	output.mu.Lock()
 	err = output.emitLocked(nil, ingestevent.Hello{
 		ToolVersion: version.Version, ToolCommit: version.SourceCommit(), ToolBuildDate: version.BuildDate(),
-		ResultSchemaVersion: ingest.ResultSchemaVersion, ProfilePolicyVersion: ingest.ResultProfileVersion,
+		ResultSchemaVersion: ingest.ResultSchemaVersion, ProfilePolicyVersion: ingest.ProfilePolicyVersion,
 		MaxEventBytes: ingestevent.DefaultMaxEventBytes,
 		Capabilities: []string{
 			"bounded_reducer", "durable_journal", "graceful_cancel", "live_object_results", "progress",
@@ -227,7 +227,7 @@ func (o *ingestEventOutput) FlowPlanned(index int, plan ingest.FlowPlan) error {
 	event := ingestevent.FlowPlanned{
 		FlowID: plan.FlowID, SourceID: plan.SourceID, Kind: kind, Role: plan.Role,
 		Root: plan.Root, ParentFlowID: plan.ParentFlowID,
-		Format: plan.Format, Container: plan.Container,
+		Format: plan.Format, Container: plan.Container, TAMSFlowProfileID: plan.TAMSFlowProfileID,
 	}
 	if o.plannedFlows[index] == nil {
 		o.plannedFlows[index] = make(map[string]ingestevent.FlowPlanned)
@@ -408,7 +408,8 @@ func (o *ingestEventOutput) resultLocked(index int, result ingest.Result) error 
 		}
 		if err := o.emitLocked(ingestevent.FlowScope(index, flow.FlowID), ingestevent.FlowResult{
 			FlowID: flow.FlowID, SourceID: flow.SourceID, Kind: planned.Kind, Role: planned.Role,
-			Disposition: ingestevent.FlowDisposition(flow.Disposition), ObjectSummary: eventObjectSummary(flow.ObjectSummary),
+			TAMSFlowProfileID: flow.TAMSFlowProfileID,
+			Disposition:       ingestevent.FlowDisposition(flow.Disposition), ObjectSummary: eventObjectSummary(flow.ObjectSummary),
 		}); err != nil {
 			return err
 		}
@@ -516,7 +517,7 @@ func (o *ingestEventOutput) Finish(batch *ingest.BatchResult, cause error, exitC
 		return ExitGeneral, err
 	}
 
-	profile, profileVersion := ingest.ProfileEditorial, ingest.ResultProfileVersion
+	profile, profileVersion := ingest.ProfileUnresolved, ingest.UnresolvedProfileVersion
 	verification := ingestevent.VerificationNotReached
 	if options != nil {
 		profile, profileVersion = options.profile, options.profileVersion

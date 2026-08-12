@@ -1,0 +1,103 @@
+{
+  "extends": "tams-v8.1.json",
+  "tams": {
+    "version": "8.2",
+    "repository": "https://github.com/bbc/tams",
+    "commit": "ebb18b09cc6effe70a3464fc0282e9663d0a583f",
+    "openapi_path": "api/TimeAddressableMediaStore.yaml",
+    "openapi_git_blob": "735a8468bda972b925bd73a45cbe360ad45d06e9"
+  },
+  "tamoss": {
+    "repository": "https://github.com/livewyer-ops/tamoss",
+    "commit": "5ec9df15f661a5db230577074e2e55d10444d4ea",
+    "tams_submodule_commit": "ebb18b09cc6effe70a3464fc0282e9663d0a583f",
+    "profile": "local-kind",
+    "release": "8.2-preview"
+  },
+  "authentication": [],
+  "ingest_operations": [
+    {
+      "operation_id": "GET_profiles",
+      "method": "GET",
+      "path": "/service/profiles",
+      "cli": "api flow-profile list",
+      "implemented_by": "internal/tams.Client.Profiles",
+      "tested_by": "internal/tams.TestProfilesFollowsPaging, internal/cli.TestCLIAPIFlowProfileOperations"
+    },
+    {
+      "operation_id": "GET_profiles-profileId",
+      "method": "GET",
+      "path": "/service/profiles/{profileId}",
+      "cli": "api flow-profile get",
+      "implemented_by": "internal/tams.Client.Profile",
+      "tested_by": "internal/tams.TestClientFlowProfileOperations, internal/cli.TestCLIAPIFlowProfileOperations"
+    },
+    {
+      "operation_id": "POST_profiles-profileId",
+      "method": "POST",
+      "path": "/service/profiles/{profileId}",
+      "cli": "api flow-profile create",
+      "implemented_by": "internal/tams.Client.CreateProfile",
+      "tested_by": "internal/tams.TestClientFlowProfileOperations, internal/cli.TestCLIAPIFlowProfileOperations"
+    }
+  ],
+  "spec_review": {
+    "reviewed_at_commit": "ebb18b09cc6effe70a3464fc0282e9663d0a583f",
+    "adrs_total": 56,
+    "adrs_read": 56,
+    "appnotes_total": 24,
+    "appnotes_read": 24,
+    "note": "This target-contract delta extends the complete TAMS 8.1 review. Its rules and not_applicable entries classify every ADR and Application Note added by the pinned 8.2 preview; review-count tests take the union with tams-v8.1.json."
+  },
+  "rules": [
+    {
+      "id": "init-object-protocol",
+      "source": "adr/0045,appnote/0024",
+      "requirement": "Initialisation segments are independently allocated Objects associated with Media Objects through init_object_id; clients do not infer or manufacture them from Flow metadata.",
+      "asserted_by": "contracts.TestSegmentRequestMatchesPinnedSchema, tams.TestClientIngestOperations"
+    },
+    {
+      "id": "immutable-flow-profiles",
+      "source": "adr/0047,appnote/0020",
+      "requirement": "Flow Profiles are immutable single-essence technical contracts; profile-backed Flow PUTs carry profile_id instead of duplicate technical metadata, while Flow GETs remain expanded.",
+      "asserted_by": "ingest.TestProfileBackedFlowPlansExpandedReadsAndCompactWrites, ingest.TestAssignFlowProfilesRequiresIndexedDuplicateFormats"
+    },
+    {
+      "id": "selectable-presigned-storage-urls",
+      "source": "adr/0054",
+      "requirement": "Storage allocation may explicitly request presigned or non-presigned PUT URLs and reports which mode each returned URL uses.",
+      "asserted_by": "contracts.TestStorageRequestMatchesPinnedSchema, cli.TestCLIAPIStorageAllocationSupportsTAMS82Options"
+    },
+    {
+      "id": "storage-backend-authorisation-metadata",
+      "source": "adr/0055",
+      "requirement": "Storage Backend responses retain store type, provider, product, location, and read-only tags so authorisation policy can be evaluated without a lossy client model.",
+      "asserted_by": "tams.TestClientIngestOperations"
+    },
+    {
+      "id": "ordered-collection-roles",
+      "source": "adr/0056",
+      "requirement": "flow_collection order is meaningful and role is optional; Tamsin preserves deterministic input order and may supply human-readable roles without treating them as interoperable technical selectors.",
+      "asserted_by": "contracts.TestMultiEssenceFlowCollectsMonoEssenceFlows, ingest.TestCollectionItemsCarryExactMultiAudioTrackIndices"
+    }
+  ],
+  "not_applicable": [
+    {
+      "source": "adr/0049",
+      "reason": "Source collected_by query filtering is a discovery operation outside the ingest write path."
+    },
+    {
+      "source": "adr/0052",
+      "reason": "Default ordering of generic listing endpoints does not alter ingest correctness; Profile paging follows opaque server cursors."
+    },
+    {
+      "source": "adr/0053,appnote/0025",
+      "reason": "Editorial purpose is operator-owned descriptive metadata; Tamsin does not infer it from codecs, filenames, or collection position."
+    },
+    {
+      "source": "appnote/0022",
+      "reason": "Transform deployment architectures are operational patterns; Tamsin exposes explicit local treatment profiles without requiring one architecture."
+    }
+  ],
+  "open_findings": []
+}

@@ -20,25 +20,26 @@ Examples:
 
 ```sh
 # Recursive directory
-tamsin --profile editorial -i /media/drop -o https://tams.example.com/v8.1
+tamsin --profile essence-segments -i /media/drop -o https://tams.example.com/v8.1
 
 # Source manifest
-tamsin --profile editorial -i sources.txt -o https://tams.example.com/v8.1
+tamsin --profile essence-segments -i sources.txt -o https://tams.example.com/v8.1
 
 # S3-compatible store
 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
-  tamsin --profile editorial -i s3://incoming/day-001/ \
+  tamsin --profile essence-segments -i s3://incoming/day-001/ \
   --s3-endpoint https://objects.example.com --s3-path-style \
   -o https://tams.example.com/v8.1
 
 # Event payload on stdin. An explicit --stdin-name makes -i - optional.
-cat event.ts | tamsin --profile editorial --stdin-name event.ts -o https://tams.example.com/v8.1
+cat event.ts | tamsin --profile essence-segments --stdin-name event.ts -o https://tams.example.com/v8.1
 
 # Render the complete local plan without changing TAMS
-tamsin --profile editorial -i sources.txt --dry-run=exact --format json
+tamsin --profile essence-segments -i sources.txt --dry-run=exact --format json
 
-# Segments default to a 10s target; -d 0 stores the whole input as one Media Object
-tamsin --profile editorial -i input.mov -d 0 -o https://tams.example.com/v8.1
+# Compare a ten-second independent treatment with whole-essence demultiplexing
+tamsin --profile essence-segments -i input.mov -o https://tams.example.com/v8.1
+tamsin --profile demux -i input.mov -o https://tams.example.com/v8.1
 ```
 
 ## Resolution rules

@@ -168,6 +168,25 @@ func (c *Client) StorageBackends(ctx context.Context) ([]StorageBackend, error) 
 	return result, nil
 }
 
+func (c *Client) Profile(ctx context.Context, profileID string) (Profile, error) {
+	var result Profile
+	if err := c.doJSON(ctx, http.MethodGet, "service/profiles/"+escapeSegment(profileID), nil, &result, http.StatusOK); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// CreateProfile creates an immutable TAMS 8.2 Flow Profile. The API uses POST
+// to an operator-selected UUID and rejects attempts to replace an existing
+// Profile.
+func (c *Client) CreateProfile(ctx context.Context, profileID string, profile Profile) (Profile, error) {
+	var result Profile
+	if err := c.doJSON(ctx, http.MethodPost, "service/profiles/"+escapeSegment(profileID), profile, &result, http.StatusCreated); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 func (c *Client) Flow(ctx context.Context, flowID string) (Flow, error) {
 	var result Flow
 	if err := c.doJSON(ctx, http.MethodGet, "flows/"+escapeSegment(flowID), nil, &result, http.StatusOK); err != nil {

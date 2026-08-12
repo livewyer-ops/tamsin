@@ -17,11 +17,11 @@ stderr 'invalid result format'
 stderr 'invalid log level'
 
 # Ingest requires an input.
-! exec tamsin --profile editorial --dry-run
+! exec tamsin --profile essence-segments --dry-run
 stderr 'at least one input is required'
 
 # A real ingest requires an endpoint; dry-run is what makes it optional.
-! exec tamsin --profile editorial -i input.mp4
+! exec tamsin --profile essence-segments -i input.mp4
 stderr 'TAMS endpoint is required'
 
 # Retry bounds are validated, not clamped silently.

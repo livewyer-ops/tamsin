@@ -1,6 +1,8 @@
 # Authenticate against a TAMS store
 
-TAMSin implements every authentication mechanism in the pinned TAMS 8.1 contract and both OAuth grants its bearer-token description recommends. Pick the one your store offers.
+TAMSin implements every authentication mechanism inherited by the pinned TAMS
+8.2 target from its 8.1 compatibility contract, plus both OAuth grants its
+bearer-token description recommends. Pick the one your store offers.
 
 Prefer the environment over flags: secret flags exist for interactive use, but are visible in process listings.
 

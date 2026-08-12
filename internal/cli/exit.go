@@ -25,7 +25,10 @@ const (
 	ExitInterrupted = 8
 )
 
-const helpGroupAnnotation = "tamsin.help_group"
+const (
+	helpGroupAnnotation         = "tamsin.help_group"
+	configIndependentAnnotation = "tamsin.config_independent"
+)
 
 func usageArgs(validate cobra.PositionalArgs) cobra.PositionalArgs {
 	return func(command *cobra.Command, args []string) error {

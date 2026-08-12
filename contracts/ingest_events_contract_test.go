@@ -50,11 +50,11 @@ func TestPublishedIngestEventSchemaAcceptsEveryRuntimePayload(t *testing.T) {
 	concurrency, transfers := uint64(2), uint64(8)
 	emitContractEvent(t, encoder, nil, ingestevent.Hello{
 		ToolVersion: "v1.0.0", ToolCommit: "abc123", ToolBuildDate: "2026-08-09T08:00:00Z",
-		ResultSchemaVersion: "2.0", ProfilePolicyVersion: "1", MaxEventBytes: ingestevent.DefaultMaxEventBytes,
+		ResultSchemaVersion: "2.1", ProfilePolicyVersion: "1", MaxEventBytes: ingestevent.DefaultMaxEventBytes,
 		Capabilities: []string{"progress", "terminal_results", "graceful_cancel"},
 	})
 	emitContractEvent(t, encoder, nil, ingestevent.RunStarted{
-		StartedAt: started, Profile: "editorial", ProfileVersion: "1", DryRunMode: "off", VerificationMode: "readback",
+		StartedAt: started, Profile: "essence-segments", ProfileVersion: "1", DryRunMode: "off", VerificationMode: "readback",
 		Concurrency: &concurrency, Transfers: &transfers, RequestedInputs: ingestevent.KnownInputCount(1),
 	})
 	emitContractEvent(t, encoder, ingestevent.InputScope(0), ingestevent.InputDeclared{Input: "file:///tmp/first-ingest.ts"})
@@ -91,7 +91,7 @@ func TestPublishedIngestEventSchemaAcceptsEveryRuntimePayload(t *testing.T) {
 		},
 	})
 	emitContractEvent(t, encoder, ingestevent.InputScope(0), ingestevent.InputFinished{
-		Input: "file:///tmp/first-ingest.ts", Profile: "editorial", ProfileVersion: "1",
+		Input: "file:///tmp/first-ingest.ts", Profile: "essence-segments", ProfileVersion: "1",
 		FFmpegVersion: "ffmpeg version 7.0", MediaToolchain: "sha256:" + eventSHA256,
 		RootFlowID: eventFlowID, Bytes: 1419776, SHA256: eventSHA256, Status: ingestevent.InputIngested,
 		Verification: ingestevent.VerificationVerified, FlowCount: 1, ObjectCount: 1,
@@ -112,7 +112,7 @@ func TestPublishedIngestEventSchemaAcceptsEveryRuntimePayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	emitContractEvent(t, interrupted, nil, ingestevent.Hello{
-		ToolVersion: "v1.0.0", ToolCommit: "abc123", ResultSchemaVersion: "2.0", ProfilePolicyVersion: "1",
+		ToolVersion: "v1.0.0", ToolCommit: "abc123", ResultSchemaVersion: "2.1", ProfilePolicyVersion: "1",
 		MaxEventBytes: ingestevent.DefaultMaxEventBytes, Capabilities: []string{"graceful_cancel"},
 	})
 	emitContractEvent(t, interrupted, nil, ingestevent.RunStarted{StartedAt: started})
@@ -120,7 +120,7 @@ func TestPublishedIngestEventSchemaAcceptsEveryRuntimePayload(t *testing.T) {
 	emitContractEvent(t, interrupted, nil, ingestevent.ManifestFinished{TotalInputs: 1})
 	emitContractEvent(t, interrupted, nil, ingestevent.RunCancellationRequested{Reason: ingestevent.CancellationSignal})
 	emitContractEvent(t, interrupted, ingestevent.InputScope(0), ingestevent.InputFinished{
-		Input: "file:///tmp/queued.ts", Profile: "editorial", ProfileVersion: "1", Status: ingestevent.InputFailed,
+		Input: "file:///tmp/queued.ts", Profile: "essence-segments", ProfileVersion: "1", Status: ingestevent.InputFailed,
 		Verification: ingestevent.VerificationNotReached, ErrorCode: ingestevent.InputErrorCodeRunInterrupted, Message: "Interrupted before dispatch.",
 	})
 	emitContractEvent(t, interrupted, nil, ingestevent.RunFinished{
@@ -141,7 +141,7 @@ func TestPublishedSchemaAllowsStartupFailureAndCompatibleMinorExtensions(t *test
 		t.Fatal(err)
 	}
 	emitContractEvent(t, encoder, nil, ingestevent.Hello{
-		ToolVersion: "v1.0.0", ToolCommit: "abc123", ResultSchemaVersion: "2.0", ProfilePolicyVersion: "1",
+		ToolVersion: "v1.0.0", ToolCommit: "abc123", ResultSchemaVersion: "2.1", ProfilePolicyVersion: "1",
 		MaxEventBytes: ingestevent.DefaultMaxEventBytes, Capabilities: []string{},
 	})
 	emitContractEvent(t, encoder, nil, ingestevent.RunStarted{StartedAt: time.Now().UTC()})

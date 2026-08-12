@@ -17,11 +17,92 @@ func (a *application) apiCommand() *cobra.Command {
 	command := helpGroupCommand("api", "Execute TAMS upload and ingest API operations")
 	command.AddCommand(a.apiServiceCommand())
 	command.AddCommand(a.apiStorageBackendsCommand())
+	command.AddCommand(a.apiFlowProfileCommand())
 	command.AddCommand(a.apiFlowCommand())
 	command.AddCommand(a.apiStorageCommand())
 	command.AddCommand(a.apiSegmentCommand())
 	command.AddCommand(a.apiObjectCommand())
 	command.AddCommand(a.apiRequestCommand())
+	return command
+}
+
+func (a *application) apiFlowProfileCommand() *cobra.Command {
+	command := helpGroupCommand("flow-profile", "List, inspect, or create TAMS 8.2 Flow Profiles")
+	command.AddCommand(a.apiFlowProfileListCommand())
+	command.AddCommand(a.apiFlowProfileGetCommand())
+	command.AddCommand(a.apiFlowProfileCreateCommand())
+	return command
+}
+
+func (a *application) apiFlowProfileListCommand() *cobra.Command {
+	var format, codec, label string
+	command := &cobra.Command{
+		Use:   "list",
+		Short: "List immutable Flow Profiles",
+		Args:  usageArgs(cobra.NoArgs),
+		RunE: func(command *cobra.Command, _ []string) error {
+			client, err := a.clientForCommand(command)
+			if err != nil {
+				return err
+			}
+			value, err := client.Profiles(command.Context(), tams.ProfileListOptions{
+				Format: format, Codec: codec, Label: label,
+			})
+			if err != nil {
+				return withExit(ExitRemote, err)
+			}
+			return a.writeValue(value)
+		},
+	}
+	command.Flags().StringVar(&format, "format", "", "filter by single-essence format URN")
+	command.Flags().StringVar(&codec, "codec", "", "filter by codec media type")
+	command.Flags().StringVar(&label, "label", "", "filter by exact Profile label")
+	return command
+}
+
+func (a *application) apiFlowProfileGetCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "get PROFILE_ID",
+		Short: "Get immutable Flow Profile metadata",
+		Args:  usageArgs(cobra.ExactArgs(1)),
+		RunE: func(command *cobra.Command, args []string) error {
+			client, err := a.clientForCommand(command)
+			if err != nil {
+				return err
+			}
+			value, err := client.Profile(command.Context(), args[0])
+			if err != nil {
+				return withExit(ExitRemote, err)
+			}
+			return a.writeValue(value)
+		},
+	}
+}
+
+func (a *application) apiFlowProfileCreateCommand() *cobra.Command {
+	var filename string
+	command := &cobra.Command{
+		Use:   "create PROFILE_ID",
+		Short: "Create an immutable Flow Profile",
+		Args:  usageArgs(cobra.ExactArgs(1)),
+		RunE: func(command *cobra.Command, args []string) error {
+			var body tams.Profile
+			if err := a.readJSONFile(filename, &body); err != nil {
+				return withExit(ExitUsage, err)
+			}
+			body["id"] = args[0]
+			client, err := a.clientForCommand(command)
+			if err != nil {
+				return err
+			}
+			value, err := client.CreateProfile(command.Context(), args[0], body)
+			if err != nil {
+				return withExit(ExitRemote, err)
+			}
+			return a.writeValue(value)
+		},
+	}
+	command.Flags().StringVarP(&filename, "file", "f", "-", "Profile JSON file or - for stdin")
 	return command
 }
 
@@ -127,8 +208,9 @@ func (a *application) apiStorageCommand() *cobra.Command {
 
 func (a *application) apiStorageAllocateCommand() *cobra.Command {
 	var objectIDs []string
-	var storageID string
+	var storageID, contentType string
 	var limit int
+	var presigned bool
 	command := &cobra.Command{
 		Use:   "allocate FLOW_ID",
 		Short: "Allocate upload URLs for a Flow",
@@ -145,7 +227,13 @@ func (a *application) apiStorageAllocateCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			value, err := client.AllocateStorage(command.Context(), args[0], tams.StorageRequest{ObjectIDs: objectIDs, StorageID: storageID, Limit: limit})
+			request := tams.StorageRequest{
+				ObjectIDs: objectIDs, StorageID: storageID, Limit: limit, ContentType: contentType,
+			}
+			if command.Flags().Changed("presigned") {
+				request.Presigned = &presigned
+			}
+			value, err := client.AllocateStorage(command.Context(), args[0], request)
 			if err != nil {
 				return withExit(ExitRemote, err)
 			}
@@ -154,6 +242,8 @@ func (a *application) apiStorageAllocateCommand() *cobra.Command {
 	}
 	command.Flags().StringArrayVar(&objectIDs, "object-id", nil, "requested Object ID (repeatable)")
 	command.Flags().StringVar(&storageID, "storage-id", "", "storage backend ID")
+	command.Flags().StringVar(&contentType, "content-type", "", "init Object media type (TAMS 8.2)")
+	command.Flags().BoolVar(&presigned, "presigned", false, "request presigned upload URLs (TAMS 8.2; use --presigned=false to refuse them)")
 	command.Flags().IntVar(&limit, "limit", 0, "number of server-assigned Object IDs")
 	return command
 }

@@ -88,7 +88,7 @@ func TestIngestEventOutputSeparatesProgressPhasesAndTerminalRecords(t *testing.T
 		t.Fatal(err)
 	}
 	options := &ingestFlagValues{
-		profile: ingest.ProfileEditorial, profileVersion: ingest.ProfileVersion,
+		profile: ingest.ProfileEssenceSegments, profileVersion: "1",
 		verify: string(ingest.VerificationReadback), concurrency: 1, transfers: 1, inputs: []string{"input.ts"},
 	}
 	if err := output.Start(options); err != nil {
@@ -122,7 +122,7 @@ func TestIngestEventOutputSeparatesProgressPhasesAndTerminalRecords(t *testing.T
 		StatusClass: "server_error", ErrorClass: "none", Backoff: 50 * time.Millisecond,
 	})
 	result := ingest.Result{
-		Profile: ingest.ProfileEditorial, ProfileVersion: ingest.ProfileVersion,
+		Profile: ingest.ProfileEssenceSegments, ProfileVersion: "1",
 		RootFlowID: eventTestFlowID, Bytes: 20, SHA256: eventTestDigest,
 		Status: ingest.ResultStatusIngested, Verification: ingest.VerificationVerified,
 		Flows: []ingest.FlowResult{{
@@ -245,7 +245,7 @@ func TestIngestEventProgressMailboxDoesNotBlockWorkersAndKeepsLatest(t *testing.
 	}
 	t.Cleanup(output.Close)
 	t.Cleanup(func() { closeOnce(writer.release) })
-	if err := output.Start(&ingestFlagValues{profile: ingest.ProfileEditorial, profileVersion: ingest.ProfileVersion}); err != nil {
+	if err := output.Start(&ingestFlagValues{profile: ingest.ProfileEssenceSegments, profileVersion: "1"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := output.Declare([]source.Item{{URI: "file:///slow-consumer.ts"}}); err != nil {
@@ -291,7 +291,7 @@ func TestIngestEventProgressMailboxDoesNotBlockWorkersAndKeepsLatest(t *testing.
 	closeOnce(writer.release)
 	writer.block.Store(false)
 	result := ingest.Result{
-		Input: "file:///slow-consumer.ts", Profile: ingest.ProfileEditorial, ProfileVersion: ingest.ProfileVersion,
+		Input: "file:///slow-consumer.ts", Profile: ingest.ProfileEssenceSegments, ProfileVersion: "1",
 		Status: ingest.ResultStatusIngested, Verification: ingest.VerificationNotRequested, Flows: []ingest.FlowResult{},
 	}
 	if err := output.Result(0, result); err != nil {
@@ -386,7 +386,7 @@ func TestIngestEventLifecycleWritesRemainAcknowledged(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := output.Result(0, ingest.Result{
-		Input: "file:///acknowledged.ts", Profile: ingest.ProfileEditorial, ProfileVersion: ingest.ProfileVersion,
+		Input: "file:///acknowledged.ts", Profile: ingest.ProfileEssenceSegments, ProfileVersion: "1",
 		RootFlowID: eventTestFlowID, Status: ingest.ResultStatusIngested, Verification: ingest.VerificationNotRequested,
 		Flows: []ingest.FlowResult{{FlowID: eventTestFlowID, SourceID: eventTestSourceID, Disposition: ingest.FlowWritten}},
 	}); err != nil {
@@ -443,7 +443,7 @@ func TestIngestEventOutputInterruptionCompletesUndispatchedInputs(t *testing.T) 
 		t.Fatal(err)
 	}
 	options := &ingestFlagValues{
-		profile: ingest.ProfileEditorial, profileVersion: ingest.ProfileVersion,
+		profile: ingest.ProfileEssenceSegments, profileVersion: "1",
 		verify: string(ingest.VerificationNone), concurrency: 1, transfers: 1, inputs: []string{"done.ts", "queued.ts"},
 	}
 	if err := output.Start(options); err != nil {
@@ -453,7 +453,7 @@ func TestIngestEventOutputInterruptionCompletesUndispatchedInputs(t *testing.T) 
 		t.Fatal(err)
 	}
 	if err := output.Result(0, ingest.Result{
-		Profile: ingest.ProfileEditorial, ProfileVersion: ingest.ProfileVersion,
+		Profile: ingest.ProfileEssenceSegments, ProfileVersion: "1",
 		Status: ingest.ResultStatusIngested, Verification: ingest.VerificationNotRequested, Flows: []ingest.FlowResult{},
 	}); err != nil {
 		t.Fatal(err)
@@ -523,6 +523,15 @@ func TestIngestEventOutputCompletesUndispatchedInputsInManifestOrder(t *testing.
 	}
 	if nextInput != inputs {
 		t.Fatalf("terminal inputs = %d, want %d", nextInput, inputs)
+	}
+	state, err := ingestevent.Reduce(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, input := range state.Inputs {
+		if input.Finished.Profile != ingest.ProfileUnresolved || input.Finished.ProfileVersion != ingest.UnresolvedProfileVersion {
+			t.Fatalf("input %d pre-resolution profile = %s@%s, want unresolved@0", index, input.Finished.Profile, input.Finished.ProfileVersion)
+		}
 	}
 }
 

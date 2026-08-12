@@ -6,7 +6,7 @@
 
 chmod 0755 ffprobe
 stdin payload.ts
-exec tamsin ingest --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact --stdin-name ingest.ts
+exec tamsin ingest --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact --stdin-name ingest.ts
 ! stderr .
 cp stdout events.ndjson
 checkevents events.ndjson succeeded 1 0 planned
@@ -17,7 +17,7 @@ stdout '"type":"input.finished".*"input":"stdin:"'
 # Once stdin is implied, the traditional single positional argument is the
 # endpoint rather than being misclassified as a media input.
 stdin payload.ts
-exec tamsin ingest --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact --stdin-name ingest.ts https://tams.example.test/v8.1
+exec tamsin ingest --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact --stdin-name ingest.ts https://tams.example.test/v8.1
 cp stdout endpoint-events.ndjson
 checkevents endpoint-events.ndjson succeeded 1 0 planned
 exec cat endpoint-events.ndjson
@@ -25,7 +25,7 @@ stdout '"type":"input.declared".*"input":"stdin:"'
 
 # An effective input remains authoritative: naming stdin must neither append a
 # second selector nor consume the pipe when -i already names media.
-exec tamsin ingest --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact --stdin-name ignored.ts -i input.ts
+exec tamsin ingest --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact --stdin-name ignored.ts -i input.ts
 cp stdout file-events.ndjson
 checkevents file-events.ndjson succeeded 1 0 planned
 exec cat file-events.ndjson
@@ -34,7 +34,7 @@ exec cat file-events.ndjson
 # The former explicit spelling remains one stdin input, not an inferred plus
 # explicit duplicate.
 stdin payload.ts
-exec tamsin ingest --profile editorial --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact --stdin-name ingest.ts -i -
+exec tamsin ingest --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact --stdin-name ingest.ts -i -
 cp stdout explicit-events.ndjson
 checkevents explicit-events.ndjson succeeded 1 0 planned
 
@@ -46,7 +46,7 @@ checkevents invalid-events.ndjson failed 0 2
 
 # The default/configured filename remains only a hint. It must not make an
 # accidental no-input invocation wait for terminal stdin.
-! exec tamsin --config config.yaml --profile editorial --dry-run
+! exec tamsin --config config.yaml --profile essence-segments --dry-run
 stderr 'at least one input is required'
 
 -- payload.ts --

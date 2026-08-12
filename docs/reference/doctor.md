@@ -13,7 +13,7 @@ By default it checks local readiness only. Select a profile when checking a
 specific planned treatment:
 
 ```sh
-tamsin --format json doctor --profile editorial
+tamsin --format json doctor --profile essence-segments
 ```
 
 The checks are, in order:
@@ -24,10 +24,10 @@ The checks are, in order:
 | `profile` | The named profile and explicit treatment overrides form a usable media treatment, or all available profiles are listed when none was selected. |
 | `staging` | The directory exists, has write permissions, accepts a temporary-file probe, and has enough currently free space for the configured budget. |
 | `ffprobe` | The configured executable completes its version check. |
-| `ffmpeg` | The executable completes its version check when the resolved treatment will write media. `preserve@1` skips this check because it uploads the whole multiplex unchanged. |
+| `ffmpeg` | The executable completes its version check when the resolved treatment may write media. `preserve@1` skips it; `demux@1` checks conservatively because doctor has no input from which to prove separation is unnecessary. |
 | `authentication` | Online only. Credential/transport policy succeeded and at least one read-only endpoint accepted the request; it is skipped as indeterminate when no response succeeds for a non-authentication reason. |
 | `service` | Online only. `GET /service` succeeded. |
-| `api_compatibility` | Online only. The service API is compatible with the TAMS 8.1 target. Older and newer 8.x minor versions pass with their relationship reported; a different major version fails. |
+| `api_compatibility` | Online only. The service API meets the TAMS 8.1 compatibility floor and is compared with the 8.2 target. TAMS 8.0, missing/malformed versions, and different major versions fail before mutation; newer 8.x minors pass with their relationship reported. |
 | `service_lifetimes` | Online only. Object and presigned-URL lifetime guarantees have valid TAMS timestamp syntax, ordering, and minimums. |
 | `storage_backends` | Online only. `GET /service/storage-backends` succeeded. |
 | `storage_selection` | Online only. The requested backend exists, or exactly one usable default backend can be selected. |

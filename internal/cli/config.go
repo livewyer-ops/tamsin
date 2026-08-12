@@ -95,6 +95,7 @@ func configDefinitions() []configDefinition {
 		{key: "ingest.staging_byte_budget", kind: configString, defaultValue: "auto", fileAllowed: true},
 		{key: "ingest.start", kind: configString, defaultValue: "0:0", fileAllowed: true},
 		{key: "ingest.storage_id", kind: configString, defaultValue: "", fileAllowed: true},
+		{key: "ingest.tams_flow_profiles", kind: configStrings, defaultValue: []string{}, fileAllowed: true},
 		{key: "ingest.temp_directory", kind: configString, defaultValue: "", fileAllowed: true},
 		{key: "ingest.transfers", kind: configInt, defaultValue: 0, fileAllowed: true},
 		{key: "ingest.verify", kind: configString, defaultValue: string(ingest.VerificationAuto), fileAllowed: true},
@@ -831,7 +832,7 @@ func (a *application) effectiveConfig(command *cobra.Command) effectiveConfigRes
 		// Persistent pre-run validation already reports this to users. Retain a
 		// defensive fallback for direct unit callers rather than panicking.
 		profile = ingest.Profile{
-			Name: ingest.ProfileCustom, Version: ingest.ProfileVersion,
+			Name: ingest.ProfileCustom, Version: ingest.CustomProfileVersion,
 			SegmentDuration: a.v.GetDuration("ingest.segment_duration"),
 			SegmentFormat:   media.SegmentFormat(a.v.GetString("ingest.segment_format")),
 			EssenceStorage:  media.EssenceStorage(a.v.GetString("ingest.essence_storage")),

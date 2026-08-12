@@ -15,18 +15,22 @@ import (
 // The pinned TAMS JSON Schemas are vendored so conformance is checked offline
 // and deterministically. Refreshing them is part of changing the pin.
 //
-//go:embed schemas/*.json
+//go:embed schemas/v8.1/*.json schemas/v8.2/*.json
 var schemaFS embed.FS
 
 func compileSchema(t *testing.T, name string) *jsonschema.Schema {
+	return compileSchemaRevision(t, revisions[2].revision, name)
+}
+
+func compileSchemaRevision(t *testing.T, revision schemaRevision, name string) *jsonschema.Schema {
 	t.Helper()
 	compiler := jsonschema.NewCompiler()
-	entries, err := schemaFS.ReadDir("schemas")
+	entries, err := schemaFS.ReadDir(revision.directory)
 	if err != nil {
 		t.Fatalf("read vendored schemas: %v", err)
 	}
 	for _, entry := range entries {
-		file, err := schemaFS.Open("schemas/" + entry.Name())
+		file, err := schemaFS.Open(revision.directory + "/" + entry.Name())
 		if err != nil {
 			t.Fatalf("open schema %s: %v", entry.Name(), err)
 		}
@@ -35,11 +39,11 @@ func compileSchema(t *testing.T, name string) *jsonschema.Schema {
 		if err != nil {
 			t.Fatalf("decode schema %s: %v", entry.Name(), err)
 		}
-		if err := compiler.AddResource(schemaBase+entry.Name(), document); err != nil {
+		if err := compiler.AddResource(revision.base+entry.Name(), document); err != nil {
 			t.Fatalf("add schema %s: %v", entry.Name(), err)
 		}
 	}
-	schema, err := compiler.Compile(schemaBase + name)
+	schema, err := compiler.Compile(revision.base + name)
 	if err != nil {
 		t.Fatalf("compile schema %s: %v", name, err)
 	}
@@ -94,7 +98,10 @@ func audioStream() media.Stream {
 // matches two essence schemas, or none, fails here.
 func TestGeneratedFlowsMatchPinnedSchema(t *testing.T) {
 	t.Parallel()
-	schema := compileSchema(t, "flow.json")
+	schemas := []*jsonschema.Schema{
+		compileSchemaRevision(t, revisions[1].revision, "flow.json"),
+		compileSchema(t, "flow-put.json"),
+	}
 
 	for _, testCase := range []struct {
 		name        string
@@ -150,9 +157,11 @@ func TestGeneratedFlowsMatchPinnedSchema(t *testing.T) {
 			if err != nil {
 				t.Fatalf("build flow: %v", err)
 			}
-			if err := validate(t, schema, flow); err != nil {
-				encoded, _ := json.MarshalIndent(flow, "", "  ")
-				t.Fatalf("generated Flow does not satisfy pinned TAMS schema:\n%v\n\nflow:\n%s", err, encoded)
+			for _, schema := range schemas {
+				if err := validate(t, schema, flow); err != nil {
+					encoded, _ := json.MarshalIndent(flow, "", "  ")
+					t.Fatalf("generated Flow does not satisfy a supported TAMS schema:\n%v\n\nflow:\n%s", err, encoded)
+				}
 			}
 		})
 	}
@@ -192,7 +201,7 @@ func TestRuntimeFlowValidationReportsTheRelevantJSONPointer(t *testing.T) {
 // schema validation alone.
 func TestMultiEssenceFlowCollectsMonoEssenceFlows(t *testing.T) {
 	t.Parallel()
-	schema := compileSchema(t, "flow.json")
+	schema := compileSchema(t, "flow-put.json")
 
 	probe := media.Probe{
 		Streams: []media.Stream{videoStream(), audioStream()},
@@ -335,20 +344,16 @@ func TestFlowTagsUseImplementationPrefix(t *testing.T) {
 	}
 }
 
-// TestSegmentRequestOmitsPostPinnedFields guards against sending properties the
-// pinned service does not accept. init_object_id and the init_segments essence
-// parameter both post-date TAMS 8.1; carrying them would advertise support for
-// initialisation segments that neither tamsin nor the pinned API has.
-func TestSegmentRequestOmitsPostPinnedFields(t *testing.T) {
+// TestSegmentRequestOmitsUnsetInitObjectID keeps the additive 8.2 field out of
+// requests sent through the 8.1-compatible media path.
+func TestSegmentRequestOmitsUnsetInitObjectID(t *testing.T) {
 	t.Parallel()
 	encoded, err := json.Marshal(tams.SegmentRequest{ObjectID: "object-1", Timerange: "[0:0_10:0)"})
 	if err != nil {
 		t.Fatalf("marshal SegmentRequest: %v", err)
 	}
-	for _, field := range []string{"init_object_id", "init_segments"} {
-		if strings.Contains(string(encoded), field) {
-			t.Fatalf("SegmentRequest carries post-8.1 field %q: %s", field, encoded)
-		}
+	if strings.Contains(string(encoded), "init_object_id") {
+		t.Fatalf("SegmentRequest carries an unset init_object_id: %s", encoded)
 	}
 }
 
@@ -358,7 +363,7 @@ func TestSegmentRequestOmitsPostPinnedFields(t *testing.T) {
 // simply unknown, so a video Flow always states one or the other.
 func TestVariableFrameRateExcludesFrameRate(t *testing.T) {
 	t.Parallel()
-	schema := compileSchema(t, "flow.json")
+	schema := compileSchema(t, "flow-put.json")
 
 	fixed := videoStream()
 	variable := videoStream()
@@ -434,7 +439,7 @@ func TestSegmentTimerangesDoNotOverlap(t *testing.T) {
 // no longer a multiplex to locate anything inside.
 func TestIndependentEssenceFlowsOwnTheirObjects(t *testing.T) {
 	t.Parallel()
-	schema := compileSchema(t, "flow.json")
+	schema := compileSchema(t, "flow-put.json")
 
 	probe := media.Probe{
 		Streams: []media.Stream{videoStream(), audioStream()},
@@ -488,6 +493,7 @@ func TestSegmentRequestMatchesPinnedSchema(t *testing.T) {
 			name: "full",
 			request: tams.SegmentRequest{
 				ObjectID:        "object-2",
+				InitObjectID:    "init-object-1",
 				Timerange:       "[0:0_8:333333000)",
 				ObjectTimerange: "[0:0_8:333333000)",
 				TSOffset:        "0:0",
@@ -532,17 +538,19 @@ func TestStorageRequestMatchesPinnedSchema(t *testing.T) {
 // up rather than as a confusing failure in the tests above.
 func TestPinnedSchemasAreSelfConsistent(t *testing.T) {
 	t.Parallel()
-	entries, err := schemaFS.ReadDir("schemas")
-	if err != nil {
-		t.Fatalf("read vendored schemas: %v", err)
-	}
-	if len(entries) == 0 {
-		t.Fatal("no vendored TAMS schemas found")
-	}
-	for _, entry := range entries {
-		t.Run(entry.Name(), func(t *testing.T) {
-			t.Parallel()
-			compileSchema(t, entry.Name())
-		})
+	for _, revision := range []schemaRevision{revisions[1].revision, revisions[2].revision} {
+		entries, err := schemaFS.ReadDir(revision.directory)
+		if err != nil {
+			t.Fatalf("read vendored schemas: %v", err)
+		}
+		if len(entries) == 0 {
+			t.Fatalf("no vendored TAMS schemas found in %s", revision.directory)
+		}
+		for _, entry := range entries {
+			t.Run(revision.directory+"/"+entry.Name(), func(t *testing.T) {
+				t.Parallel()
+				compileSchemaRevision(t, revision, entry.Name())
+			})
+		}
 	}
 }

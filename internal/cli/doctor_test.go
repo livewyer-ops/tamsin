@@ -173,7 +173,8 @@ func TestDoctorChecksFFmpegOnlyForMediaWritingTreatment(t *testing.T) {
 		wantStatus string
 	}{
 		{name: "preserve whole-file", profile: "preserve", wantCode: ExitOK, wantStatus: doctorSkip},
-		{name: "editorial writes media", profile: "editorial", wantCode: ExitMedia, wantStatus: doctorFail},
+		{name: "demux may separate a multiplex", profile: "demux", wantCode: ExitMedia, wantStatus: doctorFail},
+		{name: "essence segments write media", profile: "essence-segments", wantCode: ExitMedia, wantStatus: doctorFail},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			arguments := []string{
@@ -219,7 +220,7 @@ func TestDoctorDoesNotReportMediaToolControlledText(t *testing.T) {
 			"--format", "json",
 			"--ffprobe", fakeDoctorTool(t, "ffprobe", "ffprobe version "+probeSecret),
 			"--ffmpeg", fakeDoctorTool(t, "ffmpeg", "ffmpeg version "+ffmpegSecret),
-			"doctor", "--temp-dir", t.TempDir(), "--profile", "editorial",
+			"doctor", "--temp-dir", t.TempDir(), "--profile", "essence-segments",
 		}
 		code, result, stdout, stderr := executeDoctor(t, arguments)
 		if code != ExitOK || result.Status != doctorPass {
@@ -239,7 +240,7 @@ func TestDoctorDoesNotReportMediaToolControlledText(t *testing.T) {
 		check   string
 	}{
 		{name: "ffprobe failure", profile: "preserve", flag: "--ffprobe", check: "ffprobe"},
-		{name: "ffmpeg failure", profile: "editorial", flag: "--ffmpeg", check: "ffmpeg"},
+		{name: "ffmpeg failure", profile: "essence-segments", flag: "--ffmpeg", check: "ffmpeg"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			const pathSecret = "tool-path-credential"
@@ -315,7 +316,7 @@ func TestDoctorOnlineChecksAPIVersionWithoutMutation(t *testing.T) {
 		wantStatus   string
 		relationship string
 	}{
-		{version: "8.0", wantCode: ExitOK, wantStatus: doctorPass, relationship: "older"},
+		{version: "8.0", wantCode: ExitRemote, wantStatus: doctorFail, relationship: "incompatible"},
 		{version: "8.7", wantCode: ExitOK, wantStatus: doctorPass, relationship: "newer"},
 		{version: "9.0", wantCode: ExitRemote, wantStatus: doctorFail, relationship: "incompatible"},
 	} {

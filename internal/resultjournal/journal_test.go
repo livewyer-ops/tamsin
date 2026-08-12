@@ -33,13 +33,13 @@ func (b *syncBuffer) Sync() error {
 func testContract() ingest.ResultContract {
 	return ingest.ResultContract{
 		SchemaVersion: ingest.ResultSchemaVersion, ToolVersion: "v1.2.3", ToolCommit: "abc123",
-		ProfileVersion: ingest.ResultProfileVersion, RunID: testRunID,
+		ProfileVersion: "1", RunID: testRunID,
 	}
 }
 
 func terminalResult(input string) ingest.Result {
 	return ingest.Result{
-		Input: input, Profile: ingest.ProfileCustom, ProfileVersion: ingest.ProfileVersion,
+		Input: input, Profile: ingest.ProfileCustom, ProfileVersion: "1",
 		Status: ingest.ResultStatusPlanned, Verification: ingest.VerificationNotRequested,
 		Flows: []ingest.FlowResult{},
 	}
@@ -65,7 +65,7 @@ func TestJournalSyncsEveryTerminalResultAndSummary(t *testing.T) {
 	}
 	batch := ingest.BatchResult{
 		SchemaVersion: ingest.ResultSchemaVersion, ToolVersion: "v1.2.3", ToolCommit: "abc123",
-		ProfileVersion: ingest.ResultProfileVersion, RunID: testRunID,
+		ProfileVersion: "1", RunID: testRunID,
 		Results: []ingest.Result{terminalResult("first"), terminalResult("second")}, Succeeded: 2,
 	}
 	if err := journal.WriteSummary(batch, nil, false); err != nil {
@@ -144,7 +144,7 @@ func TestJournalMarksGracefulInterruption(t *testing.T) {
 	}
 	batch := ingest.BatchResult{
 		SchemaVersion: ingest.ResultSchemaVersion, ToolVersion: "v1.2.3", ToolCommit: "abc123",
-		ProfileVersion: ingest.ResultProfileVersion, RunID: testRunID,
+		ProfileVersion: "1", RunID: testRunID,
 		Results: []ingest.Result{result}, Failed: 1,
 	}
 	// The caller may observe cancellation after every input reached a terminal
@@ -172,7 +172,7 @@ func TestJournalDoesNotTreatChildDeadlineAsRunInterruption(t *testing.T) {
 	}
 	batch := ingest.BatchResult{
 		SchemaVersion: ingest.ResultSchemaVersion, ToolVersion: "v1.2.3", ToolCommit: "abc123",
-		ProfileVersion: ingest.ResultProfileVersion, RunID: testRunID,
+		ProfileVersion: "1", RunID: testRunID,
 		Results: []ingest.Result{result}, Failed: 1,
 	}
 	if err := journal.WriteSummary(batch, context.DeadlineExceeded, false); err != nil {
@@ -220,7 +220,7 @@ func TestJournalRefusesToClaimAnIncompleteRun(t *testing.T) {
 	}
 	batch := ingest.BatchResult{
 		SchemaVersion: ingest.ResultSchemaVersion, ToolVersion: "v1.2.3", ToolCommit: "abc123",
-		ProfileVersion: ingest.ResultProfileVersion, RunID: testRunID,
+		ProfileVersion: "1", RunID: testRunID,
 		Results: []ingest.Result{terminalResult("first"), terminalResult("second")}, Succeeded: 2,
 	}
 	if err := journal.WriteSummary(batch, nil, false); err == nil || !strings.Contains(err.Error(), "1 terminal inputs") {
@@ -271,7 +271,7 @@ func TestJournalRejectsDuplicateIndexAndPostSummaryWrites(t *testing.T) {
 	}
 	batch := ingest.BatchResult{
 		SchemaVersion: ingest.ResultSchemaVersion, ToolVersion: "v1.2.3", ToolCommit: "abc123",
-		ProfileVersion: ingest.ResultProfileVersion, RunID: testRunID,
+		ProfileVersion: "1", RunID: testRunID,
 		Results: []ingest.Result{result}, Succeeded: 1,
 	}
 	if err := journal.WriteSummary(batch, nil, false); err != nil {

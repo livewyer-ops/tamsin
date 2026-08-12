@@ -116,7 +116,7 @@ func TestFailureReceiptUsesOnlyTheStableFailureContract(t *testing.T) {
 	batch := ingest.BatchResult{
 		RunID: testRunID,
 		Results: []ingest.Result{{
-			Input: "file:///input.ts", Profile: ingest.ProfileEditorial, ProfileVersion: ingest.ProfileVersion,
+			Input: "file:///input.ts", Profile: ingest.ProfileEssenceSegments, ProfileVersion: "1",
 			Status: ingest.ResultStatusFailed, Verification: ingest.VerificationNotReached, Flows: []ingest.FlowResult{},
 			Failure: &ingest.Failure{
 				Code: ingest.FailureCodeHTTPRequestFailed, Message: ingest.FailureMessageHTTPRequestFailed, ActionRequired: true,
@@ -165,7 +165,7 @@ func TestConciseReceiptGroupsRatherThanRepeatsInputMetadata(t *testing.T) {
 	}
 	for value, wantCount := range map[string]int{
 		"first-ingest.ts":       1,
-		"editorial@1":           1,
+		"essence-segments@1":    1,
 		strings.Repeat("a", 64): 1,
 	} {
 		if got := strings.Count(output.String(), value); got != wantCount {
@@ -327,7 +327,7 @@ func successBatch() ingest.BatchResult {
 		SchemaVersion: "1.0", ToolVersion: "0.1.0", ToolCommit: strings.Repeat("c", 40),
 		ProfileVersion: "1", RunID: testRunID, Succeeded: 1,
 		Results: []ingest.Result{{
-			Input: "file:///tmp/tamsintest/first-ingest.ts", Profile: "editorial", ProfileVersion: "1",
+			Input: "file:///tmp/tamsintest/first-ingest.ts", Profile: "essence-segments", ProfileVersion: "1",
 			RootFlowID: testCollection, Bytes: 1419776, SHA256: strings.Repeat("a", 64),
 			Status: ingest.ResultStatusIngested, Verification: ingest.VerificationVerified,
 			Flows: []ingest.FlowResult{
@@ -366,7 +366,7 @@ func failureBatch() ingest.BatchResult {
 		SchemaVersion: "1.0", ToolVersion: "0.1.0", ToolCommit: strings.Repeat("d", 40),
 		ProfileVersion: "1", RunID: testRunID, Failed: 1,
 		Results: []ingest.Result{{
-			Input: "file:///srv/media/failure.ts", Profile: "streaming-ts", ProfileVersion: "1",
+			Input: "file:///srv/media/failure.ts", Profile: "mpegts-segments", ProfileVersion: "1",
 			RootFlowID: testCollection, Bytes: 3_145_728, SHA256: strings.Repeat("f", 64),
 			Status: ingest.ResultStatusFailed, Verification: ingest.VerificationFailedStranded,
 			Failure: &ingest.Failure{

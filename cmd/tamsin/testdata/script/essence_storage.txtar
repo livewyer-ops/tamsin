@@ -12,7 +12,7 @@ exec ffmpeg -hide_banner -loglevel error -y -f lavfi -i testsrc=size=160x120:rat
 # Independent storage: one grouped receipt contains both essences and the
 # collector. The empty root is labelled as a collection instead of leaking an
 # implementation row with objects=0.
-exec tamsin --profile editorial --format human --log-level error --dry-run=exact -i muxed.ts
+exec tamsin --profile essence-segments --format human --log-level error --dry-run=exact -i muxed.ts
 stdout '^PLANNED - NO CHANGES MADE  muxed.ts'
 stdout '^  collection [0-9a-f-]+$'
 stdout '^  video +[0-9a-f-]+ +[1-9][0-9]* media objects?$'
@@ -22,7 +22,7 @@ stdout '^  audio +[0-9a-f-]+ +[1-9][0-9]* media objects?$'
 # The same run in JSON emits each Flow as bounded events. Reducing the stream
 # proves sequence, lifecycle, terminal completeness, and exact-last semantics;
 # the payload checks retain the storage-specific shape.
-exec tamsin --profile editorial --format json --log-level error --dry-run=exact -i muxed.ts
+exec tamsin --profile essence-segments --format json --log-level error --dry-run=exact -i muxed.ts
 cp stdout elemental.ndjson
 checkevents elemental.ndjson succeeded 1 0 planned
 exec cat elemental.ndjson
@@ -33,11 +33,19 @@ stdout '"type":"input.finished".*"root_flow_id":'
 ! stdout '"role":"multi"'
 ! stdout '"flow_id":""|\r|\x1b'
 
+# Whole-essence demux keeps the independent Flow graph without multiplying
+# Objects by time. Each essence owns one complete Media Object.
+exec tamsin --profile demux --format human --log-level error --dry-run=exact -i muxed.ts
+stdout '^  video +[0-9a-f-]+ +1 media object$'
+stdout '^  audio +[0-9a-f-]+ +1 media object$'
+stdout 'profile demux@1'
+
 # Muxed storage reports the root plus the collected track Flows it created.
-exec tamsin --profile editorial --format human --log-level error --dry-run=exact --essence-storage muxed -i muxed.ts
+exec tamsin --profile muxed-segments --format human --log-level error --dry-run=exact -i muxed.ts
 stdout '^  multiplex +[0-9a-f-]+ +1 media object$'
 stdout '^  video [0-9a-f-]+$'
 stdout '^  audio [0-9a-f-]+$'
+stdout 'profile muxed-segments@1'
 ! stdout '\t|root=|objects='
 
 # An unknown mode fails before any media is staged.

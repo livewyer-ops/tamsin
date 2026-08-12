@@ -29,8 +29,13 @@ multiple ordered inputs. Each resolved item receives its own terminal result.
 
 A named, versioned packaging contract. It fixes the essence-storage model,
 Segment target duration, stored container policy, and compatibility boundary.
-TAMSin currently provides `preserve@1`, `editorial@1`, and `streaming-ts@1`.
+TAMSin currently provides `preserve@1`, `demux@1`, `muxed-segments@1`,
+`essence-segments@1`, and `mpegts-segments@1`.
 See [profiles and supported media](profiles.md).
+
+Profiles describe byte packaging and access characteristics. Workflow labels
+such as archive, editorial, or streaming may eventually select several steps
+as recipes, but they are not aliases for one media profile.
 
 ### Essence storage
 

@@ -155,7 +155,8 @@ func (a *application) rootCommand() *cobra.Command {
 	a.addPersistentFlags(root)
 	root.PersistentPreRunE = func(command *cobra.Command, _ []string) error {
 		a.ingestInvocation = command == root || command.Name() == "ingest"
-		if command.Annotations[helpGroupAnnotation] == "true" {
+		if command.Annotations[helpGroupAnnotation] == "true" ||
+			command.Annotations[configIndependentAnnotation] == "true" {
 			return nil
 		}
 		if err := a.loadConfig(); err != nil {
@@ -201,6 +202,7 @@ func (a *application) rootCommand() *cobra.Command {
 	root.AddCommand(a.apiCommand())
 	root.AddCommand(a.configCommand())
 	root.AddCommand(a.doctorCommand())
+	root.AddCommand(a.profilesCommand())
 	root.AddCommand(a.completionCommand(root))
 	return root
 }
@@ -407,6 +409,7 @@ type ingestFlagValues struct {
 	flowID            string
 	sourceID          string
 	metadataFile      string
+	tamsFlowProfiles  []string
 	journal           string
 	stdinName         string
 	inputHeaders      []string
@@ -451,8 +454,8 @@ func addIngestFlags(command *cobra.Command) *ingestFlagValues {
 	values := &ingestFlagValues{}
 	flags := command.Flags()
 	flags.StringArrayVarP(&values.inputs, "input", "i", nil, "input path or URI (repeatable)")
-	flags.StringVar(&values.profile, "profile", "",
-		"versioned ingest profile: preserve, editorial, or streaming-ts")
+	flags.StringVar(&values.profile, "profile", "", profileFlagDescription())
+	registerProfileCompletion(command)
 	// Left at zero so --help does not print a number that is only true on the
 	// machine that printed it. The real default is resolved from configuration
 	// below, the same way --probe-concurrency does it.
@@ -474,7 +477,7 @@ func addIngestFlags(command *cobra.Command) *ingestFlagValues {
 	flags.IntVar(&values.maxInputs, "max-inputs", source.DefaultMaxInputs,
 		"maximum unique inputs after directory, manifest, and S3 prefix expansion")
 	flags.DurationVarP(&values.segmentDuration, "segment-duration", "d", defaultSegmentDuration,
-		"target duration of each TAMS Flow Segment; 0 stores the whole input as one Media Object")
+		"target duration of each TAMS Flow Segment; 0 disables segmentation, leaving storage to decide whole input or whole essence")
 	flags.StringVar(&values.segmentFormat, "segment-format", string(media.SegmentFormatSource),
 		"container for Flow Segments: source or mpegts")
 	flags.StringVar(&values.essenceStorage, "essence-storage", string(media.EssenceStorageIndependent),
@@ -485,6 +488,8 @@ func addIngestFlags(command *cobra.Command) *ingestFlagValues {
 	flags.StringVar(&values.flowID, "flow-id", "", "Flow UUID for a single resolved input")
 	flags.StringVar(&values.sourceID, "source-id", "", "Source UUID for a single resolved input")
 	flags.StringVar(&values.metadataFile, "flow-metadata", "", "JSON Flow metadata overrides")
+	flags.StringArrayVar(&values.tamsFlowProfiles, "tams-flow-profile", nil,
+		"TAMS 8.2 Flow Profile assignment as [video|audio|image|data[:N]=]UUID (repeatable)")
 	flags.StringVar(&values.journal, "journal", "", "create a new one-run durable JSONL result file")
 	flags.StringVar(&values.stdinName, "stdin-name", "stdin.bin",
 		"filename hint; explicitly selects stdin unless input is configured or passed with --input")
@@ -617,9 +622,9 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 	}
 
 	var client *tams.Client
-	if ingest.DryRunMode(options.dryRun) == ingest.DryRunOff {
+	if ingest.DryRunMode(options.dryRun) == ingest.DryRunOff || len(options.tamsFlowProfiles) > 0 {
 		if endpoint == "" {
-			return withExit(ExitUsage, errors.New("TAMS endpoint is required; use --endpoint or a second positional argument"))
+			return withExit(ExitUsage, errors.New("TAMS endpoint is required for ingest and Flow Profile validation; use --endpoint or a second positional argument"))
 		}
 		client, _, err = a.tamsClient(runCtx, endpoint, transport, run)
 		if err != nil {
@@ -638,7 +643,7 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 		DryRunMode: ingest.DryRunMode(options.dryRun), VerificationMode: ingest.VerificationMode(options.verify),
 		TempDirectory: options.tempDirectory, StagingByteBudget: options.stagingBytes,
 		SegmentDuration: options.segmentDuration, SegmentFormat: media.SegmentFormat(options.segmentFormat), EssenceStorage: media.EssenceStorage(options.essenceStorage), FFmpegArgs: options.ffmpegArgs, Start: start, StorageID: options.storageID,
-		FlowID: options.flowID, SourceID: options.sourceID, FlowMetadata: metadata,
+		FlowID: options.flowID, SourceID: options.sourceID, FlowMetadata: metadata, TAMSFlowProfiles: options.tamsFlowProfiles,
 	}, client, media.FFprobe{Executable: options.ffprobe}, media.FFmpeg{Executable: options.ffmpeg}, logger, reporter)
 	if err != nil {
 		return withExit(ExitUsage, err)
@@ -732,6 +737,7 @@ func (a *application) ingestOptions(command *cobra.Command, args []string, raw *
 	options.flowID = stringOption(command.Flags(), "flow-id", raw.flowID, a.v.GetString("ingest.flow_id"))
 	options.sourceID = stringOption(command.Flags(), "source-id", raw.sourceID, a.v.GetString("ingest.source_id"))
 	options.metadataFile = stringOption(command.Flags(), "flow-metadata", raw.metadataFile, a.v.GetString("ingest.flow_metadata"))
+	options.tamsFlowProfiles = stringArrayOption(command.Flags(), "tams-flow-profile", raw.tamsFlowProfiles, a.configStrings("ingest.tams_flow_profiles"))
 	options.journal = stringOption(command.Flags(), "journal", raw.journal, a.v.GetString("ingest.journal"))
 	options.stdinName = stringOption(command.Flags(), "stdin-name", raw.stdinName, a.v.GetString("source.stdin_name"))
 	options.inputHeaders = stringArrayOption(command.Flags(), "input-header", raw.inputHeaders, a.configStrings("source.http_headers"))
@@ -748,7 +754,7 @@ func (a *application) ingestOptions(command *cobra.Command, args []string, raw *
 	}
 
 	if strings.TrimSpace(options.profile) == "" {
-		return nil, "", errors.New("ingest profile is required; use --profile preserve, editorial, or streaming-ts")
+		return nil, "", errors.New("ingest profile is required; choose one with --profile (run `tamsin profiles` to compare them)")
 	}
 	profile, err := resolveTreatment(treatmentSettings{
 		selection:               options.profile,

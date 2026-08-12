@@ -98,6 +98,11 @@ func (c *countingClient) StorageBackends(ctx context.Context) ([]tams.StorageBac
 	return c.inner.StorageBackends(ctx)
 }
 
+func (c *countingClient) Profile(ctx context.Context, id string) (tams.Profile, error) {
+	defer c.record("Profile")()
+	return c.inner.Profile(ctx, id)
+}
+
 func (c *countingClient) Flow(ctx context.Context, id string) (tams.Flow, error) {
 	defer c.record("Flow")()
 	return c.inner.Flow(ctx, id)
@@ -178,6 +183,21 @@ func (s countingSegmenter) Segment(_ context.Context, request media.SegmentReque
 }
 
 func (countingSegmenter) Version(context.Context) (string, error) { return "ffmpeg bench", nil }
+
+type boundedRollingSegmenter struct {
+	inFlight atomic.Int64
+	peak     atomic.Int64
+}
+
+func (s *boundedRollingSegmenter) Segment(ctx context.Context, request media.SegmentRequest, sink media.SegmentSink) error {
+	recordPeak(&s.peak, s.inFlight.Add(1))
+	defer s.inFlight.Add(-1)
+	return (countingSegmenter{objects: 1}).Segment(ctx, request, sink)
+}
+
+func (*boundedRollingSegmenter) Version(context.Context) (string, error) {
+	return "ffmpeg bounded-rolling-test", nil
+}
 
 func benchFixture(tb testing.TB) source.Item {
 	tb.Helper()
@@ -409,6 +429,44 @@ func TestMediaProcessBudgetIsGlobalAcrossInputs(t *testing.T) {
 	if peak := prober.peak.Load(); peak > mediaProcessBudget {
 		t.Fatalf("peak concurrent media processes = %d across 4 inputs, want at most the global budget of %d",
 			peak, mediaProcessBudget)
+	}
+}
+
+// TestRollingMediaProcessBudgetCannotDeadlockAcrossInputs covers the lock
+// cycle where two FFmpeg segmenters occupied the complete two-process budget,
+// then each sink waited for FFprobe to measure its first Segment. Rolling
+// renders must serialize at this budget so their nested probe always has a
+// process slot available.
+func TestRollingMediaProcessBudgetCannotDeadlockAcrossInputs(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	items := make([]source.Item, 2)
+	for index := range items {
+		filename := filepath.Join(directory, fmt.Sprintf("fixture-%d.mp4", index))
+		if err := os.WriteFile(filename, []byte(fmt.Sprintf("media-%d", index)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		items[index] = localSource(filename)
+	}
+	segmenter := &boundedRollingSegmenter{}
+	pipeline, err := New(Config{
+		Concurrency: 2, Transfers: 2, ProbeConcurrency: 2, Verify: false,
+		SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed,
+	}, newFakeClient(), &countingProber{}, segmenter, discardLogger(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	batch, err := pipeline.Run(ctx, items)
+	if err != nil {
+		t.Fatalf("two rolling inputs did not complete within the bounded process budget: %v", err)
+	}
+	if batch.Succeeded != len(items) {
+		t.Fatalf("succeeded = %d, want %d: %#v", batch.Succeeded, len(items), batch)
+	}
+	if peak := segmenter.peak.Load(); peak != 1 {
+		t.Fatalf("peak concurrent rolling FFmpeg processes = %d, want 1 so nested FFprobe retains a slot", peak)
 	}
 }
 

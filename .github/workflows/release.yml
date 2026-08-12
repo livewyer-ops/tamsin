@@ -68,6 +68,7 @@ jobs:
       version: ${{ steps.describe.outputs.version }}
       stable: ${{ steps.describe.outputs.stable }}
       image_ref: ${{ steps.describe.outputs.image_ref }}
+      runtime_ref: ${{ steps.runtime.outputs.immutable }}
       image_index_digest: ${{ steps.bundle.outputs.image_index_digest }}
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
@@ -113,6 +114,14 @@ jobs:
           echo "build_epoch=$build_epoch" >> "$GITHUB_OUTPUT"
           echo "build_date=$build_date" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve the immutable FFmpeg runtime
+        id: runtime
+        run: |
+          runtime_tag="$(jq -er '.image | select(type == "string" and length > 0)' contracts/ffmpeg-runtime.json)"
+          immutable="$(./scripts/resolve-image-reference.sh \
+            "$runtime_tag")"
+          echo "immutable=$immutable" >> "$GITHUB_OUTPUT"
+
       - name: Build distributions and the two-platform OCI layout once
         run: |
           make dist \
@@ -120,6 +129,7 @@ jobs:
             COMMIT="${GITHUB_SHA}" \
             BUILD_DATE="${{ steps.describe.outputs.build_date }}" \
             SOURCE_DATE_EPOCH="${{ steps.describe.outputs.build_epoch }}" \
+            FFMPEG_RUNTIME_IMAGE="${{ steps.runtime.outputs.immutable }}" \
             IMAGE="${{ steps.describe.outputs.image_ref }}" \
             IMAGE_PLATFORMS="linux/amd64,linux/arm64" \
             OCI_LAYOUT=".tmp/release-bundle/tamsin-image"
@@ -144,11 +154,25 @@ jobs:
       - name: Record immutable index and platform identities
         id: bundle
         run: |
-          (cd dist && sha256sum tamsin-* > SHA256SUMS)
-          cp -a dist .tmp/release-bundle/dist
           ./scripts/verify-oci-layout.sh record \
             .tmp/release-bundle \
             '${{ steps.describe.outputs.image_ref }}' >> "$GITHUB_OUTPUT"
+
+      - name: Build container metadata and supply-chain bundle
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.describe.outputs.build_epoch }}
+        run: |
+          ./scripts/build-supply-chain-bundle.py \
+            --bundle .tmp/release-bundle \
+            --image-ref '${{ steps.describe.outputs.image_ref }}' \
+            --runtime-ref '${{ steps.runtime.outputs.immutable }}' \
+            --version '${{ steps.describe.outputs.version }}' \
+            --commit "$GITHUB_SHA" \
+            --created '${{ steps.describe.outputs.build_date }}' \
+            --metadata-output dist/tamsin-container-metadata.json \
+            --archive-output dist/tamsin-supply-chain.tar.gz
+          (cd dist && sha256sum tamsin-* > SHA256SUMS)
+          cp -a dist .tmp/release-bundle/dist
 
       - name: Smoke the exact amd64 and arm64 index members
         run: |
@@ -239,6 +263,8 @@ jobs:
             .tmp/release-bundle/dist/tamsin-darwin-amd64
             .tmp/release-bundle/dist/tamsin-darwin-arm64
             .tmp/release-bundle/dist/tamsin-third-party-licenses.tar.gz
+            .tmp/release-bundle/dist/tamsin-container-metadata.json
+            .tmp/release-bundle/dist/tamsin-supply-chain.tar.gz
             .tmp/release-bundle/dist/SHA256SUMS
       - name: Publish the GitHub release
         env:
@@ -256,6 +282,8 @@ jobs:
             .tmp/release-bundle/dist/tamsin-darwin-amd64 \
             .tmp/release-bundle/dist/tamsin-darwin-arm64 \
             .tmp/release-bundle/dist/tamsin-third-party-licenses.tar.gz \
+            .tmp/release-bundle/dist/tamsin-container-metadata.json \
+            .tmp/release-bundle/dist/tamsin-supply-chain.tar.gz \
             .tmp/release-bundle/dist/SHA256SUMS \
             --title "${GITHUB_REF_NAME}" \
             --notes-file .tmp/release-notes.md \

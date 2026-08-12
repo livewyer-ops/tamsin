@@ -55,7 +55,7 @@
         "tool_version": { "type": "string", "minLength": 1 },
         "tool_commit": { "type": "string", "minLength": 1 },
         "tool_build_date": { "type": "string", "minLength": 1 },
-        "result_schema_version": { "const": "2.0" },
+        "result_schema_version": { "const": "2.1" },
         "profile_policy_version": { "type": "string", "minLength": 1 },
         "max_event_bytes": { "type": "integer", "minimum": 512, "maximum": 16777216 },
         "capabilities": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/safeCode" } }
@@ -86,7 +86,8 @@
         "flow_id": { "type": "string", "format": "uuid" },
         "source_id": { "type": "string", "format": "uuid" },
         "kind": { "enum": ["essence", "collection", "muxed"] },
-        "role": { "type": "string", "minLength": 1 }
+		"role": { "type": "string", "minLength": 1 },
+		"tams_flow_profile_id": { "type": "string", "format": "uuid" }
       },
       "allOf": [{ "if": { "properties": { "kind": { "const": "essence" } }, "required": ["kind"] }, "then": { "required": ["role"] }, "else": { "not": { "required": ["role"] } } }]
     },

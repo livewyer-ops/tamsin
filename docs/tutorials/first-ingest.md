@@ -9,13 +9,13 @@ You will need TAMSin on your `PATH`, FFmpeg installed, and a TAMS endpoint you c
 TAMSin drives FFmpeg to inspect and cut media, so start by confirming both are present:
 
 ```sh
-tamsin doctor --profile editorial
+tamsin doctor --profile essence-segments
 ```
 
 You should see a check-oriented report naming the TAMSin/Go/platform and the
 resolved profile, followed by `configuration`, `profile`, `staging`, `ffprobe`,
 and `ffmpeg` checks. If `ffprobe` fails, install FFmpeg before going further —
-TAMSin cannot ingest anything without it. The `editorial@1` treatment requires
+TAMSin cannot ingest anything without it. The `essence-segments@1` treatment requires
 `ffmpeg`; a whole-file `preserve@1` treatment reports that check
 as skipped because it does not render media.
 
@@ -32,7 +32,7 @@ export TAMSIN_AUTH_TOKEN='your-token-here'
 Confirm TAMSin can reach the store and that your credentials work:
 
 ```sh
-tamsin doctor --profile editorial --online
+tamsin doctor --profile essence-segments --online
 ```
 
 The redacted `endpoint` and `auth` fields tell you which destination and
@@ -59,7 +59,7 @@ You now have `first-ingest.ts`, containing a video track and an audio track toge
 Before writing anything to the store, ask TAMSin what it *would* do:
 
 ```sh
-tamsin --profile editorial --dry-run=exact -i first-ingest.ts
+tamsin --profile essence-segments --dry-run=exact -i first-ingest.ts
 ```
 
 The equals sign is required when choosing the optional mode explicitly. A bare
@@ -77,7 +77,7 @@ If you are building a wrapper or want to inspect the exact Object plan, capture
 the live event stream instead:
 
 ```sh
-tamsin --profile editorial --dry-run=exact --format json -i first-ingest.ts >plan.ndjson
+tamsin --profile essence-segments --dry-run=exact --format json -i first-ingest.ts >plan.ndjson
 jq -c 'select(.type == "flow.planned" or .type == "object.result" or .type == "input.finished")' plan.ndjson
 ```
 
@@ -94,15 +94,15 @@ exit code.
 
 That is worth pausing on. You gave TAMSin one file and it is planning three
 Flows: two media-owning essence Flows plus the empty Multi-Flow that records
-their association. The selected editorial profile separates each essence so that a later
-consumer can fetch the audio without downloading the video. You will see why
-this matters in [Essence storage](../explanation/essence-storage.md).
+their association. The selected `essence-segments` profile separates each
+essence so a later consumer can fetch the audio without downloading the video.
+You will see why this matters in [Essence storage](../explanation/essence-storage.md).
 
-The editorial treatment is not a byte-for-byte archive of the
+This segmented treatment is not a byte-for-byte archive of the
 container you supplied: separating and segmenting the essences rewrites their
 containers even though the coded samples are copied. If preserving the exact
 input file is the requirement, select the whole-file muxed profile instead.
-Keep the explicit editorial profile for this tutorial; in a preservation workflow this
+Keep the explicit profile for this tutorial; in a preservation workflow this
 would replace the ingest command in the next step:
 
 ```sh
@@ -119,7 +119,7 @@ with independent storage still has to demultiplex the essences.
 Now do it for real:
 
 ```sh
-tamsin --profile editorial -i first-ingest.ts
+tamsin --profile essence-segments -i first-ingest.ts
 ```
 
 TAMSin separates the two essences, cuts each into Flow Segments, uploads them,
@@ -161,7 +161,7 @@ logs.
 Run exactly the same ingest again:
 
 ```sh
-tamsin --profile editorial -i first-ingest.ts
+tamsin --profile essence-segments -i first-ingest.ts
 ```
 
 The receipt now begins `RESUMED AND VERIFIED` rather than `INGESTED AND
@@ -180,5 +180,5 @@ that re-running is safe.
 From here:
 
 - [Choose how essences are stored](../how-to/choose-how-essences-are-stored.md) if you need the original multiplex kept intact
-- [Essence storage](../explanation/essence-storage.md) for why editorial ingest splits your file
+- [Essence storage](../explanation/essence-storage.md) for why independent ingest splits your file
 - [CLI reference](../reference/cli.md) for every command and flag
