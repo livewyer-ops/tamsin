@@ -11,7 +11,7 @@ General TAMS administration belongs in
 
 ## Verify a change
 
-The build scripts target Linux with Bash 4+, GNU tar and `sha256sum`, Python 3,
+The build scripts target Linux with Bash 4+, GNU tar and `sha256sum`, Python 3, `jq`,
 and the Go version in `go.mod`. FFmpeg and FFprobe 5.1+ are needed for media
 tests; Docker is needed for image and live integration checks. Release binaries
 also support macOS, but the release scripts require the GNU tools above.
