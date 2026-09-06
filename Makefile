@@ -2,7 +2,7 @@ SHELL := /bin/bash
 
 BINARY := bin/tamsin
 IMAGE ?= tamsin:dev
-FFMPEG_RUNTIME_IMAGE ?= ghcr.io/livewyer-ops/tamsin-ffmpeg-runtime:5.1.9-bookworm-r1@sha256:dfa8aa03b6c0af707c5ae9b7d33462beabaf08270e8ceb0f27ab490473cb21e5
+FFMPEG_RUNTIME_IMAGE ?= ghcr.io/livewyer-ops/tamsin-ffmpeg-runtime:5.1.9-bookworm-r2@sha256:cc5e5965ace04ead6c1db6a5b3d121229d149a1c942bdf8d810c5a94b63fbafc
 E2E_PLATFORM ?= linux/amd64
 TAMSIN_E2E_CONTRACT ?= tams-v8.1.json tams-v8.2.json
 VERSION ?= dev
