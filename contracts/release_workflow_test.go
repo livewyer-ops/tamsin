@@ -174,6 +174,42 @@ func TestReleaseImageSmokeAndTags(t *testing.T) {
 	}
 }
 
+func TestImageBuildExportsDigest(t *testing.T) {
+	for _, build := range []struct{ workflow, step string }{
+		{"ffmpeg-runtime.yml", "runtime"}, {"release.yml", "image"},
+	} {
+		t.Run(build.workflow, func(t *testing.T) {
+			_, step := stepByID(t, readWorkflow(t, build.workflow).Jobs["publish"], build.step)
+			for _, test := range []struct {
+				name, metadata string
+				valid          bool
+			}{
+				{"valid", `{"containerimage.digest":"sha256:test"}`, true},
+				{"missing", `{}`, false},
+				{"malformed", `{`, false},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					outputPath := filepath.Join(t.TempDir(), "output")
+					output, err := runWorkflowShell(t, "git() { printf '1970-01-01T00:00:00Z\\n'; }\n"+step.Run,
+						"printf '%s\\n' \"$BUILD_METADATA\" > \"$METADATA_FILE\"\n",
+						"BUILD_METADATA="+test.metadata, "METADATA_FILE=.tmp/"+build.step+"-metadata.json",
+						"GITHUB_OUTPUT="+outputPath, "GITHUB_SHA=HEAD", "GITHUB_REPOSITORY=example/app",
+						"GITHUB_RUN_ID=1", "GITHUB_RUN_ATTEMPT=1", "RUNTIME_IMAGE=example/runtime:test")
+					if (err == nil) != test.valid {
+						t.Fatalf("build error=%v, valid=%v\n%s", err, test.valid, output)
+					}
+					if test.valid {
+						contents, err := os.ReadFile(outputPath)
+						if err != nil || !strings.Contains(string(contents), "digest=sha256:test\n") {
+							t.Fatalf("digest not exported: %s (error=%v)", contents, err)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
 func runWorkflowShell(t *testing.T, script, docker string, environment ...string) (string, error) {
 	t.Helper()
 	directory := t.TempDir()
@@ -181,6 +217,7 @@ func runWorkflowShell(t *testing.T, script, docker string, environment ...string
 		t.Fatal(err)
 	}
 	command := exec.Command("bash", "-euo", "pipefail", "-c", script)
+	command.Dir = directory
 	command.Env = append(os.Environ(), append(environment, "PATH="+directory+":"+os.Getenv("PATH"))...)
 	output, err := command.CombinedOutput()
 	return string(output), err
