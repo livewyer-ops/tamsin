@@ -14,14 +14,18 @@ The boundary matters most for video cadence. TAMS 8.1 requires exactly one of:
   absent.
 
 `avg_frame_rate` and `r_frame_rate` do not answer that question. TAMSin makes a
-second, streaming FFprobe pass over decoded presentation timestamps. It emits
-`vfr: true` when presentation intervals vary, and emits the probed rational
-`frame_rate` when they form one cadence. Adjacent tick counts may differ by one
-because a rational cadence such as 30000/1001 has to be quantised onto a
-container time base; that alone is not treated as VFR. The pass retains only
-the preceding timestamp and interval bounds, so memory use does not grow with
-programme length. When `--flow-metadata` supplies the complete
-`essence_parameters` object, this decoded pass is skipped because its result
+second, streaming FFprobe pass over presentation timestamps. Video without
+frame reordering can use packet timestamps without decoding the programme.
+When FFprobe reports B-frames, TAMSin goes directly to decoded frame timestamps;
+other missing, duplicated or non-monotonic packet evidence also requires that
+fallback. Decoding scans the whole video and can add substantial CPU use and
+startup time before upload, even with `preserve`. It emits `vfr: true` when presentation intervals vary,
+and emits the probed rational `frame_rate` when they form one cadence. Adjacent
+tick counts may differ by one because a rational cadence such as 30000/1001 has
+to be quantised onto a container time base; that alone is not treated as VFR.
+Both paths retain only the preceding timestamp and interval bounds, so memory
+use does not grow with programme length. When `--flow-metadata` supplies the
+complete `essence_parameters` object, this pass is skipped because its result
 cannot affect the overridden Flow.
 
 If frames have missing or non-monotonic presentation timestamps, TAMSin makes
@@ -34,7 +38,7 @@ final Flow fails schema preflight unless a workflow supplies the complete
 | TAMS field | FFprobe evidence | Automatic support | Uncertain case |
 | --- | --- | --- | --- |
 | `frame_width`, `frame_height` | `width`, `height` | Required positive values | Ingest is rejected when either is absent |
-| `frame_rate`, `vfr` | decoded `best_effort_timestamp` sequence, then `avg_frame_rate`/`r_frame_rate` for the fixed rational | Fixed and genuinely variable cadence | Missing/non-monotonic timestamps are not guessed |
+| `frame_rate`, `vfr` | packet `pts` or decoded `best_effort_timestamp`, then the declared rate for the fixed rational | Fixed and genuinely variable cadence | Missing/non-monotonic timestamps are not guessed |
 | `interlace_mode` | stream `field_order` plus container family | non-MXF `progressive`, `tt` → `interlaced_tff`, `bb` → `interlaced_bff` | MXF `progressive`, `tb`/`bt`, and PsF are omitted because FFmpeg cannot distinguish them reliably |
 | `pixel_aspect_ratio` | `sample_aspect_ratio` | Positive colon-separated ratios | Missing, `0:1`, and malformed values are omitted |
 | `aspect_ratio` | `display_aspect_ratio` | Positive colon-separated ratios | Missing or malformed values are omitted |
@@ -92,7 +96,8 @@ them.
 
 The test suite generates actual media with FFmpeg and reads it back with
 FFprobe. It covers 30000/1001 fixed cadence on a millisecond time base, a true
-24-to-30 fps variable-cadence file, top- and bottom-field-first MPEG-2 video,
+24-to-30 fps variable-cadence file, H.264 with forced B-frame reordering,
+top- and bottom-field-first MPEG-2 video,
 anamorphic standard-definition video, BT.2100 HLG signalling, and ISO container
 brands. Table-only tests cover unknown and contradictory values so an FFmpeg
 upgrade cannot silently turn missing evidence into confident metadata.

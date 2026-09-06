@@ -10,28 +10,31 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/livewyer-ops/tamsin/ingestevent"
 	"github.com/livewyer-ops/tamsin/internal/ingest"
+	"github.com/livewyer-ops/tamsin/internal/ingestevent"
+	"github.com/livewyer-ops/tamsin/internal/observability"
 	"github.com/livewyer-ops/tamsin/internal/progress"
+	"github.com/livewyer-ops/tamsin/internal/source"
+	"github.com/livewyer-ops/tamsin/internal/tams"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 func TestLoggerForProgressDoesNotChangeConfiguredLevel(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []progress.Mode{"discard", progress.ModePlain, progress.ModeTTY} {
+	for _, mode := range []progress.Mode{"discard", progress.ModePlain} {
 		t.Run(string(mode), func(t *testing.T) {
 			var stderr bytes.Buffer
-			app := &application{v: viper.New(), stdin: strings.NewReader(""), stdout: io.Discard, stderr: &stderr}
+			app := &application{v: newSettings(), stdin: strings.NewReader(""), stdout: io.Discard, stderr: &stderr}
 			_ = app.rootCommand()
 			var reporter progress.Reporter = progress.Discard{}
 			if mode != "discard" {
-				reporter = progress.New(&stderr, progress.Options{Mode: mode, Getenv: func(string) string { return "" }})
+				reporter = progress.New(&stderr, progress.Options{Mode: mode})
 			}
 			defer reporter.Close()
 			logger, err := app.loggerFor(reporter)
@@ -47,25 +50,21 @@ func TestLoggerForProgressDoesNotChangeConfiguredLevel(t *testing.T) {
 	}
 }
 
-func TestCLIInputResolutionIsAtomicBeforeJournal(t *testing.T) {
+func TestCLIInputResolutionIsAtomic(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
 	valid := filepath.Join(directory, "valid.mp4")
 	if err := os.WriteFile(valid, []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	journal := filepath.Join(directory, "results.jsonl")
 	var stdout, stderr bytes.Buffer
 	code := Execute(context.Background(), []string{
-		"--profile", "preserve", "--dry-run", "--journal", journal, "--format", "json", "--log-format", "json", "--progress", "none",
+		"--profile", "preserve", "--dry-run=fast", "--format", "json", "--log-format", "json", "--progress", "none",
 		"--ffprobe", fakeMediaTool(t, directory),
 		"-i", valid, "-i", filepath.Join(directory, "missing.mp4"),
 	}, strings.NewReader(""), &stdout, &stderr)
 	if code != ExitSource {
 		t.Fatalf("exit = %d, want %d; stdout=%s stderr=%s", code, ExitSource, stdout.String(), stderr.String())
-	}
-	if _, err := os.Stat(journal); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("journal exists after atomic resolution failure: %v", err)
 	}
 	stream := decodeCLIIngestEventStream(t, stdout.Bytes())
 	if stream.state.Started == nil || stream.state.Started.RequestedInputs == nil || *stream.state.Started.RequestedInputs != 2 {
@@ -135,7 +134,7 @@ func TestCLINamedProfileIsReportedInMachineOutput(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Execute(context.Background(), []string{
 		"--ffprobe", fakeMediaTool(t, directory), "--format", "json", "--log-level", "error",
-		"--dry-run", "--profile", "preserve@1", input,
+		"--dry-run=fast", "--profile", "preserve@1", input,
 	}, strings.NewReader(""), &stdout, &stderr)
 	if code != ExitOK {
 		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
@@ -169,76 +168,13 @@ func TestCLIProfileResolvesFromEnvironment(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Execute(context.Background(), []string{
 		"--ffprobe", fakeMediaTool(t, directory), "--format", "json", "--log-level", "error",
-		"--dry-run", input,
+		"--dry-run=fast", input,
 	}, strings.NewReader(""), &stdout, &stderr)
 	if code != ExitOK {
 		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), `"profile":"preserve","profile_version":"1"`) {
 		t.Fatalf("environment profile was not resolved in output: %s", stdout.String())
-	}
-}
-
-func TestCLIJournalWritesIndexedResultsAndFinalSummary(t *testing.T) {
-	t.Parallel()
-	directory := t.TempDir()
-	first := filepath.Join(directory, "first.mp4")
-	second := filepath.Join(directory, "second.mp4")
-	for _, filename := range []string{first, second} {
-		if err := os.WriteFile(filename, []byte("fixture"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	ffprobe := fakeMediaTool(t, directory)
-	journalPath := filepath.Join(directory, "result.jsonl")
-	var stdout, stderr bytes.Buffer
-	code := Execute(context.Background(), []string{
-		"--ffprobe", ffprobe, "--format", "json", "--log-level", "error", "--dry-run", "-d", "0",
-		"--profile", "preserve", "--journal", journalPath, "-i", first, "-i", second,
-	}, strings.NewReader(""), &stdout, &stderr)
-	if code != ExitOK {
-		t.Fatalf("exit = %d; stdout = %s; stderr = %s", code, stdout.String(), stderr.String())
-	}
-	data, err := os.ReadFile(journalPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 6 {
-		t.Fatalf("journal has %d lines, want start, two Objects, two inputs and a summary: %s", len(lines), data)
-	}
-	seen := map[float64]bool{}
-	objects := 0
-	var runID string
-	for index, line := range lines {
-		var record map[string]any
-		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			t.Fatalf("decode journal line %d: %v", index, err)
-		}
-		if index == 0 {
-			runID, _ = record["run_id"].(string)
-		}
-		if record["run_id"] != runID || record["schema_version"] != ingest.ResultSchemaVersion {
-			t.Fatalf("journal metadata drifted on line %d: %#v", index, record)
-		}
-		if record["record_type"] == "input" {
-			seen[record["index"].(float64)] = true
-		}
-		if record["record_type"] == "object" {
-			objects++
-		}
-	}
-	if !strings.Contains(lines[0], `"record_type":"start"`) || objects != 2 || !seen[0] || !seen[1] ||
-		!strings.Contains(lines[len(lines)-1], `"record_type":"summary"`) ||
-		!strings.Contains(lines[len(lines)-1], `"outcome":"completed"`) {
-		t.Fatalf("journal is not index-complete: %s", data)
-	}
-	stream := decodeCLIIngestEventStream(t, stdout.Bytes())
-	if stream.state.RunID == "" || stream.state.RunID != runID {
-		t.Fatalf("stdout run_id %q does not correlate with journal run_id %q", stream.state.RunID, runID)
-	}
-	if stream.state.Finished == nil || stream.state.Finished.Total != 2 || stream.state.Finished.Succeeded != 2 {
-		t.Fatalf("journaled run terminal summary = %#v", stream.state.Finished)
 	}
 }
 
@@ -272,7 +208,7 @@ ingest:
 `)
 	var stdout, stderr bytes.Buffer
 	code := Execute(context.Background(), []string{
-		"--config", config, "--profile", "preserve", "--dry-run", filepath.Join(t.TempDir(), "missing.mp4"),
+		"--config", config, "--profile", "preserve", "--dry-run=fast", filepath.Join(t.TempDir(), "missing.mp4"),
 	}, strings.NewReader(""), &stdout, &stderr)
 	if code != ExitSource || strings.Contains(stderr.String(), "not-a-profile") {
 		t.Fatalf("exit = %d, want source failure after valid override; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -295,7 +231,7 @@ func TestCLISegmentDurationShorthand(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := Execute(context.Background(), []string{
 				"--ffprobe", ffprobe, "--format", "json", "--log-level", "error",
-				"--profile", "preserve", "--dry-run", flag, "0s", input,
+				"--profile", "preserve", "--dry-run=fast", flag, "0s", input,
 			}, strings.NewReader(""), &stdout, &stderr)
 			if code != ExitOK {
 				t.Fatalf("%s: exit = %d, stderr = %s", flag, code, stderr.String())
@@ -319,7 +255,7 @@ func TestCLIDefaultSegmentDurationIsTenSeconds(t *testing.T) {
 
 func TestCLIRequiresProfileAndResolvesExplicitEssenceSegmentsProfile(t *testing.T) {
 	t.Parallel()
-	app := &application{v: viper.New()}
+	app := &application{v: newSettings()}
 	app.configureDefaults()
 	command := &cobra.Command{}
 	raw := addIngestFlags(command)
@@ -434,15 +370,59 @@ func TestCLINumericFlowProfileMatchesByJSONSemanticsBeforeMutation(t *testing.T)
 		inputState.Finished.Status != ingestevent.InputFailed {
 		t.Fatalf("mismatching Profile result = %#v", inputState.Finished)
 	}
+	if !strings.Contains(stdout.String(), "/flow_metadata/essence_parameters/frame_rate/numerator: values differ") ||
+		strings.Contains(stdout.String(), "generated=") {
+		t.Fatalf("Profile diagnostic must identify the field without values: %s", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	human := append(append([]string{}, base...), "--format", "human")
+	if code := Execute(context.Background(), human, strings.NewReader(""), &stdout, &stderr); code != ExitPartial ||
+		!strings.Contains(stdout.String(), "/flow_metadata/essence_parameters/frame_rate/numerator: values differ") {
+		t.Fatalf("human Profile diagnostic: exit=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
 	if mutations.Load() != 0 || flowReads.Load() != 0 {
 		t.Fatalf("Profile mismatch crossed planning boundary: mutations=%d flow_reads=%d", mutations.Load(), flowReads.Load())
+	}
+}
+
+func TestReadFlowMetadataPreservesNumbersAndRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+	filename := filepath.Join(t.TempDir(), "metadata.json")
+	for _, test := range []struct {
+		name, data string
+		valid      bool
+	}{
+		{"large nested integer", `{"essence_parameters":{"sample_rate":9007199254740993}}`, true},
+		{"trailing whitespace", "{}\n ", true},
+		{"null", "null", true},
+		{"two objects", "{} {}", false},
+		{"trailing garbage", "{} garbage", false},
+		{"array", "[]", false},
+		{"empty", "", false},
+		{"oversized", strings.Repeat(" ", (2<<20)+1), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := os.WriteFile(filename, []byte(test.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			metadata, err := readFlowMetadata(filename)
+			if (err == nil) != test.valid {
+				t.Fatalf("metadata=%#v error=%v", metadata, err)
+			}
+			if test.name == "large nested integer" {
+				if got := metadata["essence_parameters"].(map[string]any)["sample_rate"]; got != json.Number("9007199254740993") {
+					t.Fatalf("sample_rate=%v (%T), want exact json.Number", got, got)
+				}
+			}
+		})
 	}
 }
 
 func TestCLIUsageExitCode(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
-	code := Execute(context.Background(), []string{"--concurrency", "0", "--dry-run", "missing"}, strings.NewReader(""), &stdout, &stderr)
+	code := Execute(context.Background(), []string{"--concurrency", "0", "--dry-run=fast", "missing"}, strings.NewReader(""), &stdout, &stderr)
 	if code != ExitUsage {
 		t.Fatalf("exit = %d, want %d; stderr = %s", code, ExitUsage, stderr.String())
 	}
@@ -473,7 +453,7 @@ func TestCLIJSONStartupFailureIsACompleteEventStream(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	code := Execute(context.Background(), []string{
-		"--format", "json", "--concurrency", "0", "--dry-run", "input.mp4",
+		"--format", "json", "--concurrency", "0", "--dry-run=fast", "input.mp4",
 	}, strings.NewReader(""), &stdout, &stderr)
 	if code != ExitUsage {
 		t.Fatalf("exit = %d, want %d; stdout = %s; stderr = %s", code, ExitUsage, stdout.String(), stderr.String())
@@ -485,11 +465,37 @@ func TestCLIJSONStartupFailureIsACompleteEventStream(t *testing.T) {
 		t.Fatalf("unexpected startup failure stream: %#v", stream.state)
 	}
 	if len(stream.state.Diagnostics) != 1 || stream.state.Diagnostics[0].Code != ingest.FailureCodeConfigInvalid ||
-		!stream.state.Diagnostics[0].ActionRequired {
+		!stream.state.Diagnostics[0].ActionRequired ||
+		!strings.Contains(stream.state.Diagnostics[0].Hint, "concurrency") {
 		t.Fatalf("startup diagnostic is not independently actionable: %#v", stream.state.Diagnostics)
 	}
 	if strings.Contains(stderr.String(), "tamsin:") {
 		t.Fatalf("complete JSON startup failure also emitted an unstructured fallback: %s", stderr.String())
+	}
+}
+
+func TestCLIValueFlagsRequireAndAcceptExplicitValues(t *testing.T) {
+	t.Parallel()
+	for _, arguments := range [][]string{
+		{"--profile", "preserve", "--dry-run", "exact", "--input", filepath.Join(t.TempDir(), "missing.mp4")},
+		{"--profile", "preserve", "--dry-run=exact", "--verify", "readback", "--input", filepath.Join(t.TempDir(), "missing.mp4")},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := Execute(context.Background(), arguments, strings.NewReader(""), &stdout, &stderr); code != ExitSource {
+			t.Fatalf("explicit value form exit = %d, want source resolution; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{
+		"--format", "json", "--dry-run", "--profile", "preserve", "--input", "missing.mp4",
+	}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitUsage {
+		t.Fatalf("bare --dry-run exit = %d, want %d; stdout=%s stderr=%s", code, ExitUsage, stdout.String(), stderr.String())
+	}
+	stream := decodeCLIIngestEventStream(t, stdout.Bytes())
+	if len(stream.state.Diagnostics) != 1 || stream.state.Diagnostics[0].Hint == "" {
+		t.Fatalf("bare value flag has no structured usage hint: %#v", stream.state.Diagnostics)
 	}
 }
 
@@ -506,7 +512,7 @@ func TestCLIFlowMetadataOwnershipOverrideIsUsageError(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := Execute(context.Background(), []string{
-		"--profile", "preserve", "--dry-run", "--flow-metadata", metadata, "-d", "0", "-i", input,
+		"--profile", "preserve", "--dry-run=fast", "--flow-metadata", metadata, "-d", "0", "-i", input,
 	}, strings.NewReader(""), &stdout, &stderr)
 	if code != ExitUsage {
 		t.Fatalf("exit = %d, want %d; stdout = %s; stderr = %s", code, ExitUsage, stdout.String(), stderr.String())
@@ -531,7 +537,7 @@ func TestCLIRejectsUnsafeCapacityOptions(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			arguments := append(testCase.args, "--profile", "preserve", "--dry-run", "input.mp4")
+			arguments := append(testCase.args, "--profile", "preserve", "--dry-run=fast", "input.mp4")
 			var stdout, stderr bytes.Buffer
 			code := Execute(context.Background(), arguments, strings.NewReader(""), &stdout, &stderr)
 			if code != ExitUsage {
@@ -554,7 +560,7 @@ func TestCLIMaxInputsStopsDirectoryExpansion(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := Execute(context.Background(), []string{
-		"--profile", "preserve", "--dry-run", "--max-inputs", "1", directory,
+		"--profile", "preserve", "--dry-run=fast", "--max-inputs", "1", directory,
 	}, strings.NewReader(""), &stdout, &stderr)
 	if code != ExitSource {
 		t.Fatalf("exit = %d, want %d; stderr = %s", code, ExitSource, stderr.String())
@@ -579,7 +585,7 @@ func TestCLIDoctorUsesMediaExitCode(t *testing.T) {
 func TestCLIEmptySourceUsesSourceExitCode(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
-	code := Execute(context.Background(), []string{"--profile", "preserve", "--dry-run", "-i", t.TempDir()}, strings.NewReader(""), &stdout, &stderr)
+	code := Execute(context.Background(), []string{"--profile", "preserve", "--dry-run=fast", "-i", t.TempDir()}, strings.NewReader(""), &stdout, &stderr)
 	if code != ExitSource {
 		t.Fatalf("exit = %d, want %d; stderr = %s", code, ExitSource, stderr.String())
 	}
@@ -636,6 +642,18 @@ func TestExplicitExitCodeOwnsWrappedDeadline(t *testing.T) {
 	if got := exitCode(withExit(ExitRemote, context.DeadlineExceeded)); got != ExitRemote {
 		t.Fatalf("explicit remote exit wrapped around a child deadline = %d, want %d", got, ExitRemote)
 	}
+	if got := exitCode(&tams.RequestTimeoutError{Method: http.MethodGet, URL: "https://example.test", Err: context.DeadlineExceeded}); got != ExitRemote {
+		t.Fatalf("request-level timeout exit = %d, want %d", got, ExitRemote)
+	}
+}
+
+func TestPublishedExitCodeNumbersRemainStable(t *testing.T) {
+	t.Parallel()
+	got := []int{ExitOK, ExitGeneral, ExitUsage, ExitAuth, ExitPartial, ExitSource, ExitMedia, ExitRemote, ExitInterrupted}
+	want := []int{0, 1, 2, 3, 4, 5, 6, 7, 8}
+	if !slices.Equal(got, want) {
+		t.Fatalf("exit codes = %v, want stable wire values %v", got, want)
+	}
 }
 
 func TestCLIIngestFailureNeverReproducesUntrustedTAMSBody(t *testing.T) {
@@ -652,39 +670,23 @@ func TestCLIIngestFailureNeverReproducesUntrustedTAMSBody(t *testing.T) {
 			if err := os.WriteFile(input, []byte("fixture"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			journalPath := filepath.Join(directory, "results.jsonl")
 			var stdout, stderr bytes.Buffer
 			code := Execute(context.Background(), []string{
 				"--endpoint", server.URL, "--auth", "none", "--retries", "0",
 				"--format", format, "--progress", "none", "--log-level", "error",
-				"--profile", "preserve", "--journal", journalPath, "--input", input,
+				"--profile", "preserve", "--input", input,
 			}, strings.NewReader(""), &stdout, &stderr)
 			if code != ExitRemote {
 				t.Fatalf("exit = %d, want %d; stdout=%s stderr=%s", code, ExitRemote, stdout.String(), stderr.String())
 			}
 
-			journal, err := os.ReadFile(journalPath)
-			if err != nil {
-				t.Fatal(err)
-			}
 			for name, output := range map[string]string{
-				"stdout": stdout.String(), "stderr": stderr.String(), "journal": string(journal),
+				"stdout": stdout.String(), "stderr": stderr.String(),
 			} {
 				if strings.Contains(output, toxicBody) {
 					t.Errorf("untrusted TAMS response body leaked to %s: %s", name, output)
 				}
 			}
-
-			result := journalResultRecord(t, journal)
-			failure, ok := result["failure"].(map[string]any)
-			if !ok || failure["code"] != ingest.FailureCodePreflightFailed ||
-				failure["message"] != ingest.FailureMessagePreflightFailed {
-				t.Fatalf("journal failure is not a stable, safe value: %#v", result["failure"])
-			}
-			if _, leakedRawError := result["error"]; leakedRawError {
-				t.Fatalf("journal retained the raw implementation error: %#v", result)
-			}
-
 			switch format {
 			case "human":
 				if !strings.Contains(stdout.String(), "INGEST FAILED") ||
@@ -710,24 +712,6 @@ func TestCLIIngestFailureNeverReproducesUntrustedTAMSBody(t *testing.T) {
 	}
 }
 
-func journalResultRecord(t *testing.T, journal []byte) map[string]any {
-	t.Helper()
-	for lineNumber, line := range bytes.Split(bytes.TrimSpace(journal), []byte{'\n'}) {
-		var record struct {
-			RecordType string         `json:"record_type"`
-			Result     map[string]any `json:"result"`
-		}
-		if err := json.Unmarshal(line, &record); err != nil {
-			t.Fatalf("decode journal line %d: %v", lineNumber+1, err)
-		}
-		if record.RecordType == "input" {
-			return record.Result
-		}
-	}
-	t.Fatalf("journal contains no terminal result: %s", journal)
-	return nil
-}
-
 func TestCLIHTTPInputRetriesTransientFailure(t *testing.T) {
 	t.Parallel()
 	var attempts atomic.Int32
@@ -742,7 +726,7 @@ func TestCLIHTTPInputRetriesTransientFailure(t *testing.T) {
 	directory := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	code := Execute(context.Background(), []string{
-		"--profile", "preserve", "--dry-run", "--retries", "1", "--ffprobe", fakeMediaTool(t, directory),
+		"--profile", "preserve", "--dry-run=fast", "--retries", "1", "--ffprobe", fakeMediaTool(t, directory),
 		"--format", "json", "--log-format", "json", "--log-level", "debug",
 		"-d", "0", "-i", server.URL + "/fixture.mp4?signature=top-secret",
 	}, strings.NewReader(""), &stdout, &stderr)
@@ -757,7 +741,7 @@ func TestCLIHTTPInputRetriesTransientFailure(t *testing.T) {
 	if len(retryEvents) != 1 {
 		t.Fatalf("retry events = %d, want 1: %s", len(retryEvents), stdout.String())
 	}
-	retry, ok := retryEvents[0].(ingestevent.RetryScheduled)
+	retry, ok := retryEvents[0].(*ingestevent.RetryScheduled)
 	if !ok {
 		t.Fatalf("retry payload type = %T", retryEvents[0])
 	}
@@ -771,12 +755,94 @@ func TestCLIHTTPInputRetriesTransientFailure(t *testing.T) {
 		t.Fatalf("authenticated input detail leaked: stdout=%s stderr=%s", stdout.String(), stderr.String())
 	}
 }
+
+func TestProductionInputHTTPClientStripsHeadersAcrossOrigins(t *testing.T) {
+	t.Parallel()
+	headers := http.Header{
+		"Authorization":  []string{"Bearer source-secret"},
+		"X-Input-Secret": []string{"source-secret"},
+	}
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "" || request.Header.Get("X-Input-Secret") != "" {
+			http.Error(writer, "redirect leaked source credentials", http.StatusBadRequest)
+			return
+		}
+		_, _ = io.WriteString(writer, "redirected")
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer source-secret" || request.Header.Get("X-Input-Secret") != "source-secret" {
+			http.Error(writer, "initial source credentials missing", http.StatusBadRequest)
+			return
+		}
+		http.Redirect(writer, request, target.URL+"/asset.mp4", http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	run := observability.New("4bc16043-2214-4ff8-9c6a-923b60740b7c", nil)
+	client := newInputHTTPClient(http.DefaultTransport, time.Minute, 0, run, headers)
+	items, err := source.New(source.Config{HTTPClient: client, HTTPHeaders: headers}).Resolve(
+		context.Background(), []string{redirector.URL + "/asset.mp4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := items[0].Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil || string(data) != "redirected" {
+		t.Fatalf("redirected data = %q, error = %v", data, err)
+	}
+}
+
+func TestHTTPIdleConnectionLimitsFollowTransferParallelism(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name                   string
+		concurrency, transfers int
+		total, perHost         int
+	}{
+		{name: "minimum", concurrency: 1, transfers: 1, total: 4, perHost: 2},
+		{name: "transfers inherit concurrency", concurrency: 8, transfers: 0, total: 16, perHost: 8},
+		{name: "explicit transfers", concurrency: 4, transfers: 12, total: 24, perHost: 12},
+		{name: "bounded", concurrency: 256, transfers: 128, total: 64, perHost: 32},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			total, perHost := httpIdleConnectionLimits(testCase.concurrency, testCase.transfers)
+			if total != testCase.total || perHost != testCase.perHost {
+				t.Fatalf("limits = (%d, %d), want (%d, %d)", total, perHost, testCase.total, testCase.perHost)
+			}
+		})
+	}
+}
+
+func TestSafeUsageHintRedactsConfiguredAndIncidentalURLs(t *testing.T) {
+	t.Parallel()
+	app := &application{v: newSettings()}
+	app.v.file["endpoint"] = "https://operator:password@example.test/v8.2?access_token=endpoint-secret"
+	app.v.file["auth.token"] = "bearer-secret"
+	hint := app.safeUsageHint(errors.New(
+		"endpoint https://operator:password@example.test/v8.2?access_token=endpoint-secret " +
+			"input https://source.test/media?signature=input-secret bearer-secret"))
+	for _, secret := range []string{"password", "endpoint-secret", "input-secret", "bearer-secret"} {
+		if strings.Contains(hint, secret) {
+			t.Fatalf("usage hint exposed %q: %s", secret, hint)
+		}
+	}
+	if !strings.Contains(hint, "REDACTED") || !strings.Contains(hint, "<redacted>") {
+		t.Fatalf("usage hint lost redaction markers: %s", hint)
+	}
+}
+
 func fakeMediaTool(t *testing.T, directory string) string {
 	t.Helper()
 	filename := filepath.Join(directory, "fake-ffmpeg")
 	script := `#!/bin/sh
 if [ "$1" = "-version" ]; then
-  echo "ffprobe version test"
+  echo "ffprobe version 5.1 test"
   exit 0
 fi
 for arg in "$@"; do

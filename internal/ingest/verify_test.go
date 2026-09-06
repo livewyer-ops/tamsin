@@ -54,7 +54,7 @@ func TestNoCorruptSegmentSurvivesVerification(t *testing.T) {
 			client.corruptOnUpload = true
 
 			pipeline, err := New(Config{
-				Concurrency: 1, Transfers: transfers, Verify: true, SegmentDuration: time.Second,
+				Concurrency: 1, Transfers: transfers, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 				EssenceStorage: media.EssenceStorageMuxed,
 			}, client, fakeProber{}, countingSegmenter{objects: 16}, discardLogger(), nil)
 			if err != nil {
@@ -92,7 +92,7 @@ func TestRollingResultRetainsActionRequiredObjectWithoutOptIn(t *testing.T) {
 	client.corruptOnUpload = true
 	client.deleteSegmentsErr = errors.New("flow is read-only")
 	pipeline, err := New(Config{
-		Concurrency: 1, Transfers: 1, Verify: true, SegmentDuration: time.Second,
+		Concurrency: 1, Transfers: 1, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: 2}, discardLogger(), nil)
 	if err != nil {
@@ -130,7 +130,7 @@ func TestCancellationRetractsRegisteredSegments(t *testing.T) {
 
 	pipeline, err := New(Config{
 		RetainObjectResults: true,
-		Concurrency:         1, Transfers: 1, Verify: true, SegmentDuration: time.Second,
+		Concurrency:         1, Transfers: 1, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: 8}, discardLogger(), nil)
 	if err != nil {
@@ -155,9 +155,7 @@ func TestVerificationCleanupUsesOneSharedDeadline(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	started := time.Now()
 	outcomes, err := pipeline.verifyAllWithOutcomes(ctx, "flow", tasks)
-	elapsed := time.Since(started)
 	if err == nil {
 		t.Fatal("deadline-bound cleanup unexpectedly succeeded")
 	}
@@ -165,14 +163,17 @@ func TestVerificationCleanupUsesOneSharedDeadline(t *testing.T) {
 	if !errors.As(err, &verificationErr) || verificationErr.Stranded != len(tasks) {
 		t.Fatalf("verification error = %#v, want %d stranded Objects", err, len(tasks))
 	}
-	if elapsed > 150*time.Millisecond {
-		t.Fatalf("eight cleanups took %s; the deadline appears to have been renewed per Object", elapsed)
-	}
 	client.lock.Lock()
 	deletions := len(client.deletedTimeranges)
+	deadlines := append([]time.Time(nil), client.deleteDeadlines...)
 	client.lock.Unlock()
 	if deletions != len(tasks) {
 		t.Fatalf("attempted %d of %d cleanups under the shared deadline", deletions, len(tasks))
+	}
+	for index, deadline := range deadlines {
+		if deadline.IsZero() || !deadline.Equal(deadlines[0]) {
+			t.Fatalf("cleanup %d deadline = %s, want one shared deadline %s", index, deadline, deadlines[0])
+		}
 	}
 	for index, outcome := range outcomes {
 		if outcome != outcomeRetractionFailed {
@@ -197,7 +198,7 @@ func TestResumeVerificationUsesTransferBudget(t *testing.T) {
 	client := newCountingClient(2 * time.Millisecond)
 	config := Config{
 		RetainObjectResults: true,
-		Concurrency:         1, Transfers: 4, Verify: true, SegmentDuration: time.Second,
+		Concurrency:         1, Transfers: 4, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}
 	pipeline, err := New(config, client, fakeProber{}, countingSegmenter{objects: 16}, discardLogger(), nil)
@@ -240,7 +241,7 @@ func TestFailedResumeVerificationUpdatesObjectTerminalState(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := newFakeClient()
-	config := Config{Concurrency: 1, Transfers: 1, Verify: true}
+	config := Config{Concurrency: 1, Transfers: 1, VerificationMode: VerificationReadback}
 	item := localSource(filename)
 	first, err := New(config, client, fakeProber{}, nil, discardLogger(), nil)
 	if err != nil {
@@ -289,7 +290,7 @@ func TestFailedRetractionIsReportedDistinctly(t *testing.T) {
 	client.deleteSegmentsErr = errors.New("flow is read-only")
 
 	pipeline, err := New(Config{
-		Concurrency: 1, Transfers: 2, Verify: true, SegmentDuration: time.Second,
+		Concurrency: 1, Transfers: 2, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: 4}, discardLogger(), nil)
 	if err != nil {
@@ -322,14 +323,14 @@ func TestPartialBulkRegistrationLeavesNothingUnchecked(t *testing.T) {
 	for _, testCase := range []struct {
 		name      string
 		committed int
-		verify    bool
+		verify    VerificationMode
 	}{
-		{name: "one of the batch landed", committed: 1, verify: true},
-		{name: "several landed", committed: 5, verify: true},
-		{name: "none landed", committed: 0, verify: true},
+		{name: "one of the batch landed", committed: 1, verify: VerificationReadback},
+		{name: "several landed", committed: 5, verify: VerificationReadback},
+		{name: "none landed", committed: 0, verify: VerificationReadback},
 		// Without verification there is nothing to distinguish good bytes from
 		// bad, and the pipeline's rule is that unchecked means corrupt.
-		{name: "several landed with verification off", committed: 5, verify: false},
+		{name: "several landed with verification off", committed: 5, verify: VerificationNone},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
@@ -342,7 +343,7 @@ func TestPartialBulkRegistrationLeavesNothingUnchecked(t *testing.T) {
 			client.registerSegmentsCommit = testCase.committed
 
 			pipeline, err := New(Config{
-				Concurrency: 1, Transfers: 8, Verify: testCase.verify, SegmentDuration: time.Second,
+				Concurrency: 1, Transfers: 8, VerificationMode: testCase.verify, SegmentDuration: time.Second,
 				EssenceStorage: media.EssenceStorageMuxed,
 			}, client, fakeProber{}, countingSegmenter{objects: 8}, discardLogger(), nil)
 			if err != nil {
@@ -359,7 +360,7 @@ func TestPartialBulkRegistrationLeavesNothingUnchecked(t *testing.T) {
 				t.Fatalf("the registration failure must be reported: %q", batch.Results[0].Error)
 			}
 			wantVerification := VerificationNotRequested
-			if testCase.verify {
+			if testCase.verify != VerificationNone {
 				wantVerification = VerificationNotReached
 			}
 			if batch.Results[0].Verification != wantVerification {
@@ -375,7 +376,7 @@ func TestPartialBulkRegistrationLeavesNothingUnchecked(t *testing.T) {
 			verified, retracted := len(client.verified), len(client.deletedTimeranges)
 			client.lock.Unlock()
 
-			if testCase.verify {
+			if testCase.verify != VerificationNone {
 				// Everything that landed was read back and checked, and having
 				// passed, it stays: the next run resumes rather than repeating
 				// work that is already correct.
@@ -417,7 +418,7 @@ func TestFullBulkCommitWithALostResponseIsNotTreatedAsFailure(t *testing.T) {
 	client.registerSegmentsCommit = -1 // the whole batch commits
 
 	pipeline, err := New(Config{
-		Concurrency: 1, Transfers: 4, Verify: true, SegmentDuration: time.Second,
+		Concurrency: 1, Transfers: 4, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: 4}, discardLogger(), nil)
 	if err != nil {
@@ -472,7 +473,7 @@ func TestVerificationGoroutinesFollowTheBudgetNotTheWork(t *testing.T) {
 
 	baseline := runtime.NumGoroutine()
 	pipeline, err := New(Config{
-		Concurrency: 1, Transfers: transfers, Verify: true, SegmentDuration: time.Second,
+		Concurrency: 1, Transfers: transfers, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: objects}, discardLogger(), nil)
 	if err != nil {

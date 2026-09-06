@@ -253,14 +253,6 @@ func failedRegistration(failures []FailedSegment, request SegmentRequest) bool {
 	return false
 }
 
-func (c *Client) Object(ctx context.Context, objectID string) (ObjectInfo, error) {
-	var result ObjectInfo
-	if err := c.doJSON(ctx, http.MethodGet, "objects/"+escapeSegment(objectID), nil, &result, http.StatusOK); err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
 // transferContext applies the optional transfer deadline. Without one the
 // caller's context governs, so a large healthy transfer is limited by the run
 // rather than by a per-request clock.

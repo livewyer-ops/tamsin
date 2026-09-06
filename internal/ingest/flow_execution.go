@@ -68,7 +68,7 @@ func planFlowWrites(ctx context.Context, p *Pipeline, state *flowExecutionState)
 }
 
 func awaitFlowTransfers(ctx context.Context, p *Pipeline, state *flowExecutionState) error {
-	if p.config.DryRun {
+	if p.config.DryRunMode != DryRunOff {
 		return nil
 	}
 	p.expectTransfers(ctx, state.allObjects)
@@ -76,7 +76,7 @@ func awaitFlowTransfers(ctx context.Context, p *Pipeline, state *flowExecutionSt
 }
 
 func writeFlowGraph(ctx context.Context, p *Pipeline, state *flowExecutionState) error {
-	if p.config.DryRun {
+	if p.config.DryRunMode != DryRunOff {
 		return nil
 	}
 	if err := p.commitFlowGraphObserved(ctx, state.planned, state.results); err != nil {
@@ -86,7 +86,7 @@ func writeFlowGraph(ctx context.Context, p *Pipeline, state *flowExecutionState)
 }
 
 func registerFlowObjects(ctx context.Context, p *Pipeline, state *flowExecutionState) error {
-	if p.config.DryRun {
+	if p.config.DryRunMode != DryRunOff {
 		return nil
 	}
 	for _, target := range state.targets {

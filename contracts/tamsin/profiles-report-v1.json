@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tamsin.livewyer.io/schemas/profiles-report-v1.json",
+  "$id": "https://tamsin.livewyer.io/contracts/profiles-report-v1.json",
   "title": "TAMSin built-in profile catalogue report v1",
   "type": "object",
   "additionalProperties": false,

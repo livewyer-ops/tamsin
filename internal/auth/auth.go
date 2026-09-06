@@ -2,12 +2,9 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -44,7 +41,6 @@ type Config struct {
 	BearerToken  string
 	URLToken     string
 	TokenURL     string
-	AuthURL      string
 	ClientID     string
 	ClientSecret string
 	RedirectURL  string
@@ -66,7 +62,7 @@ func (c Config) ResolveMode() (Mode, error) {
 		return c.Mode, nil
 	}
 
-	codeIntent := c.OAuthCode != "" || c.PKCEVerifier != "" || c.AuthURL != ""
+	codeIntent := c.OAuthCode != "" || c.PKCEVerifier != ""
 	clientIntent := c.ClientSecret != ""
 	sharedOAuth := c.ClientID != "" || c.TokenURL != "" || len(c.Scopes) > 0
 	switch {
@@ -79,7 +75,7 @@ func (c Config) ResolveMode() (Mode, error) {
 	case clientIntent:
 		return ModeOAuthClient, nil
 	case sharedOAuth:
-		return "", errors.New("automatic authentication cannot infer an OAuth grant from shared OAuth settings; configure an authorization URL/code or client secret, or set the mode explicitly")
+		return "", errors.New("automatic authentication cannot infer an OAuth grant from shared OAuth settings; configure an authorization code or client secret, or set the mode explicitly")
 	case c.Username != "" || c.Password != "":
 		return ModeBasic, nil
 	default:
@@ -119,14 +115,8 @@ func (c Config) Validate(mode Mode) error {
 			return errors.New("OAuth client credentials require token URL, client ID, and client secret")
 		}
 	case ModeOAuthCode:
-		if !require(c.TokenURL, c.ClientID, c.RedirectURL) {
-			return errors.New("OAuth authorization code requires token URL, client ID, and redirect URL")
-		}
-		if c.OAuthCode == "" && c.AuthURL == "" {
-			return errors.New("interactive OAuth authorization code requires an authorization URL")
-		}
-		if c.OAuthCode == "" && c.PKCEVerifier != "" {
-			return errors.New("an OAuth PKCE verifier requires a pre-obtained authorization code")
+		if !require(c.TokenURL, c.ClientID, c.RedirectURL, c.OAuthCode) {
+			return errors.New("OAuth authorization code requires token URL, client ID, redirect URL, and a pre-obtained code")
 		}
 	default:
 		return fmt.Errorf("unsupported authentication mode %q", mode)
@@ -160,14 +150,10 @@ func (c Config) RedactionValues() []string {
 }
 
 // NewRoundTripper constructs the transport for one TAMS session.
-func NewRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper, prompt io.Writer) (http.RoundTripper, Mode, error) {
+func NewRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper) (http.RoundTripper, Mode, error) {
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	if prompt == nil {
-		prompt = io.Discard
-	}
-
 	mode, err := cfg.ResolveMode()
 	if err != nil {
 		return nil, "", err
@@ -215,7 +201,7 @@ func NewRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper, pr
 			policy: policy,
 		}, mode, nil
 	case ModeOAuthCode:
-		token, tokenErr := authorizationCodeToken(ctx, cfg, base, prompt)
+		token, tokenErr := authorizationCodeToken(ctx, cfg, base)
 		if tokenErr != nil {
 			return nil, "", tokenErr
 		}
@@ -308,11 +294,6 @@ func (c Config) validateCredentialEndpoints(mode Mode) error {
 	}
 	if mode == ModeOAuthClient || mode == ModeOAuthCode {
 		if err := validateCredentialURL("OAuth token endpoint", c.TokenURL, c.AllowInsecureLoopback); err != nil {
-			return err
-		}
-	}
-	if mode == ModeOAuthCode && c.AuthURL != "" {
-		if err := validateCredentialURL("OAuth authorization endpoint", c.AuthURL, c.AllowInsecureLoopback); err != nil {
 			return err
 		}
 	}
@@ -457,12 +438,9 @@ func oauthAuthorizationConfig(cfg Config) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     cfg.ClientID,
 		ClientSecret: cfg.ClientSecret,
-		Endpoint: oauth2.Endpoint{
-			AuthURL:  cfg.AuthURL,
-			TokenURL: cfg.TokenURL,
-		},
-		RedirectURL: cfg.RedirectURL,
-		Scopes:      cfg.Scopes,
+		Endpoint:     oauth2.Endpoint{TokenURL: cfg.TokenURL},
+		RedirectURL:  cfg.RedirectURL,
+		Scopes:       cfg.Scopes,
 	}
 }
 func oauthHTTPContext(ctx context.Context, timeout time.Duration, base http.RoundTripper) context.Context {
@@ -495,121 +473,16 @@ func rejectRedirect(*http.Request, []*http.Request) error {
 	return http.ErrUseLastResponse
 }
 
-func authorizationCodeToken(ctx context.Context, cfg Config, base http.RoundTripper, prompt io.Writer) (*oauth2.Token, error) {
+func authorizationCodeToken(ctx context.Context, cfg Config, base http.RoundTripper) (*oauth2.Token, error) {
 	oauthConfig := oauthAuthorizationConfig(cfg)
 	exchangeContext := oauthHTTPContext(ctx, cfg.Timeout, base)
-	if cfg.OAuthCode != "" {
-		var options []oauth2.AuthCodeOption
-		if cfg.PKCEVerifier != "" {
-			options = append(options, oauth2.VerifierOption(cfg.PKCEVerifier))
-		}
-		token, err := oauthConfig.Exchange(exchangeContext, cfg.OAuthCode, options...)
-		if err != nil {
-			return nil, oauthTokenError("exchange OAuth authorization code", err)
-		}
-		return token, nil
+	var options []oauth2.AuthCodeOption
+	if cfg.PKCEVerifier != "" {
+		options = append(options, oauth2.VerifierOption(cfg.PKCEVerifier))
 	}
-
-	redirect, err := parseInteractiveRedirect(cfg.RedirectURL)
+	token, err := oauthConfig.Exchange(exchangeContext, cfg.OAuthCode, options...)
 	if err != nil {
-		return nil, err
+		return nil, oauthTokenError("exchange OAuth authorization code", err)
 	}
-	callbackPath := redirect.Path
-	if callbackPath == "" {
-		callbackPath = "/"
-	}
-
-	stateBytes := make([]byte, 32)
-	if _, err := rand.Read(stateBytes); err != nil {
-		return nil, fmt.Errorf("create OAuth state: %w", err)
-	}
-	state := base64.RawURLEncoding.EncodeToString(stateBytes)
-
-	listener, err := net.Listen("tcp", redirect.Host)
-	if err != nil {
-		return nil, fmt.Errorf("listen for OAuth callback at %s: %w", redirect.Host, err)
-	}
-	defer listener.Close()
-
-	type callback struct {
-		code string
-		err  error
-	}
-	result := make(chan callback, 1)
-	mux := http.NewServeMux()
-	mux.HandleFunc(callbackPath, func(writer http.ResponseWriter, request *http.Request) {
-		if subtle.ConstantTimeCompare([]byte(request.URL.Query().Get("state")), []byte(state)) != 1 {
-			http.Error(writer, "invalid OAuth state", http.StatusBadRequest)
-			select {
-			case result <- callback{err: errors.New("OAuth callback state did not match")}:
-			default:
-			}
-			return
-		}
-		if providerError := request.URL.Query().Get("error"); providerError != "" {
-			http.Error(writer, "authorization failed", http.StatusBadRequest)
-			select {
-			case result <- callback{err: errors.New("OAuth provider returned an authorization error")}:
-			default:
-			}
-			return
-		}
-		code := request.URL.Query().Get("code")
-		if code == "" {
-			http.Error(writer, "missing authorization code", http.StatusBadRequest)
-			select {
-			case result <- callback{err: errors.New("OAuth callback did not include a code")}:
-			default:
-			}
-			return
-		}
-		_, _ = io.WriteString(writer, "Authorization complete. Return to Tamsin.\n")
-		select {
-		case result <- callback{code: code}:
-		default:
-		}
-	})
-	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	go func() {
-		_ = server.Serve(listener)
-	}()
-	defer func() {
-		shutdownContext, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownContext)
-	}()
-
-	verifier := oauth2.GenerateVerifier()
-	authURL := oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.S256ChallengeOption(verifier))
-	_, _ = fmt.Fprintf(prompt, "Open this URL to authorize Tamsin:\n%s\n", authURL)
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case callbackResult := <-result:
-		if callbackResult.err != nil {
-			return nil, callbackResult.err
-		}
-		token, err := oauthConfig.Exchange(exchangeContext, callbackResult.code, oauth2.VerifierOption(verifier))
-		if err != nil {
-			return nil, oauthTokenError("exchange OAuth authorization code", err)
-		}
-		return token, nil
-	}
-}
-
-func parseInteractiveRedirect(rawURL string) (*url.URL, error) {
-	redirect, err := url.Parse(rawURL)
-	if err != nil {
-		return nil, errors.New("OAuth redirect URL is not valid")
-	}
-	// This URL is an inbound callback listener, not an outbound credential
-	// destination. OAuth native-app guidance deliberately uses loopback HTTP;
-	// keep that exception separate from AllowInsecureLoopback and constrain it
-	// to an exact localhost name or literal IPv4/IPv6 loopback address.
-	if !redirect.IsAbs() || redirect.Scheme != "http" || redirect.Host == "" ||
-		redirect.User != nil || !isLoopbackHost(redirect.Hostname()) {
-		return nil, errors.New("interactive OAuth redirect URL must use HTTP on localhost or a literal loopback IP; supply oauth-code for another redirect")
-	}
-	return redirect, nil
+	return token, nil
 }

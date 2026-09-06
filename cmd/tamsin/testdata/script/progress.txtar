@@ -21,11 +21,8 @@ checkevents none.ndjson succeeded 1 0 planned
 exec cat none.ndjson
 ! stdout '"type":"progress.snapshot"'
 
-# The human rendering choices remain accepted in JSON mode, but cannot inject
-# cursor movement or a second progress language into the stream.
-exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error --progress tty -d 0 --dry-run=exact -i input.mp4
-cp stdout tty.ndjson
-checkevents tty.ndjson succeeded 1 0 planned
+# Plain progress remains accepted in JSON mode but cannot inject a second
+# progress language into the stream.
 exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error --progress plain -d 0 --dry-run=exact -i input.mp4
 cp stdout plain.ndjson
 checkevents plain.ndjson succeeded 1 0 planned
@@ -34,14 +31,14 @@ checkevents plain.ndjson succeeded 1 0 planned
 # enforces this for every stream above.
 
 # An unknown mode is rejected before any work begins.
-! exec tamsin --progress fancy --dry-run -i input.mp4
+! exec tamsin --progress fancy --dry-run=fast -i input.mp4
 stderr 'invalid progress mode'
 
 -- input.mp4 --
 pretend media bytes
 -- ffprobe --
 #!/bin/sh
-if [ "$1" = "-version" ]; then echo "ffprobe stub"; exit 0; fi
+if [ "$1" = "-version" ]; then echo "ffprobe version 5.1.9"; exit 0; fi
 for arg in "$@"; do
   if [ "$arg" = "-show_frames" ]; then
     printf '%s\n' \

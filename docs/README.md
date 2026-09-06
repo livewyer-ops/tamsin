@@ -14,8 +14,8 @@ authoritative contracts, and design discussion distinct.
 | Prepare MPEG-TS Objects | [Prepare MPEG-TS Segments](how-to/prepare-mpegts-segments.md) | [Segmentation](explanation/segmentation.md) |
 | Run in Kubernetes | [Run as a Kubernetes Job](how-to/run-as-a-kubernetes-job.md) | [Configuration](reference/configuration.md) |
 | Cut a release | [Release procedure](how-to/cut-a-release.md) | [TAMS conformance](explanation/conformance.md) |
-| Integrate a service or UI | [Output protocol and journal](reference/result-contract.md) | [Exit codes](reference/exit-codes.md) |
-| Diagnose an environment | [Doctor report](reference/doctor.md) | [Observability](explanation/observability.md) |
+| Integrate a service or UI | [Output protocol](reference/result-contract.md) | [Exit codes](reference/exit-codes.md) |
+| Diagnose an environment | [Doctor report](reference/doctor.md) | [CLI reference](reference/cli.md) |
 | Understand recovery guarantees | [Integrity](explanation/integrity.md) | [Design decisions](explanation/decisions) |
 | Check standards behaviour | [TAMS conformance](explanation/conformance.md) | [Media metadata](reference/media-metadata.md) |
 
@@ -59,7 +59,6 @@ TAMSin's behaviour.
 - [Essence storage](explanation/essence-storage.md)
 - [Segmentation](explanation/segmentation.md)
 - [Integrity](explanation/integrity.md)
-- [Observability](explanation/observability.md)
 - [TAMS conformance](explanation/conformance.md)
 - [Architecture and product decisions](explanation/decisions)
 

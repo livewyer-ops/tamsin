@@ -100,14 +100,12 @@ type RetryObserver func(RetryEvent)
 type Run struct {
 	runID   string
 	logger  *slog.Logger
-	summary *slog.Logger
 	started time.Time
 	now     func() time.Time
 
-	mu          sync.Mutex
-	summaryOnce sync.Once
-	retry       RetryObserver
-	metrics     Snapshot
+	mu      sync.Mutex
+	retry   RetryObserver
+	metrics Snapshot
 }
 
 // SetRetryObserver replaces the run's retry observer. It is safe to call
@@ -121,35 +119,19 @@ func (r *Run) SetRetryObserver(observer RetryObserver) {
 	r.mu.Unlock()
 }
 
-// New starts a run with one logger for retry and terminal records.
+// New starts a run with a correlated logger and cumulative metrics.
 func New(runID string, logger *slog.Logger) *Run {
-	return newRun(runID, logger, logger)
-}
-
-// NewWithSummaryLogger lets a terminal progress view mute ordinary info events
-// while it redraws, then emit the one terminal info record through summary
-// after the progress reporter has closed. Both loggers are decorated with the
-// same run_id.
-func NewWithSummaryLogger(runID string, logger, summary *slog.Logger) *Run {
-	return newRun(runID, logger, summary)
-}
-
-func newRun(runID string, logger, summaryLogger *slog.Logger) *Run {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	if summaryLogger == nil {
-		summaryLogger = logger
-	}
 	now := time.Now
 	return &Run{
-		runID: runID, logger: logger.With("run_id", runID), summary: summaryLogger.With("run_id", runID),
+		runID: runID, logger: logger.With("run_id", runID),
 		started: now(), now: now,
 	}
 }
 
-// RunID is the identifier carried by diagnostics and the versioned result and
-// journal contracts.
+// RunID is the identifier carried by diagnostics and versioned result events.
 func (r *Run) RunID() string {
 	if r == nil {
 		return ""
@@ -255,26 +237,6 @@ func (r *Run) Snapshot() Snapshot {
 	result := r.metrics
 	result.Elapsed = r.now().Sub(r.started)
 	return result
-}
-
-// Summary emits the terminal, human/operator-facing metrics record. It is a
-// diagnostic only: the versioned JSON result shape is deliberately unchanged.
-func (r *Run) Summary() {
-	if r == nil {
-		return
-	}
-	r.summaryOnce.Do(func() {
-		metrics := r.Snapshot()
-		r.summary.Info("ingest run metrics",
-			"elapsed", metrics.Elapsed,
-			"bytes_staged", metrics.BytesStaged,
-			"bytes_uploaded", metrics.BytesUploaded,
-			"bytes_verified", metrics.BytesVerified,
-			"retries", metrics.Retries,
-			"verified", metrics.Verified,
-			"retracted", metrics.Retracted,
-			"stranded", metrics.Stranded)
-	})
 }
 
 func statusClass(status int) string {

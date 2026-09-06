@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,8 +14,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/livewyer-ops/tamsin/ingestevent"
 	"github.com/livewyer-ops/tamsin/internal/cli"
+	"github.com/livewyer-ops/tamsin/internal/ingestevent"
 	"github.com/rogpeppe/go-internal/testscript"
 )
 
@@ -59,18 +61,6 @@ func TestScript(t *testing.T) {
 			// than treating newline-delimited JSON as a final batch document.
 			// Usage: checkevents FILE OUTCOME TOTAL EXIT_CODE [INPUT_STATUS,...]
 			"checkevents": checkEvents,
-			// ffprobe/ffmpeg are external tools; a script that needs them says so
-			// and is skipped where they are unavailable rather than failing.
-			"requiremedia": func(ts *testscript.TestScript, neg bool, args []string) {
-				if neg {
-					ts.Fatalf("requiremedia does not support negation")
-				}
-				for _, tool := range []string{"ffprobe", "ffmpeg"} {
-					if _, err := exec.LookPath(tool); err != nil {
-						ts.Fatalf("skip: %s is not installed", tool)
-					}
-				}
-			},
 		},
 		Condition: func(cond string) (bool, error) {
 			switch cond {
@@ -105,14 +95,73 @@ func checkEvents(ts *testscript.TestScript, neg bool, args []string) {
 	if bytes.ContainsAny(data, "\r\x1b") {
 		ts.Fatalf("event stream contains terminal control bytes")
 	}
-	state, err := ingestevent.Reduce(bytes.NewReader(data))
-	if err != nil {
-		ts.Fatalf("reduce event stream: %v", err)
+	type inputState struct {
+		declared bool
+		started  bool
+		finished *ingestevent.InputFinished
+		planned  int
+		flows    int
 	}
-	if state.Finished == nil {
+	inputs := make(map[int]*inputState)
+	var manifest *ingestevent.ManifestFinished
+	var finished *ingestevent.RunFinished
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	sequence := uint64(0)
+	for {
+		var envelope ingestevent.Envelope
+		if err := decoder.Decode(&envelope); err != nil {
+			if err == io.EOF {
+				break
+			}
+			ts.Fatalf("decode event stream: %v", err)
+		}
+		if envelope.Protocol != ingestevent.Protocol || envelope.ProtocolVersion != ingestevent.ProtocolVersion || envelope.Seq != sequence {
+			ts.Fatalf("invalid event envelope at sequence %d", sequence)
+		}
+		sequence++
+		switch envelope.Type {
+		case ingestevent.TypeManifestFinished:
+			manifest = new(ingestevent.ManifestFinished)
+			if err := json.Unmarshal(envelope.Payload, manifest); err != nil {
+				ts.Fatalf("decode manifest.finished: %v", err)
+			}
+		case ingestevent.TypeRunFinished:
+			finished = new(ingestevent.RunFinished)
+			if err := json.Unmarshal(envelope.Payload, finished); err != nil {
+				ts.Fatalf("decode run.finished: %v", err)
+			}
+		case ingestevent.TypeInputDeclared, ingestevent.TypeInputStarted, ingestevent.TypeFlowPlanned,
+			ingestevent.TypeFlowResult, ingestevent.TypeInputFinished:
+			if envelope.Scope == nil || envelope.Scope.InputIndex == nil {
+				ts.Fatalf("%s has no input scope", envelope.Type)
+			}
+			index := *envelope.Scope.InputIndex
+			input := inputs[index]
+			if input == nil {
+				input = new(inputState)
+				inputs[index] = input
+			}
+			switch envelope.Type {
+			case ingestevent.TypeInputDeclared:
+				input.declared = true
+			case ingestevent.TypeInputStarted:
+				input.started = true
+			case ingestevent.TypeFlowPlanned:
+				input.planned++
+			case ingestevent.TypeFlowResult:
+				input.flows++
+			case ingestevent.TypeInputFinished:
+				input.finished = new(ingestevent.InputFinished)
+				if err := json.Unmarshal(envelope.Payload, input.finished); err != nil {
+					ts.Fatalf("decode input.finished: %v", err)
+				}
+			}
+		}
+	}
+	if finished == nil {
 		ts.Fatalf("event stream has no run.finished record")
 	}
-	if got, want := string(state.Finished.Outcome), args[1]; got != want {
+	if got, want := string(finished.Outcome), args[1]; got != want {
 		ts.Fatalf("run outcome is %q, want %q", got, want)
 	}
 	wantTotal, err := strconv.Atoi(args[2])
@@ -123,17 +172,17 @@ func checkEvents(ts *testscript.TestScript, neg bool, args []string) {
 	if err != nil {
 		ts.Fatalf("invalid exit code %q", args[3])
 	}
-	if state.Manifest == nil || state.Manifest.TotalInputs != uint64(wantTotal) {
-		ts.Fatalf("manifest total is %v, want %d", state.Manifest, wantTotal)
+	if manifest == nil || manifest.TotalInputs != uint64(wantTotal) {
+		ts.Fatalf("manifest total is %v, want %d", manifest, wantTotal)
 	}
-	if state.Finished.Total != uint64(wantTotal) {
-		ts.Fatalf("run.finished total is %d, want %d", state.Finished.Total, wantTotal)
+	if finished.Total != uint64(wantTotal) {
+		ts.Fatalf("run.finished total is %d, want %d", finished.Total, wantTotal)
 	}
-	if state.Finished.ExitCode != wantExit {
-		ts.Fatalf("run.finished exit code is %d, want %d", state.Finished.ExitCode, wantExit)
+	if finished.ExitCode != wantExit {
+		ts.Fatalf("run.finished exit code is %d, want %d", finished.ExitCode, wantExit)
 	}
-	if len(state.Inputs) != wantTotal {
-		ts.Fatalf("reduced input count is %d, want %d", len(state.Inputs), wantTotal)
+	if len(inputs) != wantTotal {
+		ts.Fatalf("event input count is %d, want %d", len(inputs), wantTotal)
 	}
 
 	var statuses []string
@@ -144,19 +193,19 @@ func checkEvents(ts *testscript.TestScript, neg bool, args []string) {
 		}
 	}
 	for index := 0; index < wantTotal; index++ {
-		input := state.Inputs[index]
-		if input == nil || input.Declared == nil || input.Finished == nil {
+		input := inputs[index]
+		if input == nil || !input.declared || input.finished == nil {
 			ts.Fatalf("input %d is missing declared or terminal state", index)
 		}
-		if len(statuses) > 0 && string(input.Finished.Status) != statuses[index] {
-			ts.Fatalf("input %d status is %q, want %q", index, input.Finished.Status, statuses[index])
+		if len(statuses) > 0 && string(input.finished.Status) != statuses[index] {
+			ts.Fatalf("input %d status is %q, want %q", index, input.finished.Status, statuses[index])
 		}
-		if input.Finished.Status != ingestevent.InputFailed {
-			if input.Started == nil {
+		if input.finished.Status != ingestevent.InputFailed {
+			if !input.started {
 				ts.Fatalf("successful input %d has no input.started lifecycle event", index)
 			}
-			if len(input.PlannedFlows) != len(input.FlowResults) {
-				ts.Fatalf("input %d planned %d of %d terminal Flows", index, len(input.PlannedFlows), len(input.FlowResults))
+			if input.planned != input.flows {
+				ts.Fatalf("input %d planned %d of %d terminal Flows", index, input.planned, input.flows)
 			}
 		}
 	}

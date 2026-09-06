@@ -6,6 +6,15 @@ pin automation to a reviewed release and read this file before upgrading.
 
 ## Unreleased
 
+- Breaking changes since rc.3: use YAML configuration, plain progress and
+  pre-obtained OAuth authorisation codes. The separate result journal and
+  public Go event-consumer package have been removed; redirect NDJSON stdout
+  for durable results. Supply explicit values for dry-run and verification
+  modes. See `docs/explanation/compatibility.md` for migration guidance.
+- Simplify per-run pipeline state, retain only ingest validation schemas,
+  preserve precise Profile metadata and keep HTTP pools aligned with the
+  requested transfer concurrency. All five treatments and FFmpeg pass-through
+  remain available.
 - Follow storage-backend pagination and accept optional array-valued tags.
   Verify both presigned and non-presigned Object URLs, respecting the TAMS 8.2
   allocation flag and separating URL start deadlines from Object registration

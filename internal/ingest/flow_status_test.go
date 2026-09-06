@@ -42,6 +42,10 @@ func TestTAMS82FlowStatusWrapsMutationAndAvoidsResumeChurn(t *testing.T) {
 	client.putFlowCalls = 0
 	client.flowStatusWrites = nil
 	client.allocationStatuses = nil
+	pipeline, err = New(Config{Concurrency: 1}, client, fakeProber{}, nil, discardLogger(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	second, err := pipeline.Run(context.Background(), items)
 	if err != nil {
 		t.Fatal(err)

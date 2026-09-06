@@ -7,17 +7,17 @@
 stderr 'unknown flag'
 
 # An unknown value for a constrained option is rejected before any work.
-! exec tamsin --auth not-a-mode --dry-run -i input.mp4
+! exec tamsin --auth not-a-mode --dry-run=fast -i input.mp4
 stderr 'invalid authentication mode'
 
-! exec tamsin --format not-a-format --dry-run -i input.mp4
+! exec tamsin --format not-a-format --dry-run=fast -i input.mp4
 stderr 'invalid result format'
 
-! exec tamsin --log-level chatty --dry-run -i input.mp4
+! exec tamsin --log-level chatty --dry-run=fast -i input.mp4
 stderr 'invalid log level'
 
 # Ingest requires an input.
-! exec tamsin --profile essence-segments --dry-run
+! exec tamsin --profile essence-segments --dry-run=fast
 stderr 'at least one input is required'
 
 # A real ingest requires an endpoint; dry-run is what makes it optional.
@@ -25,13 +25,13 @@ stderr 'at least one input is required'
 stderr 'TAMS endpoint is required'
 
 # Retry bounds are validated, not clamped silently.
-! exec tamsin --retries 99 --dry-run -i input.mp4
+! exec tamsin --retries 99 --dry-run=fast -i input.mp4
 stderr 'retries must be between 0 and 20'
 
-! exec tamsin --timeout 0 --dry-run -i input.mp4
+! exec tamsin --timeout 0 --dry-run=fast -i input.mp4
 stderr 'timeout must be positive'
 
-! exec tamsin --transfer-idle-timeout 0 --dry-run -i input.mp4
+! exec tamsin --transfer-idle-timeout 0 --dry-run=fast -i input.mp4
 stderr 'transfer idle timeout must be positive'
 
 -- input.mp4 --

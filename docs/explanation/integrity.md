@@ -60,10 +60,10 @@ seconds per Object.
 
 The default `auto` mode avoids a second transfer when the successful upload
 provides unambiguous SHA-256 evidence. TAMSin recognises SHA-256 values in
-`X-Amz-Checksum-Sha256`, `Content-Digest`, or `Digest`; a provider response is
-preferred, and a checksum header supplied in the signed allocation request is
-also evidence because a successful checksum-aware PUT means storage accepted
-it. ETags are never treated as content hashes. Malformed evidence fails the
+`X-Amz-Checksum-Sha256`, `Content-Digest`, or `Digest` in the provider response.
+A checksum header supplied only in the signed allocation request is not
+evidence: a successful PUT does not prove storage understood or validated it,
+so TAMSin performs readback instead. ETags are never treated as content hashes. Malformed evidence fails the
 upload, and a digest mismatch fails before Segment registration.
 
 Many presigned URLs do not include checksum support. In that case `auto`
@@ -101,7 +101,4 @@ What the per-Object verification proves is narrower and more useful: the bytes t
 
 Where you need the stored bytes to equal the source bytes, `-d 0` with muxed essence storage is the only combination that produces it.
 
-## See also
-
-- [Segmentation](segmentation.md) — why stored bytes usually differ from source bytes
-- [Conformance](conformance.md) — the full verification stack
+See [TAMS conformance](conformance.md) for the complete verification boundary.

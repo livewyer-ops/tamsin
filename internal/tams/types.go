@@ -206,8 +206,6 @@ type DeletionRequest struct {
 	Error              json.RawMessage `json:"error,omitempty"`
 }
 
-type ObjectInfo map[string]any
-
 type HTTPError struct {
 	Method     string
 	URL        string

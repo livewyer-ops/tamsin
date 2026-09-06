@@ -2,12 +2,10 @@
 
 By the end of this tutorial you will have put a piece of media into a
 Time-addressable Media Store, verified its stored bytes, and reviewed the
-permanent ingest receipt using nothing but a local file and a terminal. You do
-not need to understand TAMS to follow it. Everything is explained as you go,
-and nothing is left for you to decide.
+ingest receipt using a local file and a terminal.
 
-You will need TAMSin on your `PATH`, FFmpeg installed, and a TAMS endpoint you
-can write to.
+You will need TAMSin on your `PATH`, FFmpeg 5.1 or newer installed, and a TAMS
+endpoint you can write to.
 
 ## 1. Check your tools
 
@@ -26,12 +24,16 @@ as skipped because it does not render media.
 
 ## 2. Point TAMSin at your store
 
-TAMSin reads its endpoint and credentials from the environment, which keeps them out of your shell history and out of process listings. Give the companion TAMS client the same connection without copying secrets into arguments:
+TAMSin can read credentials from the environment, avoiding secret command-line
+arguments. Typing a literal export can still record the secret in shell
+history. In Bash, prompt for the token without echoing it:
 
-```sh
+```bash
 export TAMSIN_ENDPOINT='https://tams.example.com'
 export TAMSIN_AUTH_MODE='bearer'
-export TAMSIN_AUTH_TOKEN='your-token-here'
+read -r -s -p 'TAMS token: ' TAMSIN_AUTH_TOKEN
+printf '\n'
+export TAMSIN_AUTH_TOKEN
 ```
 
 Confirm TAMSin can reach the store and that your credentials work:
@@ -44,7 +46,8 @@ The redacted `endpoint` and `auth` fields tell you which destination and
 authentication mode were selected. Passing `authentication`, `service`,
 `api_compatibility`, `service_lifetimes`, `storage_backends`, and
 `storage_selection` checks mean the same read-only startup preflight used by
-ingest succeeded. It issues only two GETs and creates no TAMS resource. If this
+ingest succeeded. It reads the service and paginated storage backends without
+creating a TAMS resource. If this
 fails, fix it now — every later step depends on it.
 
 ## 3. Make a piece of media
@@ -67,15 +70,15 @@ Before writing anything to the store, ask TAMSin what it *would* do:
 tamsin --profile essence-segments --dry-run=exact -i first-ingest.ts
 ```
 
-The equals sign is required when choosing the optional mode explicitly. A bare
-`--dry-run` means `fast`: it stages and probes the source and validates the Flow
-graph, but skips FFmpeg rendering and therefore cannot report exact Objects.
-This tutorial uses `exact` because the next steps inspect those Objects.
+The mode value is required. `fast` stages and probes the source and validates
+the Flow graph, but skips FFmpeg rendering and therefore cannot report exact
+Objects. This tutorial uses `exact` because the next steps inspect those
+Objects.
 
 This performs the complete local render and prints a human-readable plan —
 without contacting TAMS at all. It still stages, separates, segments, and
 hashes the media, so budget the same temporary space and FFmpeg time as a real
-run. You should see **three** Flows: `video`, `audio`, and an empty
+run. You should see **three** Flows: `video`, `audio`, and a containerless
 `collection` representing the input as a whole.
 
 If you are building a wrapper or want to inspect the exact Object plan, capture
@@ -89,7 +92,7 @@ jq -c 'select(.type == "flow.planned" or .type == "object.result" or .type == "i
 `plan.ndjson` is a sequence of independently valid JSON objects, not an array
 or one final document. Across those bounded records, the Flow plan has
 **three** entries: two `flow.planned` payloads carry `"role": "video"` and
-`"role": "audio"`, while `input.finished` names the empty collector in
+`"role": "audio"`, while `input.finished` names the containerless collector in
 `root_flow_id`. Each `flow.planned` marks `root` or names `parent_flow_id`
 without forcing TAMSin to render the whole input before publishing the graph.
 Each terminal planned `object.result` carries its expected byte count and
@@ -98,10 +101,11 @@ The final `run.finished` event records the dry-run outcome and intended process
 exit code.
 
 That is worth pausing on. You gave TAMSin one file and it is planning three
-Flows: two media-owning essence Flows plus the empty Multi-Flow that records
+Flows: two media-owning essence Flows plus the containerless Multi-Flow that records
 their association. The selected `essence-segments` profile separates each
 essence so a later consumer can fetch the audio without downloading the video.
-You will see why this matters in [Essence storage](../explanation/essence-storage.md).
+See [profiles and supported media](../reference/profiles.md) for the storage
+trade-offs.
 
 This segmented treatment is not a byte-for-byte archive of the
 container you supplied: separating and segmenting the essences rewrites their
@@ -137,13 +141,14 @@ and `verifying` separately; the permanent receipt begins
 ## 6. Review the result
 
 The verbose receipt names the root `collection` Flow and its `video` and
-`audio` children. The collection owns no Objects in independent mode; each
-essence row carries its own Flow UUID and expands to the verified Media Objects
-stored for it.
+`audio` children, with their identifiers and Object totals. The collection owns no
+Objects in independent mode. Successful per-Object records are streamed rather
+than retained for the human receipt. To keep every Object record, use
+`--format json` and redirect stdout to an NDJSON file.
 
 Each Object record includes a `timerange` such as `[0:0_4:0)` — from zero
 seconds, up to but not including four — together with its byte count and
-SHA-256 digest. The receipt therefore records exactly what this ingest
+SHA-256 digest. The NDJSON stream therefore records exactly what this ingest
 committed and verified without turning TAMSin into a general TAMS inspection
 client. Later service-side inspection and administration use the tooling
 provided for that service and are outside TAMSin's command interface.
@@ -171,6 +176,6 @@ saw that re-running is safe.
 
 From here:
 
-- [Choose how essences are stored](../how-to/choose-how-essences-are-stored.md) if you need the original multiplex kept intact
-- [Essence storage](../explanation/essence-storage.md) for why independent ingest splits your file
+- [Profiles and supported media](../reference/profiles.md) to choose a byte-packaging policy
+- [Inputs](../reference/inputs.md) for directories, manifests, HTTP, S3 and standard input
 - [CLI reference](../reference/cli.md) for every command and flag

@@ -51,7 +51,7 @@ stdout '\x1b\[1;32mPLANNED - NO CHANGES MADE\x1b\[0m'
 
 # Startup failures in JSON mode remain a complete, reducer-valid process
 # stream and do not append a human error footer.
-! exec tamsin --format json --log-level error --progress fancy --dry-run -i input.mp4
+! exec tamsin --format json --log-level error --progress fancy --dry-run=fast -i input.mp4
 ! stderr .
 cp stdout invalid.ndjson
 checkevents invalid.ndjson failed 0 2
@@ -65,7 +65,7 @@ pretend media bytes
 -- ffprobe --
 #!/bin/sh
 # Minimal ffprobe stub: one h264 video stream in an mp4 container.
-if [ "$1" = "-version" ]; then echo "ffprobe version stub"; exit 0; fi
+if [ "$1" = "-version" ]; then echo "ffprobe version 5.1 stub"; exit 0; fi
 for arg in "$@"; do
   if [ "$arg" = "-show_frames" ]; then
     printf '%s\n' \

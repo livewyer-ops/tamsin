@@ -142,47 +142,23 @@ func (a *application) doctorCommand() *cobra.Command {
 	}
 	flags := command.Flags()
 	flags.BoolVar(&raw.online, "online", false, "also run the read-only TAMS startup preflight")
-	flags.StringVar(&raw.profile, "profile", "", profileFlagDescription())
-	registerProfileCompletion(command)
-	flags.DurationVarP(&raw.segmentDuration, "segment-duration", "d", defaultSegmentDuration,
-		"target duration of each TAMS Flow Segment; 0 disables segmentation, leaving storage to decide whole input or whole essence")
-	flags.StringVar(&raw.segmentFormat, "segment-format", string(media.SegmentFormatSource),
-		"container for Flow Segments: source or mpegts")
-	flags.StringVar(&raw.essenceStorage, "essence-storage", string(media.EssenceStorageIndependent),
-		"how a muxed input is stored: independent or muxed")
-	flags.StringArrayVar(&raw.ffmpegArgs, "ffmpeg-arg", nil, "additional explicit FFmpeg argument (repeatable)")
-	flags.StringVar(&raw.tempDirectory, "temp-dir", "", "staging directory")
-	flags.StringVar(&raw.stagingByteBudget, "staging-byte-budget", "auto",
-		"global temporary-media budget: auto or a byte size such as 80GiB")
-	flags.StringVar(&raw.storageID, "storage-id", "", "target TAMS storage backend ID")
+	addTreatmentFlags(command, &raw.profile, &raw.segmentDuration, &raw.segmentFormat,
+		&raw.essenceStorage, &raw.ffmpegArgs)
+	addReadinessFlags(command, &raw.tempDirectory, &raw.stagingByteBudget, &raw.storageID)
 	return command
 }
 
 func (a *application) doctorSettings(command *cobra.Command, raw *doctorFlagValues) doctorSettings {
 	settings := doctorSettings{doctorFlagValues: *raw}
-	flags := command.Flags()
-	settings.profile = stringOption(flags, "profile", raw.profile, a.v.GetString("ingest.profile"))
-	settings.segmentDuration = durationOption(flags, "segment-duration", raw.segmentDuration, a.v.GetDuration("ingest.segment_duration"))
-	settings.segmentFormat = stringOption(flags, "segment-format", raw.segmentFormat, a.v.GetString("ingest.segment_format"))
-	settings.essenceStorage = stringOption(flags, "essence-storage", raw.essenceStorage, a.v.GetString("ingest.essence_storage"))
-	settings.ffmpegArgs = stringArrayOption(flags, "ffmpeg-arg", raw.ffmpegArgs, a.configStrings("media.ffmpeg_args"))
-	settings.tempDirectory = stringOption(flags, "temp-dir", raw.tempDirectory, a.v.GetString("ingest.temp_directory"))
-	settings.stagingByteBudget = stringOption(flags, "staging-byte-budget", raw.stagingByteBudget, a.v.GetString("ingest.staging_byte_budget"))
-	settings.storageID = stringOption(flags, "storage-id", raw.storageID, a.v.GetString("ingest.storage_id"))
+	settings.profile = a.configString(command, "profile", "ingest.profile")
+	settings.segmentDuration = a.configDuration(command, "segment-duration", "ingest.segment_duration")
+	settings.segmentFormat = a.configString(command, "segment-format", "ingest.segment_format")
+	settings.essenceStorage = a.configString(command, "essence-storage", "ingest.essence_storage")
+	settings.ffmpegArgs = a.configStringArray(command, "ffmpeg-arg", "media.ffmpeg_args")
+	settings.tempDirectory = a.configString(command, "temp-dir", "ingest.temp_directory")
+	settings.stagingByteBudget = a.configString(command, "staging-byte-budget", "ingest.staging_byte_budget")
+	settings.storageID = a.configString(command, "storage-id", "ingest.storage_id")
 	return settings
-}
-
-func (a *application) resolveDoctorProfile(command *cobra.Command, settings doctorSettings) (ingest.Profile, error) {
-	return resolveTreatment(treatmentSettings{
-		selection:               settings.profile,
-		segmentDuration:         settings.segmentDuration,
-		segmentFormat:           media.SegmentFormat(settings.segmentFormat),
-		essenceStorage:          media.EssenceStorage(settings.essenceStorage),
-		ffmpegArgs:              settings.ffmpegArgs,
-		segmentDurationExplicit: a.ingestOptionExplicit(command.Flags(), "segment-duration", "ingest.segment_duration"),
-		segmentFormatExplicit:   a.ingestOptionExplicit(command.Flags(), "segment-format", "ingest.segment_format"),
-		essenceStorageExplicit:  a.ingestOptionExplicit(command.Flags(), "essence-storage", "ingest.essence_storage"),
-	})
 }
 
 func (a *application) runDoctor(command *cobra.Command, raw *doctorFlagValues) error {
@@ -213,13 +189,16 @@ func (a *application) runDoctor(command *cobra.Command, raw *doctorFlagValues) e
 		if a.configFile != "" {
 			detail["config_file"] = a.configFile
 		}
+		if a.configFileWarning != "" {
+			detail["warning"] = a.configFileWarning
+		}
 		run.pass("configuration", detail)
 	}
 
 	allProfiles := strings.TrimSpace(settings.profile) == ""
 	profile, profileErr := ingest.Profile{}, error(nil)
 	if !allProfiles {
-		profile, profileErr = a.resolveDoctorProfile(command, settings)
+		profile, profileErr = a.resolvedConfigProfile(command)
 	}
 	run.report.Profile.Selection = settings.profile
 	if profileErr != nil {
@@ -257,10 +236,10 @@ func (a *application) runDoctor(command *cobra.Command, raw *doctorFlagValues) e
 	}
 
 	ffprobe := media.FFprobe{Executable: a.v.GetString("media.ffprobe")}
-	if _, err := doctorToolVersion(command.Context(), ffprobe.Version); err != nil {
+	if report, err := doctorToolVersion(command.Context(), ffprobe.Version); err != nil || media.ValidateToolVersion(report, "FFprobe") != nil {
 		run.fail("ffprobe", safeMediaToolError("FFprobe"), ExitMedia, nil)
 	} else {
-		run.pass("ffprobe", map[string]any{"available": true})
+		run.pass("ffprobe", map[string]any{"available": true, "minimum_version": "5.1"})
 	}
 	if profileErr != nil {
 		run.skip("ffmpeg", "profile did not resolve, so the media-writing requirement is unknown")
@@ -268,10 +247,10 @@ func (a *application) runDoctor(command *cobra.Command, raw *doctorFlagValues) e
 		run.skip("ffmpeg", "resolved treatment uploads source bytes without FFmpeg")
 	} else {
 		ffmpeg := media.FFmpeg{Executable: a.v.GetString("media.ffmpeg")}
-		if _, err := doctorToolVersion(command.Context(), ffmpeg.Version); err != nil {
+		if report, err := doctorToolVersion(command.Context(), ffmpeg.Version); err != nil || media.ValidateToolVersion(report, "FFmpeg") != nil {
 			run.fail("ffmpeg", safeMediaToolError("FFmpeg"), ExitMedia, nil)
 		} else {
-			run.pass("ffmpeg", map[string]any{"available": true})
+			run.pass("ffmpeg", map[string]any{"available": true, "minimum_version": "5.1"})
 		}
 	}
 
@@ -352,7 +331,7 @@ func (a *application) runDoctorOnline(ctx context.Context, run *doctorRun, setti
 			return
 		}
 	}
-	client, mode, err := a.tamsClientWithErrorPolicy(ctx, endpoint, a.httpTransport(), true, nil)
+	client, mode, err := a.tamsClient(ctx, endpoint, a.httpTransport(0, 0), nil)
 	if err != nil {
 		run.fail("authentication", err, ExitAuth, map[string]any{
 			"endpoint": run.report.Endpoint, "mode": run.report.Auth,
@@ -475,11 +454,14 @@ func safeDoctorRemoteError(operation string, err error) error {
 }
 
 func safeLifetimeError(err error) error {
-	text := err.Error()
-	switch {
-	case strings.Contains(text, "/min_presigned_url_timeout"):
+	var limitErr *tams.ServiceLimitError
+	if !errors.As(err, &limitErr) {
+		return errors.New("TAMS service reported invalid lifetime guarantees")
+	}
+	switch limitErr.Field {
+	case "min_presigned_url_timeout":
 		return errors.New("TAMS service reported an invalid /min_presigned_url_timeout")
-	case strings.Contains(text, "/min_object_timeout"):
+	case "min_object_timeout":
 		return errors.New("TAMS service reported an invalid /min_object_timeout")
 	default:
 		return errors.New("TAMS service reported invalid lifetime guarantees")

@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/livewyer-ops/tamsin/ingestevent"
 	"github.com/livewyer-ops/tamsin/internal/ingest"
+	"github.com/livewyer-ops/tamsin/internal/ingestevent"
 	"github.com/livewyer-ops/tamsin/internal/observability"
 	"github.com/livewyer-ops/tamsin/internal/progress"
 	"github.com/livewyer-ops/tamsin/internal/source"
@@ -37,8 +37,8 @@ type pendingProgressEvent struct {
 
 // terminalDecision is the single cancellation snapshot shared by every
 // terminal projection. Once frozen, later cancellation belongs to the caller's
-// shutdown of an already-terminalizing command and cannot rewrite a journal or
-// event stream which is already being committed.
+// shutdown of an already-terminalizing command and cannot rewrite an event
+// stream which is already being completed.
 type terminalDecision struct {
 	interrupted bool
 	cause       error
@@ -111,8 +111,7 @@ func newIngestEventOutput(writer io.Writer, runID string, cancel context.CancelC
 		ResultSchemaVersion: ingest.ResultSchemaVersion, ProfilePolicyVersion: ingest.ProfilePolicyVersion,
 		MaxEventBytes: ingestevent.DefaultMaxEventBytes,
 		Capabilities: []string{
-			"bounded_reducer", "durable_journal", "graceful_cancel", "live_object_results", "progress",
-			"progress_coalescing", "retry_events", "terminal_results",
+			"graceful_cancel", "live_object_results", "progress", "progress_coalescing", "retry_events", "terminal_results",
 		},
 	})
 	output.mu.Unlock()
@@ -135,7 +134,7 @@ func (a *application) finishBootstrapEvents(ctx context.Context, cause error, ex
 		}
 		a.events = output
 	}
-	resolvedCode, err := a.events.Finish(nil, cause, exitCode, nil, observability.Snapshot{}, ctx)
+	resolvedCode, err := a.events.Finish(cause, exitCode, nil, observability.Snapshot{}, ctx)
 	if err == nil {
 		a.ingestTerminalFrozen = true
 	}
@@ -275,7 +274,7 @@ func (o *ingestEventOutput) objectsCompletedLocked(index int, flowID string, obj
 		}); err != nil {
 			return err
 		}
-		addObjectSummary(&summary, object)
+		ingest.AccumulateObjectSummary(&summary, object)
 	}
 	o.objectSummaries[index][flowID] = summary
 	return nil
@@ -455,36 +454,7 @@ func eventObjectSummary(summary ingest.ObjectSummary) ingestevent.ObjectSummary 
 	}
 }
 
-func addObjectSummary(summary *ingest.ObjectSummary, object ingest.ObjectResult) {
-	summary.Total++
-	summary.Bytes += object.Bytes
-	switch object.Disposition {
-	case ingest.ObjectDispositionIngested:
-		summary.Ingested++
-	case ingest.ObjectDispositionResumed:
-		summary.Resumed++
-	case ingest.ObjectDispositionRejected:
-		summary.Rejected++
-	case ingest.ObjectDispositionRetracted:
-		summary.Retracted++
-	case ingest.ObjectDispositionStranded, ingest.ObjectDispositionRegistrationIndeterminate:
-		summary.Stranded++
-	case ingest.ObjectDispositionPlanned, ingest.ObjectDispositionUploaded,
-		ingest.ObjectDispositionRegistered, ingest.ObjectDispositionUnattempted:
-		summary.Unattempted++
-	}
-	if object.Verification == ingest.ObjectVerificationVerified {
-		summary.Verified++
-		switch object.VerificationMethod {
-		case ingest.VerificationMethodStorage:
-			summary.StorageVerified++
-		case ingest.VerificationMethodReadback:
-			summary.ReadbackVerified++
-		}
-	}
-}
-
-func (o *ingestEventOutput) Finish(batch *ingest.BatchResult, cause error, exitCode int,
+func (o *ingestEventOutput) Finish(cause error, exitCode int,
 	options *ingestFlagValues, metrics observability.Snapshot, ctx context.Context) (int, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -533,7 +503,7 @@ func (o *ingestEventOutput) Finish(batch *ingest.BatchResult, cause error, exitC
 		if _, terminal := o.terminal[index]; terminal {
 			continue
 		}
-		code, message, action := runFailureFor(cause, exitCode)
+		code, message, action := runFailure(exitCode)
 		result := ingest.Result{
 			Input: input, Profile: profile, ProfileVersion: profileVersion, Status: ingest.ResultStatusFailed,
 			Verification: ingest.VerificationStatus(verification), Flows: []ingest.FlowResult{},
@@ -549,8 +519,9 @@ func (o *ingestEventOutput) Finish(batch *ingest.BatchResult, cause error, exitC
 	}
 
 	if cause != nil {
-		code, message, action := runFailureFor(cause, exitCode)
-		diagnostic, err := ingestevent.NewDiagnostic(ingestevent.SeverityError, code, message, "", action)
+		code, message, action := runFailure(exitCode)
+		diagnostic, err := ingestevent.NewDiagnostic(
+			ingestevent.SeverityError, code, message, diagnosticHintFor(cause), action)
 		if err != nil {
 			return ExitGeneral, o.failLocked(err)
 		}
@@ -576,11 +547,7 @@ func (o *ingestEventOutput) Finish(batch *ingest.BatchResult, cause error, exitC
 	case exitCode != ExitOK || failed > 0:
 		outcome = ingestevent.RunFailed
 	}
-	// batch is deliberately not the source of terminal counts: the events above
-	// are authoritative even when an early Pipeline failure could not construct
-	// a normal frozen BatchResult. A non-nil batch is retained in the signature
-	// to make that distinction explicit at the call site.
-	_ = batch
+	// Events remain authoritative if the pipeline fails before returning results.
 	finished := ingestevent.RunFinished{
 		Outcome: outcome, ExitCode: exitCode, Total: uint64(len(o.declared)), Succeeded: succeeded, Failed: failed,
 		ElapsedMS:   max(durationMilliseconds(metrics.Elapsed), durationMilliseconds(o.now().Sub(o.started))),
@@ -600,6 +567,14 @@ func (o *ingestEventOutput) Finish(batch *ingest.BatchResult, cause error, exitC
 	o.stopProgressLocked()
 	o.closeDoneLocked()
 	return exitCode, nil
+}
+
+func diagnosticHintFor(err error) string {
+	var hinted interface{ DiagnosticHint() string }
+	if errors.As(err, &hinted) {
+		return hinted.DiagnosticHint()
+	}
+	return ""
 }
 
 func (o *ingestEventOutput) WatchCancellation(ctx context.Context) {
@@ -772,10 +747,8 @@ func inputFailure(result ingest.Result) (code, message string, action bool) {
 	return "", "", false
 }
 
-// runFailure renders an exit code as the run-level failure the event stream and
-// the journal report. The exit code is this layer's own vocabulary, so the
-// mapping lives here; the codes and messages it maps onto are the ingest
-// package's published contract.
+// runFailure renders an exit code as the run-level event-stream failure. The
+// exit code is this layer's own vocabulary, so the mapping lives here.
 func runFailure(exitCode int) (code, message string, action bool) {
 	switch exitCode {
 	case ExitUsage:
@@ -795,14 +768,6 @@ func runFailure(exitCode int) (code, message string, action bool) {
 	default:
 		return ingest.FailureCodeRunFailed, ingest.FailureMessageRunFailed, true
 	}
-}
-
-func runFailureFor(cause error, exitCode int) (code, message string, action bool) {
-	var failure *processFailureError
-	if errors.As(cause, &failure) {
-		return failure.code, failure.message, failure.actionRequired
-	}
-	return runFailure(exitCode)
 }
 
 func cancellationReason(ctx context.Context) ingestevent.CancellationReason {

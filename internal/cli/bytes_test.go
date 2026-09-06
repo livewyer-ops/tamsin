@@ -1,6 +1,10 @@
 package cli
 
-import "testing"
+import (
+	"math"
+	"strconv"
+	"testing"
+)
 
 func TestParseByteSize(t *testing.T) {
 	t.Parallel()
@@ -29,7 +33,7 @@ func TestParseByteSize(t *testing.T) {
 
 func TestParseByteSizeRejectsUnsafeValues(t *testing.T) {
 	t.Parallel()
-	for _, value := range []string{"", "0", "-1GiB", "12parsecs", "999999999999999999999PiB"} {
+	for _, value := range []string{"", "0", "-1GiB", "12parsecs", "999999999999999999999PiB", strconv.FormatInt(math.MaxInt64, 10)} {
 		t.Run(value, func(t *testing.T) {
 			t.Parallel()
 			if _, err := parseByteSize(value); err == nil {

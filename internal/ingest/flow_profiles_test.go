@@ -111,7 +111,7 @@ func TestProfileBackedFlowPlansExpandedReadsAndCompactWrites(t *testing.T) {
 	client.profiles[testVideoProfileID] = tams.Profile{
 		"id": testVideoProfileID, "label": "HD", "flow_metadata": metadata,
 	}
-	pipeline, err := New(Config{Concurrency: 1, DryRun: true, TAMSFlowProfiles: []string{testVideoProfileID}},
+	pipeline, err := New(Config{Concurrency: 1, DryRunMode: DryRunExact, TAMSFlowProfiles: []string{testVideoProfileID}},
 		client, fakeProber{}, nil, discardLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -201,6 +201,11 @@ func TestProfileMismatchReportsNestedJSONPointerAndPresence(t *testing.T) {
 		!strings.Contains(err.Error(), "generated=25 profile=24") {
 		t.Fatalf("nested mismatch = %v", err)
 	}
+	failure := DescribeFailure(Result{}, err)
+	if failure == nil || failure.Code != FailureCodeFlowPlanFailed || !strings.Contains(failure.Message, "frame_rate/numerator: values differ") ||
+		strings.Contains(failure.Message, "25") || strings.Contains(failure.Message, "24") {
+		t.Fatalf("public failure = %#v", failure)
+	}
 
 	delete(client.profiles[testVideoProfileID]["flow_metadata"].(map[string]any), "container")
 	delete(pipeline.profileCache, testVideoProfileID)
@@ -210,6 +215,24 @@ func TestProfileMismatchReportsNestedJSONPointerAndPresence(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "/flow_metadata/container") ||
 		!strings.Contains(err.Error(), `generated="video/mp4" profile=<missing>`) {
 		t.Fatalf("presence mismatch = %v", err)
+	}
+	if failure := DescribeFailure(Result{}, err); failure == nil || !strings.Contains(failure.Message, "/container: field missing from Profile") {
+		t.Fatalf("public presence failure = %#v", failure)
+	}
+}
+
+func TestProfileMismatchMessageRedactsExtensionKeysAndValues(t *testing.T) {
+	t.Parallel()
+	mismatch := &jsonValueMismatch{
+		path:    "/flow_metadata/essence_parameters/secret\n\x1b[31m~1token",
+		profile: "provider-secret", profilePresent: true,
+	}
+	if got := profileMismatchMessage(mismatch); got != "TAMS Flow Profile mismatch at /flow_metadata/essence_parameters/<redacted>: field missing from generated metadata." {
+		t.Fatalf("unsafe or unhelpful diagnostic: %q", got)
+	}
+	mismatch.path = "/flow_metadata" + strings.Repeat("/frame_rate", 100)
+	if got := profileMismatchMessage(mismatch); len(got) > 350 || !strings.Contains(got, "<redacted>") {
+		t.Fatalf("unbounded diagnostic: %q", got)
 	}
 }
 
@@ -228,13 +251,38 @@ func TestEquivalentNumericFlowDoesNotCauseResumeWrite(t *testing.T) {
 	}
 	client := newFakeClient()
 	client.flows[flowID] = existing
-	pipeline := &Pipeline{client: client}
+	pipeline := &Pipeline{client: client, config: Config{DryRunMode: DryRunOff}}
 	plan, err := pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: generated, ownsMedia: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if plan.changed {
 		t.Fatalf("equivalent numeric Flow planned a write: %#v", plan.effective)
+	}
+}
+
+func TestPlanFlowWriteRejectsConflictingSourceBeforeMutation(t *testing.T) {
+	t.Parallel()
+	flowID := "f3b1a8de-6c1e-4a0b-9d2f-1c7e5a904bb1"
+	client := newFakeClient()
+	client.flows[flowID] = tams.Flow{
+		"id": flowID, "source_id": "0c9afbc0-2db6-46c0-b254-fdc9d03d678d",
+	}
+	pipeline := &Pipeline{client: client, config: Config{DryRunMode: DryRunOff}}
+	_, err := pipeline.planFlowWrite(context.Background(), graphFlow{
+		id: flowID,
+		flow: tams.Flow{
+			"id": flowID, "source_id": "9a2c4e60-71bd-4f3a-8e15-2d6b0c8a7f43",
+		},
+		ownsMedia: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "already belongs to source_id") {
+		t.Fatalf("planFlowWrite() error = %v, want source ownership conflict", err)
+	}
+	client.lock.Lock()
+	defer client.lock.Unlock()
+	if client.allocations != 0 || len(client.segments[flowID]) != 0 {
+		t.Fatalf("source conflict mutated TAMS: allocations=%d segments=%v", client.allocations, client.segments[flowID])
 	}
 }
 
@@ -268,14 +316,14 @@ func TestFlowProfileDryRunOnlyReadsServiceAndProfilesPerRun(t *testing.T) {
 	client.profiles[testVideoProfileID] = tams.Profile{
 		"id": testVideoProfileID, "label": "dry-run", "flow_metadata": metadata,
 	}
-	pipeline, err := New(Config{
-		Concurrency: 1, Transfers: 2, DryRun: true, EssenceStorage: media.EssenceStorageMuxed,
-		TAMSFlowProfiles: []string{testVideoProfileID},
-	}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	for run := range 2 {
+		pipeline, err := New(Config{
+			Concurrency: 1, Transfers: 2, DryRunMode: DryRunExact, EssenceStorage: media.EssenceStorageMuxed,
+			TAMSFlowProfiles: []string{testVideoProfileID},
+		}, client, fakeProber{}, nil, discardLogger(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		batch, runErr := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 		if runErr != nil || batch.Succeeded != 1 {
 			t.Fatalf("run %d = %#v, %v", run, batch, runErr)

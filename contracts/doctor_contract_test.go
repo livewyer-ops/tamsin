@@ -23,7 +23,7 @@ func doctorContractTool(t *testing.T, name string) string {
 		t.Skip("doctor contract fixture uses a POSIX test executable")
 	}
 	filename := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(filename, []byte("#!/bin/sh\nprintf '%s version contract-test\\n' '"+name+"'\n"), 0o700); err != nil {
+	if err := os.WriteFile(filename, []byte("#!/bin/sh\nprintf '%s version 5.1 contract-test\\n' '"+name+"'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return filename

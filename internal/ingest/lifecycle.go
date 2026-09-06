@@ -109,7 +109,7 @@ func (p *Pipeline) observeRemainingObjects(index int, flows []FlowResult) error 
 			if object.reported {
 				continue
 			}
-			if object.Status == ObjectStatusPlanned && !p.config.DryRun {
+			if object.Status == ObjectStatusPlanned && p.config.DryRunMode == DryRunOff {
 				object.Disposition = ObjectDispositionUnattempted
 			}
 			finalizeObjectResult(object)

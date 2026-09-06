@@ -55,7 +55,9 @@ parsedNumber:
 		return 0, fmt.Errorf("invalid staging byte budget unit %q; use B, KiB, MiB, GiB, TiB, or their SI equivalents", value[boundary:])
 	}
 	bytes := number * multiplier
-	if bytes > math.MaxInt64 || bytes < 1 {
+	// float64(math.MaxInt64) rounds up to 2^63. Reject equality as well or
+	// converting that rounded value to int64 wraps to a negative budget.
+	if bytes >= float64(math.MaxInt64) || bytes < 1 {
 		return 0, fmt.Errorf("staging byte budget %q is outside the supported byte range", value)
 	}
 	return int64(math.Round(bytes)), nil

@@ -3,29 +3,7 @@ package cli
 import (
 	"bytes"
 	"testing"
-
-	"github.com/spf13/viper"
 )
-
-func TestOutputWidthUsesBoundedColumnsFallback(t *testing.T) {
-	var output bytes.Buffer
-	for _, testCase := range []struct {
-		columns string
-		want    int
-	}{
-		{columns: "42", want: 42},
-		{columns: "19", want: fallbackOutputWidth},
-		{columns: "1001", want: fallbackOutputWidth},
-		{columns: "not-a-number", want: fallbackOutputWidth},
-	} {
-		t.Run(testCase.columns, func(t *testing.T) {
-			t.Setenv("COLUMNS", testCase.columns)
-			if got := outputWidth(&output); got != testCase.want {
-				t.Fatalf("output width = %d, want %d", got, testCase.want)
-			}
-		})
-	}
-}
 
 func TestHumanColorPolicyIsExplicitAndAccessible(t *testing.T) {
 	for _, testCase := range []struct {
@@ -46,8 +24,8 @@ func TestHumanColorPolicyIsExplicitAndAccessible(t *testing.T) {
 			if testCase.noColor {
 				t.Setenv("NO_COLOR", "1")
 			}
-			settings := viper.New()
-			settings.Set("color", testCase.mode)
+			settings := newSettings()
+			t.Setenv("TAMSIN_COLOR", testCase.mode)
 			app := &application{v: settings, stdout: &bytes.Buffer{}}
 			if got := app.humanColorEnabled(); got != testCase.want {
 				t.Fatalf("color enabled = %t, want %t", got, testCase.want)
