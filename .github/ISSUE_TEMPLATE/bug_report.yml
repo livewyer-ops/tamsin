@@ -12,7 +12,7 @@ body:
     attributes:
       label: TAMSin version
       description: Provide the release version and, for an image, its immutable digest.
-      placeholder: v0.1.0-rc.1 / sha256:...
+      placeholder: v1.0.0 / sha256:...
     validations:
       required: true
   - type: dropdown
