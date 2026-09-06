@@ -6,6 +6,15 @@ pin automation to a reviewed release and read this file before upgrading.
 
 ## Unreleased
 
+- Follow storage-backend pagination and accept optional array-valued tags.
+  Verify both presigned and non-presigned Object URLs, respecting the TAMS 8.2
+  allocation flag and separating URL start deadlines from Object registration
+  lifetimes.
+- Distinguish Matroska from WebM by document type before selecting media types
+  and remuxers. Restrict the media-tool environment, bound verification reads,
+  require response-side upload checksum evidence, and tolerate staging files
+  being removed during directory scans.
+
 ## [1.0.0] - 2026-08-12
 
 This public release-candidate series establishes TAMSin's supported product,

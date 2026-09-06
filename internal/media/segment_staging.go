@@ -99,21 +99,34 @@ func (b *segmentBackpressure) resume() error {
 func segmentDirectoryBytes(root string) (int64, error) {
 	var total int64
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if !entry.Type().IsRegular() {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if info.Size() > 0 && total > int64(^uint64(0)>>1)-info.Size() {
-			return errors.New("segment staging size exceeds the supported byte range")
-		}
-		total += info.Size()
-		return nil
+		return addSegmentDirectoryEntry(root, path, entry, walkErr, &total)
 	})
 	return total, err
+}
+
+func addSegmentDirectoryEntry(root, path string, entry os.DirEntry, walkErr error, total *int64) error {
+	if walkErr != nil {
+		// The sink removes a committed Segment while the backpressure sampler
+		// walks the same directory. A vanished child no longer consumes staging;
+		// a missing root still means the staging contract itself was lost.
+		if errors.Is(walkErr, os.ErrNotExist) && path != root {
+			return nil
+		}
+		return walkErr
+	}
+	if !entry.Type().IsRegular() {
+		return nil
+	}
+	info, err := entry.Info()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if info.Size() > 0 && *total > int64(^uint64(0)>>1)-info.Size() {
+		return errors.New("segment staging size exceeds the supported byte range")
+	}
+	*total += info.Size()
+	return nil
 }

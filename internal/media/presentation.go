@@ -29,14 +29,58 @@ const (
 	CadenceVariable
 )
 
-// ProbePresentation walks decoded video frames in presentation order and
-// classifies each video stream's cadence. Output is parsed as it arrives, so a
-// long-running broadcast asset costs a decoder pass but not one in-memory
-// timestamp per frame.
+// ProbePresentation classifies each video stream's cadence from presentation
+// timestamps. Packet timestamps avoid decoding video without frame reordering.
+// Known B-frame reordering goes straight to decoded frames; otherwise missing,
+// duplicated, or non-monotonic packet evidence
+// falls back to decoded frame timestamps rather than weakening the claim.
+// Output is parsed as it arrives, so neither path retains one timestamp per
+// frame in memory.
 func (p FFprobe) ProbePresentation(ctx context.Context, filename string, probe *Probe) error {
 	if probe == nil {
 		return errors.New("presentation probe result is nil")
 	}
+	if !hasCadenceStreams(probe) {
+		return nil
+	}
+	if !hasReorderedVideo(probe) {
+		if complete, err := p.probePresentationMode(ctx, filename, probe, presentationPackets); err != nil {
+			return err
+		} else if complete {
+			return nil
+		}
+	}
+	_, err := p.probePresentationMode(ctx, filename, probe, presentationFrames)
+	return err
+}
+
+func hasReorderedVideo(probe *Probe) bool {
+	for _, stream := range probe.Streams {
+		if stream.CodecType == "video" && stream.Disposition.AttachedPicture == 0 && stream.HasBFrames > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+type presentationMode uint8
+
+const (
+	presentationPackets presentationMode = iota
+	presentationFrames
+)
+
+func hasCadenceStreams(probe *Probe) bool {
+	for index := range probe.Streams {
+		stream := probe.Streams[index]
+		if stream.CodecType == "video" && stream.Disposition.AttachedPicture == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func cadenceStates(probe *Probe) map[int]*cadenceState {
 	states := make(map[int]*cadenceState)
 	for index := range probe.Streams {
 		stream := &probe.Streams[index]
@@ -46,8 +90,16 @@ func (p FFprobe) ProbePresentation(ctx context.Context, filename string, probe *
 		stream.Cadence = CadenceUnknown
 		states[stream.Index] = &cadenceState{stream: stream}
 	}
-	if len(states) == 0 {
-		return nil
+	return states
+}
+
+func (p FFprobe) probePresentationMode(ctx context.Context, filename string, probe *Probe, mode presentationMode) (bool, error) {
+	states := cadenceStates(probe)
+	section, timestampField := "packet", "pts"
+	showArgument := "-show_packets"
+	if mode == presentationFrames {
+		section, timestampField = "frame", "best_effort_timestamp"
+		showArgument = "-show_frames"
 	}
 
 	executable := p.Executable
@@ -57,37 +109,41 @@ func (p FFprobe) ProbePresentation(ctx context.Context, filename string, probe *
 	command := toolCommand(ctx, executable,
 		"-v", "error",
 		"-select_streams", "v",
-		"-show_frames",
-		"-show_entries", "frame=stream_index,best_effort_timestamp",
+		showArgument,
+		"-show_entries", section+"=stream_index,"+timestampField,
 		"-of", "compact=p=0:nk=0",
 		filename,
 	)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("open presentation probe output: %w", err)
+		return false, fmt.Errorf("open presentation probe output: %w", err)
 	}
 	var stderr limitedBuffer
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
-		return fmt.Errorf("start presentation probe %q: %w", filename, err)
+		return false, fmt.Errorf("start presentation probe %q: %w", filename, err)
 	}
 
-	scanErr := scanPresentation(stdout, states)
+	scanErr := scanPresentationTimestamps(stdout, states, timestampField)
 	if scanErr != nil && command.Process != nil {
 		_ = command.Process.Kill()
 	}
 	waitErr := command.Wait()
 	if scanErr != nil {
-		return fmt.Errorf("read presentation probe %q: %w", filename, scanErr)
+		return false, fmt.Errorf("read presentation probe %q: %w", filename, scanErr)
 	}
 	if waitErr != nil {
-		return fmt.Errorf("probe presentation %q: %w: %s", filename, waitErr, strings.TrimSpace(string(stderr.Bytes())))
+		return false, fmt.Errorf("probe presentation %q: %w: %s", filename, waitErr, strings.TrimSpace(string(stderr.Bytes())))
 	}
 
+	complete := true
 	for _, state := range states {
 		state.finish()
+		if state.stream.Cadence == CadenceUnknown {
+			complete = false
+		}
 	}
-	return nil
+	return complete, nil
 }
 
 type cadenceState struct {
@@ -148,12 +204,16 @@ func (s *cadenceState) finish() {
 }
 
 func scanPresentation(reader io.Reader, states map[int]*cadenceState) error {
+	return scanPresentationTimestamps(reader, states, "best_effort_timestamp")
+}
+
+func scanPresentationTimestamps(reader io.Reader, states map[int]*cadenceState, timestampField string) error {
 	scanner := bufio.NewScanner(reader)
 	// Restricted compact output is tiny, but leave headroom for FFprobe side
 	// data it may append despite show_entries (for example an H.264 SEI label).
 	scanner.Buffer(make([]byte, 4096), 1<<20)
 	for scanner.Scan() {
-		index, timestamp, ok := compactPresentationFields(scanner.Text())
+		index, timestamp, ok := compactTimestampFields(scanner.Text(), timestampField)
 		if !ok {
 			continue
 		}
@@ -170,7 +230,7 @@ func scanPresentation(reader io.Reader, states map[int]*cadenceState) error {
 	return scanner.Err()
 }
 
-func compactPresentationFields(line string) (int, string, bool) {
+func compactTimestampFields(line, timestampField string) (int, string, bool) {
 	index := -1
 	timestamp := ""
 	for line != "" {
@@ -183,7 +243,7 @@ func compactPresentationFields(line string) (int, string, bool) {
 				if err == nil {
 					index = parsed
 				}
-			case "best_effort_timestamp":
+			case timestampField:
 				timestamp = value
 			}
 		}

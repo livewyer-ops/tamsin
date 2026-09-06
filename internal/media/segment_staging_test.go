@@ -1,11 +1,35 @@
 package media
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 )
+
+type disappearingSegmentEntry struct{}
+
+func (disappearingSegmentEntry) Name() string               { return "gone.ts" }
+func (disappearingSegmentEntry) IsDir() bool                { return false }
+func (disappearingSegmentEntry) Type() fs.FileMode          { return 0 }
+func (disappearingSegmentEntry) Info() (fs.FileInfo, error) { return nil, os.ErrNotExist }
+
+func TestSegmentDirectorySamplingToleratesRemovedChildrenOnly(t *testing.T) {
+	t.Parallel()
+	total := int64(0)
+	if err := addSegmentDirectoryEntry("/segments", "/segments/gone.ts", disappearingSegmentEntry{}, nil, &total); err != nil {
+		t.Fatalf("vanished entry failed sampling: %v", err)
+	}
+	if err := addSegmentDirectoryEntry("/segments", "/segments/gone.ts", nil, os.ErrNotExist, &total); err != nil {
+		t.Fatalf("vanished walk child failed sampling: %v", err)
+	}
+	err := addSegmentDirectoryEntry("/segments", "/segments", nil, os.ErrNotExist, &total)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing staging root error = %v, want os.ErrNotExist", err)
+	}
+}
 
 type fakeStagingProcess struct {
 	mu      sync.Mutex

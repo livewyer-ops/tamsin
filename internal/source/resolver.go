@@ -136,7 +136,7 @@ func New(config Config) *Resolver {
 		client = http.DefaultClient
 	}
 	headers := config.HTTPHeaders.Clone()
-	client = sourceHTTPClient(client, headers)
+	client = HTTPClientWithSafeRedirects(client, headers)
 	stdin := config.Stdin
 	if stdin == nil {
 		stdin = os.Stdin
@@ -238,6 +238,9 @@ func (r *Resolver) resolveOne(ctx context.Context, input, relativeTo string) ([]
 		}
 		return r.resolveS3(ctx, parsed)
 	case "http", "https":
+		if parsed.User != nil {
+			return nil, errors.New("HTTP input must not include userinfo; use --input-header or configured authentication instead")
+		}
 		parsed.Fragment = ""
 		return r.resolveHTTP(parsed)
 	case "file":
@@ -933,11 +936,18 @@ func isNotFound(err error) bool {
 	return false
 }
 
-func sourceHTTPClient(base *http.Client, headers http.Header) *http.Client {
+// HTTPClientWithSafeRedirects returns a shallow copy of base whose redirect
+// policy never forwards caller-configured input credentials to another
+// origin. It must be applied to the client which actually follows redirects;
+// wrapping only an outer RoundTripper is insufficient when that transport has
+// its own HTTP client.
+func HTTPClientWithSafeRedirects(base *http.Client, headers http.Header) *http.Client {
 	client := *base
 	originalPolicy := client.CheckRedirect
 	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
 		if len(via) > 0 && !sameOrigin(via[0].URL, request.URL) {
+			request.Header.Del("Authorization")
+			request.Header.Del("Proxy-Authorization")
 			for name := range headers {
 				request.Header.Del(name)
 			}

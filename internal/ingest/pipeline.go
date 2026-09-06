@@ -56,7 +56,7 @@ type TAMSClient interface {
 	ListSegments(context.Context, string, tams.SegmentListOptions) ([]tams.Segment, error)
 	Object(context.Context, string) (tams.ObjectInfo, error)
 	UploadFile(context.Context, tams.PresignedURL, string) (tams.UploadReceipt, error)
-	DownloadDigest(context.Context, tams.PresignedURL) (int64, string, error)
+	DownloadDigest(context.Context, tams.PresignedURL, int64) (int64, string, error)
 }
 
 // collectedFlow is a mono-essence Flow with its assigned identifier, ready to
@@ -1953,19 +1953,9 @@ func (p *Pipeline) chunkSize(remaining []preparedObject, throughput float64) int
 	return min(max(fits, 1), len(remaining))
 }
 
-// outlastsURL reports how long an upload is expected to take and whether that
-// is longer than the URL it will be sent to remains valid.
-//
-// This is the case batching cannot help with. Committing in smaller batches
-// bounds how long an Object waits before its turn, but a single Object large
-// enough takes longer than its URL lasts however few of them are in flight, and
-// the upload then fails against a URL that no retry can revive. Naming the
-// Object beats leaving an expiry to be inferred from a rejected PUT.
-//
-// It answers false whenever it does not know: an unmeasured rate or an
-// unadvertised lifetime is not evidence of a problem, and guessing would put a
-// warning in front of an operator who can do nothing with it.
-func outlastsURL(size int64, throughput float64, lifetime time.Duration) (time.Duration, bool) {
+// outlastsRegistration estimates whether upload alone exceeds the Object's
+// registration lifetime. URL expiry only limits when a transfer may start.
+func outlastsRegistration(size int64, throughput float64, lifetime time.Duration) (time.Duration, bool) {
 	if lifetime <= 0 || throughput <= 0 || size <= 0 {
 		return 0, false
 	}
@@ -2060,7 +2050,10 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []
 		uploadStartBefore = time.Now().Add(p.limits.PresignedURL)
 	}
 	for _, allocated := range allocation.MediaObjects {
-		allocated.PutURL.StartBefore = uploadStartBefore
+		// Before 8.2 the allocation response did not identify presigned URLs.
+		if !p.apiVersion.AtLeast(8, 2) || allocated.Presigned != nil && *allocated.Presigned {
+			allocated.PutURL.StartBefore = uploadStartBefore
+		}
 		destinations[allocated.ObjectID] = allocated.PutURL
 	}
 	// Validate the complete response before starting any transfer. Returning
@@ -2073,16 +2066,13 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []
 		}
 	}
 
-	// Batching bounds the time an Object waits in a queue, but not the time one
-	// Object takes on its own. A large enough Media Object outlives the URL it
-	// was given however small the batch is, and the upload then fails on a URL
-	// no retry can revive, so it is worth saying which Object and why rather
-	// than leaving an expiry to be diagnosed from a 403.
+	// A single large Object may exceed the registration window even with no
+	// queue. Warn without changing the selected media treatment.
 	for _, object := range chunk {
-		if expected, oversized := outlastsURL(object.size, throughput, p.limits.PresignedURL); oversized {
-			p.logger.Warn("media object may outlast the upload URL issued for it",
+		if expected, oversized := outlastsRegistration(object.size, throughput, p.limits.ObjectRegistration); oversized {
+			p.logger.Warn("media object upload may exceed its registration lifetime",
 				"flow_id", flowID, "object_id", object.id, "bytes", object.size,
-				"estimated_upload", expected.Round(time.Second), "url_lifetime", p.limits.PresignedURL)
+				"estimated_upload", expected.Round(time.Second), "registration_lifetime", p.limits.ObjectRegistration)
 		}
 	}
 
@@ -2818,7 +2808,16 @@ func (p *Pipeline) verifyObject(ctx context.Context, expected preparedObject, se
 	if len(segment.GetURLs) == 0 {
 		return fmt.Errorf("segment %s has no download URL for verification", expected.id)
 	}
-	size, checksum, err := p.client.DownloadDigest(ctx, segment.GetURLs[0])
+	// A service may also list direct storage URLs that require separate credentials.
+	// Prefer its presigned access route when one is available.
+	download := segment.GetURLs[0]
+	for _, candidate := range segment.GetURLs {
+		if candidate.Presigned {
+			download = candidate
+			break
+		}
+	}
+	size, checksum, err := p.client.DownloadDigest(ctx, download, expected.size)
 	if err != nil {
 		return fmt.Errorf("verify object %s: %w", expected.id, err)
 	}

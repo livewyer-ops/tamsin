@@ -17,7 +17,11 @@ import (
 
 func registrationFixture(t *testing.T, client *fakeClient, objects, transfers int, verify bool) (*Pipeline, []preparedObject, []ObjectResult) {
 	t.Helper()
-	pipeline, err := New(Config{Concurrency: 1, Transfers: transfers, Verify: verify},
+	verification := VerificationNone
+	if verify {
+		verification = VerificationReadback
+	}
+	pipeline, err := New(Config{Concurrency: 1, Transfers: transfers, VerificationMode: verification},
 		client, fakeProber{}, nil, discardLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -46,6 +50,54 @@ func registrationFixture(t *testing.T, client *fakeClient, objects, transfers in
 func commitRegistrationFixture(ctx context.Context, pipeline *Pipeline, objects []preparedObject, results []ObjectResult) error {
 	_, _, err := pipeline.commitChunk(ctx, "flow", objects, results, "storage", 0)
 	return err
+}
+
+type uploadDeadlineClient struct {
+	*fakeClient
+	presigned    *bool
+	wantDeadline bool
+}
+
+func (c uploadDeadlineClient) AllocateStorage(ctx context.Context, flowID string, request tams.StorageRequest) (tams.StorageResponse, error) {
+	response, err := c.fakeClient.AllocateStorage(ctx, flowID, request)
+	for index := range response.MediaObjects {
+		response.MediaObjects[index].Presigned = c.presigned
+	}
+	return response, err
+}
+
+func (c uploadDeadlineClient) UploadFile(ctx context.Context, destination tams.PresignedURL, filename string) (tams.UploadReceipt, error) {
+	if destination.StartBefore.IsZero() == c.wantDeadline {
+		return tams.UploadReceipt{}, fmt.Errorf("upload start deadline = %s, want deadline=%t", destination.StartBefore, c.wantDeadline)
+	}
+	return c.fakeClient.UploadFile(ctx, destination, filename)
+}
+
+func TestUploadDeadlineFollowsTheAllocationPresignedFlag(t *testing.T) {
+	t.Parallel()
+	yes, no := true, false
+	for _, test := range []struct {
+		name         string
+		minor        int
+		presigned    *bool
+		wantDeadline bool
+	}{
+		{"8.2 presigned", 2, &yes, true},
+		{"8.2 non-presigned", 2, &no, false},
+		{"8.2 omitted", 2, nil, false},
+		{"8.1 fallback", 1, nil, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := newFakeClient()
+			pipeline, objects, results := registrationFixture(t, client, 1, 1, false)
+			pipeline.client = uploadDeadlineClient{client, test.presigned, test.wantDeadline}
+			pipeline.apiVersion = tams.APIVersion{Major: 8, Minor: test.minor}
+			pipeline.limits = tams.ServiceLimits{ObjectRegistration: 300 * time.Second, PresignedURL: 30 * time.Second}
+			if err := commitRegistrationFixture(context.Background(), pipeline, objects, results); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }
 
 func TestAutomaticVerificationUsesStorageEvidenceAndFallsBackToReadback(t *testing.T) {
@@ -304,19 +356,20 @@ func TestRegistrationCleanupUsesOneSharedDeadline(t *testing.T) {
 	pipeline, objects, results := registrationFixture(t, client, 5, 1, true)
 	pipeline.registrationRecoveryTimeout = 40 * time.Millisecond
 
-	started := time.Now()
 	err := commitRegistrationFixture(context.Background(), pipeline, objects, results)
-	elapsed := time.Since(started)
 	if err == nil {
 		t.Fatal("deadline-bound cleanup unexpectedly succeeded")
 	}
-	if elapsed > 200*time.Millisecond {
-		t.Fatalf("five cleanups took %s; the deadline appears to have been renewed per Object", elapsed)
-	}
 	client.lock.Lock()
 	deletions := len(client.deletedTimeranges)
+	deadlines := append([]time.Time(nil), client.deleteDeadlines...)
 	client.lock.Unlock()
 	if deletions != len(objects) {
 		t.Fatalf("attempted %d of %d cleanups under the shared deadline", deletions, len(objects))
+	}
+	for index, deadline := range deadlines {
+		if deadline.IsZero() || !deadline.Equal(deadlines[0]) {
+			t.Fatalf("cleanup %d deadline = %s, want one shared deadline %s", index, deadline, deadlines[0])
+		}
 	}
 }

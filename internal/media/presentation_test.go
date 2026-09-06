@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -46,12 +47,24 @@ func TestPresentationTimestampClassification(t *testing.T) {
 	}
 }
 
+func TestPacketTimestampClassificationUsesTheSameStrictRules(t *testing.T) {
+	t.Parallel()
+	stream := Stream{Index: 7, CodecType: "video", AverageFrameRate: "25/1"}
+	state := &cadenceState{stream: &stream}
+	if err := scanPresentationTimestamps(strings.NewReader(
+		"stream_index=7|pts=0\nstream_index=7|pts=40\nstream_index=7|pts=35\n"),
+		map[int]*cadenceState{7: state}, "pts"); err != nil {
+		t.Fatal(err)
+	}
+	state.finish()
+	if stream.Cadence != CadenceUnknown {
+		t.Fatalf("non-monotonic packet timestamps produced cadence %v, want unknown and decoded-frame fallback", stream.Cadence)
+	}
+}
+
 // TestProbePresentationDistinguishesVariableCadence is the real-media guard
-// against falling back to avg_frame_rate/r_frame_rate heuristics. The fixed
-// fixture deliberately uses 30000/1001 fps on Matroska's millisecond time base,
-// producing alternating 33/34-tick intervals that are quantisation, not VFR.
-// The variable fixture joins 24 and 30 fps sections and must be identified from
-// presentation timestamps even when FFprobe's summary rate is unusable.
+// against falling back to avg_frame_rate/r_frame_rate heuristics. It also pins
+// the packet fast path and decoded-frame fallback on real media.
 func TestProbePresentationDistinguishesVariableCadence(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("needs ffmpeg")
@@ -66,6 +79,11 @@ func TestProbePresentationDistinguishesVariableCadence(t *testing.T) {
 		"-f", "lavfi", "-i", "testsrc=size=128x96:rate=30000/1001:duration=2",
 		"-c:v", "ffv1", fixed,
 	)
+	reordered := filepath.Join(directory, "reordered.mp4")
+	buildFixture(t,
+		"-f", "lavfi", "-i", "testsrc2=size=128x96:rate=25:duration=2",
+		"-c:v", "libx264", "-bf", "3", "-x264-params", "b-adapt=0", reordered,
+	)
 	variable := filepath.Join(directory, "variable.mkv")
 	buildFixture(t,
 		"-f", "lavfi", "-i", "testsrc=size=128x96:rate=24:duration=1",
@@ -79,24 +97,43 @@ func TestProbePresentationDistinguishesVariableCadence(t *testing.T) {
 		path string
 		want CadenceEvidence
 	}{
-		{name: "fixed", path: fixed, want: CadenceFixed},
+		{name: "fixed quantised", path: fixed, want: CadenceFixed},
+		{name: "fixed reordered", path: reordered, want: CadenceFixed},
 		{name: "variable", path: variable, want: CadenceVariable},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			prober := FFprobe{}
-			probe, err := prober.Probe(context.Background(), testCase.path)
+			packetProbe, err := prober.Probe(context.Background(), testCase.path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := prober.ProbePresentation(context.Background(), testCase.path, &probe); err != nil {
+			complete, err := prober.probePresentationMode(context.Background(), testCase.path, &packetProbe, presentationPackets)
+			if err != nil {
 				t.Fatal(err)
 			}
-			if got := probe.Streams[0].Cadence; got != testCase.want {
+			if testCase.path == reordered {
+				if packetProbe.Streams[0].HasBFrames == 0 || complete {
+					t.Fatal("fixture must contain B-frames and non-monotonic packet PTS")
+				}
+			} else if !complete || packetProbe.Streams[0].Cadence != testCase.want {
+				t.Fatal("packet evidence did not classify non-reordered media correctly")
+			}
+			frameProbe, err := prober.Probe(context.Background(), testCase.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := prober.probePresentationMode(context.Background(), testCase.path, &frameProbe, presentationFrames); err != nil {
+				t.Fatal(err)
+			}
+			if err := prober.ProbePresentation(context.Background(), testCase.path, &packetProbe); err != nil {
+				t.Fatal(err)
+			}
+			if got := packetProbe.Streams[0].Cadence; got != testCase.want || got != frameProbe.Streams[0].Cadence {
 				t.Fatalf("Cadence = %v, want %v (avg=%q real=%q)",
-					got, testCase.want, probe.Streams[0].AverageFrameRate, probe.Streams[0].RealFrameRate)
+					got, testCase.want, packetProbe.Streams[0].AverageFrameRate, packetProbe.Streams[0].RealFrameRate)
 			}
 
-			flow, _, err := BuildFlow(probe, testIdentity(), "video/matroska", EssenceStorageMuxed)
+			flow, _, err := BuildFlow(packetProbe, testIdentity(), "video/matroska", EssenceStorageMuxed)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -153,6 +190,23 @@ func buildFixture(t *testing.T, arguments ...string) {
 	arguments = append([]string{"-hide_banner", "-loglevel", "error", "-y"}, arguments...)
 	command := exec.Command("ffmpeg", arguments...)
 	if output, err := command.CombinedOutput(); err != nil {
-		t.Skipf("could not build real-media fixture: %v\n%s", err, output)
+		t.Fatalf("could not build real-media fixture: %v\n%s", err, output)
+	}
+}
+
+func TestReorderedVideoSkipsPacketScan(t *testing.T) {
+	// Keep executable creation outside parallel tests: another fork can inherit
+	// its writable descriptor until exec and cause a transient ETXTBSY.
+	executable := filepath.Join(t.TempDir(), "ffprobe")
+	// A packet scan would fail: only a decoded-frame invocation is accepted.
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\ncase \" $* \" in *' -show_frames '*) printf 'stream_index=0|best_effort_timestamp=0\\nstream_index=0|best_effort_timestamp=40\\n';; *) exit 1;; esac\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	probe := Probe{Streams: []Stream{{CodecType: "video", HasBFrames: 2, AverageFrameRate: "25/1"}}}
+	if err := (FFprobe{Executable: executable}).ProbePresentation(context.Background(), "fixture.mp4", &probe); err != nil {
+		t.Fatal(err)
+	}
+	if probe.Streams[0].Cadence != CadenceFixed {
+		t.Fatal("decoded-frame evidence was not used")
 	}
 }

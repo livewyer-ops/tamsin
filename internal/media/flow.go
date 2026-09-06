@@ -2,6 +2,7 @@ package media
 
 import (
 	"fmt"
+	"math/bits"
 	"mime"
 	"net/http"
 	"os"
@@ -422,7 +423,58 @@ func DetectContentType(filename string) (string, error) {
 	if err != nil && read == 0 {
 		return "", fmt.Errorf("read input for content detection: %w", err)
 	}
-	return normalizeMIME(http.DetectContentType(buffer[:read])), nil
+	data := buffer[:read]
+	detected := http.DetectContentType(data)
+	if detected == "video/webm" {
+		// The standard sniffer recognises EBML, not its document type.
+		detected = "application/octet-stream"
+		if id, header, _ := ebmlElement(data); id == 0x1a45dfa3 {
+			for len(header) > 0 {
+				id, value, rest := ebmlElement(header)
+				if id == 0x4282 { // RFC 8794 DocType, within the EBML header only.
+					switch strings.TrimRight(string(value), "\x00") {
+					case "webm":
+						detected = "video/webm"
+					case "matroska":
+						detected = "video/matroska"
+					}
+					break
+				}
+				header = rest
+			}
+		}
+	}
+	return normalizeMIME(detected), nil
+}
+
+// ebmlElement reads one complete element from the bounded content-sniff buffer.
+// Invalid or incomplete elements return an empty remainder, ending the scan.
+func ebmlElement(data []byte) (id uint64, value, rest []byte) {
+	var fields [2]uint64
+	for index := range fields {
+		if len(data) == 0 || data[0] == 0 {
+			return 0, nil, nil
+		}
+		width := bits.LeadingZeros8(data[0]) + 1
+		if width > len(data) || index == 0 && width > 4 {
+			return 0, nil, nil
+		}
+		fields[index] = uint64(data[0])
+		if index == 1 {
+			fields[index] &^= 1 << (8 - width)
+		}
+		for _, octet := range data[1:width] {
+			fields[index] = fields[index]<<8 | uint64(octet)
+		}
+		if index == 1 && fields[index] == 1<<(7*width)-1 {
+			return 0, nil, nil
+		}
+		data = data[width:]
+	}
+	if fields[1] > uint64(len(data)) {
+		return 0, nil, nil
+	}
+	return fields[0], data[:fields[1]], data[fields[1]:]
 }
 
 func contentStreams(streams []Stream) []Stream {
@@ -561,9 +613,9 @@ func unsupportedContainer() containerDescription {
 func describeContainer(format Format, streamType, detected string) containerDescription {
 	names := ffprobeFormatNames(format.Name)
 
-	// FFprobe reports WebM as "matroska,webm". Test the constrained subtype
-	// before its parent family or every WebM Object becomes Matroska.
-	if names["webm"] {
+	// FFprobe uses the same demuxer name for both formats. Only content-derived
+	// WebM evidence identifies the constrained subtype of that family.
+	if names["webm"] && (!names["matroska"] || normalizeMIME(detected) == "video/webm" || normalizeMIME(detected) == "audio/webm") {
 		return essenceContainer(streamType, "video/webm", "audio/webm")
 	}
 	if names["matroska"] {
@@ -635,10 +687,10 @@ func ffprobeFormatNames(value string) map[string]bool {
 // that unsupported treatment fail before TAMS is mutated.
 func SourceSegmentContainer(format Format, detected string) SegmentContainer {
 	names := ffprobeFormatNames(format.Name)
-	if names["webm"] {
-		return SegmentContainer{Muxer: "webm", Extension: ".webm"}
-	}
-	if names["matroska"] {
+	if names["webm"] || names["matroska"] {
+		if describeContainer(format, "video", detected).mediaType == "video/webm" {
+			return SegmentContainer{Muxer: "webm", Extension: ".webm"}
+		}
 		return SegmentContainer{Muxer: "matroska", Extension: ".mkv"}
 	}
 	if names["mov"] || names["mp4"] || names["m4a"] || names["3gp"] || names["3g2"] || names["mj2"] {

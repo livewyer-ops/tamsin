@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/livewyer-ops/tamsin/internal/tams"
 	"github.com/spf13/cobra"
 )
 
@@ -98,6 +99,10 @@ func exitCode(err error) int {
 	var exitError *ExitError
 	if errors.As(err, &exitError) {
 		return exitError.Code
+	}
+	var requestTimeout *tams.RequestTimeoutError
+	if errors.As(err, &requestTimeout) {
+		return ExitRemote
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return ExitInterrupted

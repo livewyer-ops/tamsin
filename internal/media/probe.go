@@ -8,17 +8,44 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const maxToolOutput = 4 << 20
 
+const (
+	MinimumFFmpegMajor = 5
+	MinimumFFmpegMinor = 1
+)
+
+var toolVersionPattern = regexp.MustCompile(`^[nN]?([0-9]+)(?:\.([0-9]+))?`)
+
+var mediaToolEnvironmentNames = map[string]struct{}{
+	"PATH": {}, "HOME": {}, "TMPDIR": {}, "TMP": {}, "TEMP": {},
+	"TZ": {}, "LANG": {}, "LANGUAGE": {},
+	"LC_ALL": {}, "LC_COLLATE": {}, "LC_CTYPE": {}, "LC_MESSAGES": {},
+	"LC_MONETARY": {}, "LC_NUMERIC": {}, "LC_TIME": {}, "LC_PAPER": {},
+	"LC_NAME": {}, "LC_ADDRESS": {}, "LC_TELEPHONE": {},
+	"LC_MEASUREMENT": {}, "LC_IDENTIFICATION": {},
+	"SSL_CERT_FILE": {}, "SSL_CERT_DIR": {},
+	"LD_LIBRARY_PATH": {}, "DYLD_LIBRARY_PATH": {}, "DYLD_FALLBACK_LIBRARY_PATH": {},
+	"FONTCONFIG_FILE": {}, "FONTCONFIG_PATH": {}, "FREI0R_PATH": {},
+	"LIBVA_DRIVER_NAME": {}, "LIBVA_DRIVERS_PATH": {}, "VDPAU_DRIVER": {}, "VDPAU_DRIVER_PATH": {},
+	"LIBGL_DRIVERS_PATH": {}, "VK_ICD_FILENAMES": {}, "VK_DRIVER_FILES": {},
+	"CUDA_VISIBLE_DEVICES": {}, "NVIDIA_VISIBLE_DEVICES": {}, "NVIDIA_DRIVER_CAPABILITIES": {},
+	"OMP_NUM_THREADS": {}, "XDG_RUNTIME_DIR": {}, "DISPLAY": {}, "WAYLAND_DISPLAY": {},
+	"SYSTEMROOT": {}, "WINDIR": {}, "PATHEXT": {},
+}
+
 type Stream struct {
 	Index         int    `json:"index"`
 	CodecName     string `json:"codec_name"`
 	CodecLongName string `json:"codec_long_name"`
 	CodecType     string `json:"codec_type"`
+	HasBFrames    int    `json:"has_b_frames"`
 	Profile       string `json:"profile"`
 	Width         int    `json:"width"`
 	Height        int    `json:"height"`
@@ -110,6 +137,39 @@ func (p FFprobe) Version(ctx context.Context) (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
+// ValidateToolVersion checks the stable first-line version banner emitted by
+// FFmpeg-family tools. Builds older than 5.1 lack TAMSin's supported behaviour
+// baseline and are rejected before media processing starts.
+func ValidateToolVersion(report, tool string) error {
+	fields := strings.Fields(report)
+	versionIndex := -1
+	for index, field := range fields {
+		if strings.EqualFold(field, "version") {
+			versionIndex = index + 1
+			break
+		}
+	}
+	if versionIndex < 0 || versionIndex >= len(fields) {
+		return fmt.Errorf("%s version could not be determined; version %d.%d or newer is required",
+			tool, MinimumFFmpegMajor, MinimumFFmpegMinor)
+	}
+	match := toolVersionPattern.FindStringSubmatch(fields[versionIndex])
+	if match == nil {
+		return fmt.Errorf("%s version could not be determined; version %d.%d or newer is required",
+			tool, MinimumFFmpegMajor, MinimumFFmpegMinor)
+	}
+	major, _ := strconv.Atoi(match[1])
+	minor := 0
+	if match[2] != "" {
+		minor, _ = strconv.Atoi(match[2])
+	}
+	if major < MinimumFFmpegMajor || major == MinimumFFmpegMajor && minor < MinimumFFmpegMinor {
+		return fmt.Errorf("%s %d.%d is unsupported; version %d.%d or newer is required",
+			tool, major, minor, MinimumFFmpegMajor, MinimumFFmpegMinor)
+	}
+	return nil
+}
+
 // PresentationProber augments a container/stream probe with evidence that
 // requires walking the media timeline. Keeping it separate from Prober avoids
 // decoding every generated Segment when the ingest pipeline only needs its
@@ -136,6 +196,7 @@ func runTool(ctx context.Context, executable string, arguments ...string) ([]byt
 // first lets it close readers and still bounds an uncooperative exit.
 func toolCommand(ctx context.Context, executable string, arguments ...string) *exec.Cmd {
 	command := exec.CommandContext(ctx, executable, arguments...)
+	command.Env = mediaToolEnvironment(os.Environ())
 	command.WaitDelay = 5 * time.Second
 	command.Cancel = func() error {
 		if command.Process == nil {
@@ -144,6 +205,20 @@ func toolCommand(ctx context.Context, executable string, arguments ...string) *e
 		return command.Process.Signal(os.Interrupt)
 	}
 	return command
+}
+
+func mediaToolEnvironment(environ []string) []string {
+	result := make([]string, 0, len(mediaToolEnvironmentNames))
+	for _, entry := range environ {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if _, allowed := mediaToolEnvironmentNames[strings.ToUpper(name)]; allowed {
+			result = append(result, entry)
+		}
+	}
+	return result
 }
 
 type limitedBuffer struct {

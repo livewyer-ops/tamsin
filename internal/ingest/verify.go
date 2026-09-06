@@ -193,8 +193,7 @@ func (p *Pipeline) verifyOneWithRetraction(ctx context.Context, recovery func() 
 	// A whole-Flow listing generates every GET URL before bounded verification
 	// workers can consume them. Hold this worker's global slot first, then ask
 	// for only this exact registered Segment. Nothing queues between issuance
-	// and DownloadDigest, and a failed/omitted fresh listing still enters the P0
-	// terminal-state path below.
+	// and DownloadDigest. A failed listing still requires retraction.
 	if p.limits.PresignedURL > 0 {
 		segments, listErr := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{
 			ObjectID: task.object.id, Timerange: task.object.timerange, IncludeDownloadURLs: true,
@@ -211,7 +210,9 @@ func (p *Pipeline) verifyOneWithRetraction(ctx context.Context, recovery func() 
 		task.segment = *segment
 		startBefore := time.Now().Add(p.limits.PresignedURL)
 		for index := range task.segment.GetURLs {
-			task.segment.GetURLs[index].StartBefore = startBefore
+			if task.segment.GetURLs[index].Presigned {
+				task.segment.GetURLs[index].StartBefore = startBefore
+			}
 		}
 	}
 

@@ -18,16 +18,15 @@ type Flow map[string]any
 type Profile map[string]any
 
 type StorageBackend struct {
-	ID               string            `json:"id"`
-	Label            string            `json:"label,omitempty"`
-	DefaultStorage   bool              `json:"default_storage,omitempty"`
-	Type             string            `json:"type,omitempty"` // TAMS 8.1/TAMOSS compatibility.
-	StoreType        string            `json:"store_type,omitempty"`
-	Provider         string            `json:"provider,omitempty"`
-	Region           string            `json:"region,omitempty"`
-	AvailabilityZone string            `json:"availability_zone,omitempty"`
-	StoreProduct     string            `json:"store_product,omitempty"`
-	Tags             map[string]string `json:"tags,omitempty"`
+	ID               string `json:"id"`
+	Label            string `json:"label,omitempty"`
+	DefaultStorage   bool   `json:"default_storage,omitempty"`
+	Type             string `json:"type,omitempty"` // TAMS 8.1/TAMOSS compatibility.
+	StoreType        string `json:"store_type,omitempty"`
+	Provider         string `json:"provider,omitempty"`
+	Region           string `json:"region,omitempty"`
+	AvailabilityZone string `json:"availability_zone,omitempty"`
+	StoreProduct     string `json:"store_product,omitempty"`
 }
 
 type StorageRequest struct {
@@ -62,8 +61,9 @@ type UploadReceipt struct {
 // PresignedURL accepts both the upstream v8.1 "content-type" member and the
 // newer TAMOSS headers object without losing provider-required headers.
 type PresignedURL struct {
-	URL     string            `json:"url"`
-	Headers map[string]string `json:"headers,omitempty"`
+	URL       string            `json:"url"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	Presigned bool              `json:"presigned,omitempty"`
 	// StartBefore is the latest time another HTTP attempt may begin. It is
 	// populated by the ingest scheduler from min_presigned_url_timeout after a
 	// URL-producing response arrives and is deliberately not part of TAMS JSON.
@@ -77,11 +77,13 @@ func (p *PresignedURL) UnmarshalJSON(data []byte) error {
 		URL         string            `json:"url"`
 		Headers     map[string]string `json:"headers"`
 		ContentType string            `json:"content-type"`
+		Presigned   bool              `json:"presigned"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	p.URL = raw.URL
+	p.Presigned = raw.Presigned
 	p.StartBefore = time.Time{}
 	var err error
 	p.Headers, err = normalizePresignedHeaders(raw.Headers)
