@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/livewyer-ops/tamsin/contracts"
 	"github.com/livewyer-ops/tamsin/internal/tams"
+	"github.com/livewyer-ops/tamsin/internal/tamsschema"
 )
 
 type flowProfileAssignment struct {
@@ -171,7 +171,7 @@ func (p *Pipeline) loadFlowProfile(ctx context.Context, profileID string) (tams.
 	if err != nil {
 		return nil, fmt.Errorf("read TAMS Flow Profile %s: %w", profileID, err)
 	}
-	if err := contracts.ValidateProfile(profile); err != nil {
+	if err := tamsschema.ValidateProfile(profile); err != nil {
 		return nil, fmt.Errorf("TAMS Flow Profile %s is invalid at %w", profileID, err)
 	}
 	if stringField(profile, "id") != profileID {
@@ -202,11 +202,12 @@ func (p *Pipeline) expandFlowProfile(ctx context.Context, member graphFlow) (gra
 		mismatch := firstJSONValueMismatch(appendJSONPointer("/flow_metadata", field),
 			generated, generatedPresent, required, requiredPresent)
 		if mismatch != nil {
-			return graphFlow{}, fmt.Errorf(
+			err := fmt.Errorf(
 				"flow %s does not exactly match TAMS Flow Profile %s at %s (generated=%s profile=%s)",
 				member.id, member.profileID, mismatch.path,
 				formatJSONMismatchValue(mismatch.generated, mismatch.generatedPresent),
 				formatJSONMismatchValue(mismatch.profile, mismatch.profilePresent))
+			return graphFlow{}, withFailure(FailureCodeFlowPlanFailed, profileMismatchMessage(mismatch), true, err)
 		}
 	}
 	expanded := maps.Clone(member.flow)
@@ -216,6 +217,38 @@ func (p *Pipeline) expandFlowProfile(ctx context.Context, member graphFlow) (gra
 	expanded["profile_id"] = member.profileID
 	member.flow = expanded
 	return member, nil
+}
+
+func profileMismatchMessage(mismatch *jsonValueMismatch) string {
+	// Only contract field names reach public diagnostics. Extension keys can
+	// contain credentials or terminal controls, just like metadata values.
+	path := ""
+	for _, part := range strings.Split(strings.TrimPrefix(mismatch.path, "/"), "/") {
+		switch part {
+		case "flow_metadata", "format", "codec", "container", "segment_duration", "container_mapping",
+			"essence_parameters", "numerator", "denominator", "frame_width", "frame_height", "frame_rate",
+			"sample_rate", "channels", "bit_depth", "interlace_mode", "colorspace", "transfer_characteristic",
+			"aspect_ratio", "pixel_aspect_ratio", "component_type", "horiz_chroma_subs", "vert_chroma_subs",
+			"unc_parameters", "unc_type", "avc_parameters", "profile", "level", "flags", "vfr", "init_segments", "data_type":
+		default:
+			part = "<redacted>"
+		}
+		if len(path)+len(part) > 240 {
+			path += "/<redacted>"
+			break
+		}
+		path += "/" + part
+		if part == "<redacted>" {
+			break
+		}
+	}
+	reason := "values differ"
+	if !mismatch.generatedPresent {
+		reason = "field missing from generated metadata"
+	} else if !mismatch.profilePresent {
+		reason = "field missing from Profile"
+	}
+	return "TAMS Flow Profile mismatch at " + path + ": " + reason + "."
 }
 
 func flowPutProjection(effective tams.Flow, profileID string) tams.Flow {

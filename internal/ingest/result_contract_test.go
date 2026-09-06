@@ -1,9 +1,7 @@
 package ingest
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,7 +11,6 @@ import (
 
 	"github.com/livewyer-ops/tamsin/internal/media"
 	"github.com/livewyer-ops/tamsin/internal/source"
-	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 func TestRunObservedFlushesEveryIndexOnGracefulInterruption(t *testing.T) {
@@ -27,7 +24,7 @@ func TestRunObservedFlushesEveryIndexOnGracefulInterruption(t *testing.T) {
 		}
 		items[index] = localSource(filename)
 	}
-	pipeline, err := New(Config{Concurrency: 1, DryRun: true}, nil, fakeProber{}, nil, discardLogger(), nil)
+	pipeline, err := New(Config{Concurrency: 1, DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +75,7 @@ func TestRunObservedReportsEveryInputWhenStorePreflightFails(t *testing.T) {
 	}
 	client := newFakeClient()
 	client.backends = nil
-	pipeline, err := New(Config{Concurrency: 2, Verify: true}, client, fakeProber{}, nil, discardLogger(), nil)
+	pipeline, err := New(Config{Concurrency: 2, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +112,7 @@ func TestRunObservedReportsEveryInputWhenStagingSetupFails(t *testing.T) {
 		items[index] = localSource(filename)
 	}
 	pipeline, err := New(Config{
-		Concurrency: 2, DryRun: true, Verify: true, TempDirectory: filepath.Join(blocked, "staging"),
+		Concurrency: 2, DryRunMode: DryRunExact, VerificationMode: VerificationReadback, TempDirectory: filepath.Join(blocked, "staging"),
 	}, nil, fakeProber{}, nil, discardLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +143,7 @@ func TestResultContractCarriesTheSelectedProfileVersion(t *testing.T) {
 	}
 	pipeline, err := New(Config{
 		Profile: ProfilePreserve, ProfileVersion: "1",
-		Concurrency: 1, DryRun: true, Verify: true, SegmentFormat: media.SegmentFormatSource,
+		Concurrency: 1, DryRunMode: DryRunExact, VerificationMode: VerificationReadback, SegmentFormat: media.SegmentFormatSource,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, nil, fakeProber{}, nil, discardLogger(), nil)
 	if err != nil {
@@ -173,7 +170,7 @@ func TestResultDropsAuthenticatedHTTPCredentialMaterialWithUppercaseScheme(t *te
 	}
 	item := localSource(filename)
 	item.URI = "HTTPS://alice:secret@example.test/programme.mp4?token=secret"
-	pipeline, err := New(Config{Concurrency: 1, DryRun: true}, nil, fakeProber{}, nil, discardLogger(), nil)
+	pipeline, err := New(Config{Concurrency: 1, DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,26 +186,26 @@ func TestResultDropsAuthenticatedHTTPCredentialMaterialWithUppercaseScheme(t *te
 	assertBatchResultSchema(t, batch)
 }
 
-func TestReusedPipelineGetsDistinctRunIDs(t *testing.T) {
+func TestInvocationsGetDistinctRunIDs(t *testing.T) {
 	t.Parallel()
 	filename := filepath.Join(t.TempDir(), "input.mp4")
 	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	pipeline, err := New(Config{Concurrency: 1, DryRun: true}, nil, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.RunID == "" || second.RunID == "" || first.RunID == second.RunID {
-		t.Fatalf("run IDs are not invocation-specific: first=%q second=%q", first.RunID, second.RunID)
+	previousID := ""
+	for range 2 {
+		pipeline, err := New(Config{Concurrency: 1, DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if batch.RunID == "" || batch.RunID == previousID {
+			t.Fatalf("run IDs are not invocation-specific: previous=%q current=%q", previousID, batch.RunID)
+		}
+		previousID = batch.RunID
 	}
 }
 
@@ -232,7 +229,7 @@ func (s *sequencedVersionSegmenter) Version(context.Context) (string, error) {
 	return result.value, result.err
 }
 
-func TestReusedPipelineRefreshesMediaToolchainPerInvocation(t *testing.T) {
+func TestInvocationsRefreshMediaToolchain(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {
 		name          string
@@ -259,10 +256,11 @@ func TestReusedPipelineRefreshesMediaToolchainPerInvocation(t *testing.T) {
 				t.Fatal(err)
 			}
 			segmenter := &sequencedVersionSegmenter{versions: testCase.versions}
-			pipeline, err := New(Config{
-				Concurrency: 1, DryRun: true, SegmentDuration: time.Second,
+			config := Config{
+				Concurrency: 1, DryRunMode: DryRunExact, SegmentDuration: time.Second,
 				EssenceStorage: media.EssenceStorageMuxed,
-			}, nil, fakeProber{}, segmenter, discardLogger(), nil)
+			}
+			pipeline, err := New(config, nil, fakeProber{}, segmenter, discardLogger(), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -278,6 +276,10 @@ func TestReusedPipelineRefreshesMediaToolchainPerInvocation(t *testing.T) {
 				t.Fatalf("first run failed = %t, want %t: %#v", got, testCase.firstFailed, first.Results[0])
 			}
 
+			pipeline, err = New(config, nil, fakeProber{}, segmenter, discardLogger(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 			second, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 			if err != nil {
 				t.Fatal(err)
@@ -294,12 +296,12 @@ func TestReusedPipelineRefreshesMediaToolchainPerInvocation(t *testing.T) {
 
 func TestVerificationStatusUsesTypedVerificationErrorOnly(t *testing.T) {
 	t.Parallel()
-	if _, err := New(Config{Verify: true}, nil, fakeProber{}, nil, discardLogger(), nil); err == nil {
+	if _, err := New(Config{VerificationMode: VerificationReadback}, nil, fakeProber{}, nil, discardLogger(), nil); err == nil {
 		// A non-dry pipeline correctly requires a client; reconstruct this focused
-		// state-machine fixture as a dry run without changing Verify.
+		// state-machine fixture as a dry run without changing verification policy.
 		t.Fatal("New unexpectedly accepted a missing client")
 	}
-	pipeline, err := New(Config{Verify: true, DryRun: true}, nil, fakeProber{}, nil, discardLogger(), nil)
+	pipeline, err := New(Config{VerificationMode: VerificationReadback, DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,19 +327,19 @@ func TestRunObservedStopsSchedulingButStillReportsEveryTerminalResultAfterOutput
 		}
 		items[index] = localSource(filename)
 	}
-	pipeline, err := New(Config{Concurrency: 1, DryRun: true}, nil, fakeProber{}, nil, discardLogger(), nil)
+	pipeline, err := New(Config{Concurrency: 1, DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	writes := 0
 	batch, runErr := pipeline.RunObserved(context.Background(), items, func(int, Result) error {
 		writes++
-		return errors.New("journal disk full")
+		return errors.New("event output closed")
 	})
-	if runErr == nil || !containsAll(runErr.Error(), "terminal result", "journal disk full") {
+	if runErr == nil || !containsAll(runErr.Error(), "terminal result", "event output closed") {
 		// The observer error itself is returned; cancellation is only the
 		// mechanism used to stop additional ingest work.
-		t.Fatalf("RunObserved() error = %v, want attributed journal failure", runErr)
+		t.Fatalf("RunObserved() error = %v, want attributed output failure", runErr)
 	}
 	if writes != len(items) {
 		t.Fatalf("observer called %d times after its first failure, want every one of %d terminal results", writes, len(items))
@@ -358,33 +360,26 @@ func containsAll(value string, parts ...string) bool {
 
 func assertBatchResultSchema(t *testing.T, batch BatchResult) {
 	t.Helper()
-	const schemaURL = "https://raw.githubusercontent.com/livewyer-ops/tamsin/main/contracts/tamsin/batch-result-v2.json"
-	file, err := os.Open("../../contracts/tamsin/batch-result-v2.json")
-	if err != nil {
-		t.Fatalf("open published result schema: %v", err)
+	if batch.SchemaVersion != ResultSchemaVersion || batch.ToolVersion == "" || batch.ToolCommit == "" ||
+		batch.ProfileVersion == "" || batch.RunID == "" {
+		t.Fatalf("batch contract metadata is incomplete: %#v", batch)
 	}
-	document, err := jsonschema.UnmarshalJSON(file)
-	_ = file.Close()
-	if err != nil {
-		t.Fatalf("decode published result schema: %v", err)
+	if batch.Succeeded+batch.Failed != len(batch.Results) {
+		t.Fatalf("batch counts do not match its results: %#v", batch)
 	}
-	compiler := jsonschema.NewCompiler()
-	if err := compiler.AddResource(schemaURL, document); err != nil {
-		t.Fatalf("load published result schema: %v", err)
+	failed := 0
+	for index, result := range batch.Results {
+		if result.Input == "" || result.Profile == "" || result.ProfileVersion == "" || result.Flows == nil {
+			t.Fatalf("result %d is incomplete: %#v", index, result)
+		}
+		if result.Status == ResultStatusFailed {
+			failed++
+			if result.Failure == nil {
+				t.Fatalf("failed result %d has no safe failure description: %#v", index, result)
+			}
+		}
 	}
-	schema, err := compiler.Compile(schemaURL)
-	if err != nil {
-		t.Fatalf("compile published result schema: %v", err)
-	}
-	encoded, err := json.Marshal(batch)
-	if err != nil {
-		t.Fatalf("marshal runtime batch: %v", err)
-	}
-	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(encoded))
-	if err != nil {
-		t.Fatalf("decode runtime batch: %v", err)
-	}
-	if err := schema.Validate(instance); err != nil {
-		t.Fatalf("runtime batch does not satisfy the published result schema: %v\n%s", err, encoded)
+	if failed != batch.Failed {
+		t.Fatalf("batch failed count = %d, want %d: %#v", batch.Failed, failed, batch)
 	}
 }

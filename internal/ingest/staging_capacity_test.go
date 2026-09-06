@@ -277,7 +277,7 @@ func (s sparseCapacitySegmenter) Segment(_ context.Context, request media.Segmen
 }
 
 func (sparseCapacitySegmenter) Version(context.Context) (string, error) {
-	return "ffmpeg capacity-test", nil
+	return "ffmpeg version 5.1 capacity-test", nil
 }
 
 func TestSegmentOutputsCannotGrowPastTheGlobalBudget(t *testing.T) {
@@ -422,7 +422,7 @@ func TestRollingMultiOutputUsesOneGlobalPendingWindow(t *testing.T) {
 }
 
 func (*rollingBoundSegmenter) Version(context.Context) (string, error) {
-	return "ffmpeg rolling-bound-test", nil
+	return "ffmpeg version 5.1 rolling-bound-test", nil
 }
 
 func TestRollingSegmentsKeepDiskAndTerminalMemoryBounded(t *testing.T) {

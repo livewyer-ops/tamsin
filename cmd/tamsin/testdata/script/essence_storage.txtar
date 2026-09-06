@@ -14,7 +14,7 @@ exec ffmpeg -hide_banner -loglevel error -y -f lavfi -i testsrc=size=160x120:rat
 # implementation row with objects=0.
 exec tamsin --profile essence-segments --format human --log-level error --dry-run=exact -i muxed.ts
 stdout '^PLANNED - NO CHANGES MADE  muxed.ts'
-stdout '^  collection [0-9a-f-]+$'
+stdout '^  collection +[0-9a-f-]+$'
 stdout '^  video +[0-9a-f-]+ +[1-9][0-9]* media objects?$'
 stdout '^  audio +[0-9a-f-]+ +[1-9][0-9]* media objects?$'
 ! stdout '\t|root=|disposition=|objects='
@@ -43,11 +43,11 @@ stdout 'profile demux@1'
 # Muxed storage reports the root plus the collected track Flows it created.
 exec tamsin --profile muxed-segments --format human --log-level error --dry-run=exact -i muxed.ts
 stdout '^  multiplex +[0-9a-f-]+ +1 media object$'
-stdout '^  video [0-9a-f-]+$'
-stdout '^  audio [0-9a-f-]+$'
+stdout '^  video +[0-9a-f-]+$'
+stdout '^  audio +[0-9a-f-]+$'
 stdout 'profile muxed-segments@1'
 ! stdout '\t|root=|objects='
 
 # An unknown mode fails before any media is staged.
-! exec tamsin --essence-storage elemental --dry-run -i muxed.ts
+! exec tamsin --essence-storage elemental --dry-run=fast -i muxed.ts
 stderr 'unsupported essence storage'

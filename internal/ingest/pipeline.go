@@ -9,18 +9,15 @@ import (
 	"io"
 	"log/slog"
 	"mime"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/livewyer-ops/tamsin/contracts"
 	"github.com/livewyer-ops/tamsin/internal/media"
 	"github.com/livewyer-ops/tamsin/internal/observability"
 	"github.com/livewyer-ops/tamsin/internal/progress"
@@ -43,390 +40,19 @@ const multiOutputEssenceThreshold = 4
 // provenance, not a new ingest policy, and must not manufacture a new Flow.
 const rendererIdentityEpoch = "2"
 
-type TAMSClient interface {
-	Service(context.Context) (map[string]any, error)
-	StorageBackends(context.Context) ([]tams.StorageBackend, error)
-	Profile(context.Context, string) (tams.Profile, error)
-	Flow(context.Context, string) (tams.Flow, error)
-	PutFlow(context.Context, string, tams.Flow) (tams.Flow, error)
-	AllocateStorage(context.Context, string, tams.StorageRequest) (tams.StorageResponse, error)
-	RegisterSegment(context.Context, string, tams.SegmentRequest) error
-	RegisterSegments(context.Context, string, []tams.SegmentRequest) error
-	DeleteSegments(context.Context, string, tams.SegmentDeleteOptions) error
-	ListSegments(context.Context, string, tams.SegmentListOptions) ([]tams.Segment, error)
-	Object(context.Context, string) (tams.ObjectInfo, error)
-	UploadFile(context.Context, tams.PresignedURL, string) (tams.UploadReceipt, error)
-	DownloadDigest(context.Context, tams.PresignedURL, int64) (int64, string, error)
-}
-
-// collectedFlow is a mono-essence Flow with its assigned identifier, ready to
-// register ahead of the multi-essence Flow that collects it.
-type collectedFlow struct {
-	id               string
-	sourceID         string
-	role             string
-	flow             tams.Flow
-	containerMapping map[string]any
-}
-
-// graphFlow describes one member of the complete empty Flow graph which must
-// exist before any Media Object is allocated. ownsMedia is a cross-Flow
-// invariant: direct owners declare container, while association-only members
-// do not.
-type graphFlow struct {
-	id               string
-	role             string
-	flow             tams.Flow
-	ownsMedia        bool
-	containerMapping map[string]any
-	profileID        string
-}
-
-type flowGraph struct {
-	flows       []graphFlow
-	collectorID string
-	storage     media.EssenceStorage
-}
-
-type plannedFlowWrite struct {
-	member    graphFlow
-	effective tams.Flow
-	request   tams.Flow
-	existed   bool
-	changed   bool
-}
-
-type Config struct {
-	// Observability carries the CLI invocation's correlation ID and operational
-	// metrics. When omitted, direct library callers receive an isolated run.
-	Observability *observability.Run
-	// Profile and ProfileVersion name the resolved media-treatment contract.
-	// The CLI resolves named profiles and deliberate overrides before building
-	// a Pipeline; direct callers that omit them are reported as custom@1.
-	Profile           string
-	ProfileVersion    string
-	LifecycleObserver LifecycleObserver
-	// RetainObjectResults opts direct library callers into an in-memory copy of
-	// every terminal Object. The default retains only action-required recovery
-	// identifiers; process consumers use lifecycle events or the durable journal
-	// for clean per-Object detail.
-	RetainObjectResults bool
-	Concurrency         int
-	// Transfers bounds Media Object uploads and verification downloads in
-	// flight across the whole run, not per input. A single large input and a
-	// thousand small ones should both saturate the same budget, which is why
-	// this is separate from Concurrency: nesting one inside the other would
-	// multiply, and bounding transfers by input count would leave one big file
-	// entirely serial.
-	Transfers int
-	// ProbeConcurrency bounds media measurement — hashing a Segment and running
-	// ffprobe over it — across the whole run. It is separate from Transfers
-	// because the two contend for different resources: transfers wait on the
-	// network, measurements spawn processes and read local disk, so the right
-	// number for one is rarely right for the other.
-	ProbeConcurrency int
-	// Retries is the shared allowance for an operation that failed in a way
-	// worth trying again, including resuming a broken source transfer. It is
-	// the same number --retries gives the HTTP client, so an operator raising
-	// or lowering it changes the whole run rather than one layer of it.
-	Retries          int
-	DryRun           bool
-	Verify           bool
-	DryRunMode       DryRunMode
-	VerificationMode VerificationMode
-	TempDirectory    string
-	// StagingByteBudget is the global number of temporary bytes concurrent
-	// inputs may reserve. Zero derives a safe budget from free space in
-	// TempDirectory; negative values are invalid.
-	StagingByteBudget int64
-	SegmentDuration   time.Duration
-	SegmentFormat     media.SegmentFormat
-	EssenceStorage    media.EssenceStorage
-	FFmpegArgs        []string
-	Start             int64
-	StorageID         string
-	FlowID            string
-	SourceID          string
-	FlowMetadata      tams.Flow
-	// TAMSFlowProfiles assigns immutable TAMS 8.2 Flow Profiles using
-	// [format[:index]=]UUID selectors.
-	TAMSFlowProfiles []string
-}
-
-type Pipeline struct {
-	config Config
-	runID  string
-	// reporter presents progress to an operator. It is Discard unless the CLI
-	// decided a terminal is watching, so the pipeline itself stays unaware of
-	// whether anything is being rendered.
-	reporter progress.Reporter
-	// transfers is the global budget. Acquiring a slot is what bounds
-	// concurrency; goroutines are cheap, waiting on the network is not.
-	transfers chan struct{}
-	// probes bounds media measurement globally. Limiting it per Flow multiplied
-	// by the number of Flows prepared at once.
-	probes chan struct{}
-	// mediaProcesses is shared by FFprobe and FFmpeg. Ordinary probes and
-	// stream-copy renders take one token; custom FFmpeg work takes both.
-	mediaProcesses *semaphore.Weighted
-	// rollingRenders prevents two live FFmpeg segmenters from each occupying
-	// one media-process token and then both waiting forever for their sink's
-	// nested FFprobe to acquire the other. A rolling render keeps one process
-	// slot available for measurement while preserving the global two-process
-	// ceiling.
-	rollingRenders chan struct{}
-	// graphLocks serializes inputs that converge on the same generated Flow
-	// graph. URI-based identities happened to keep differently located copies
-	// apart; content-based identities deliberately do not, so two workers in one
-	// batch must not allocate and register the same deterministic Objects at the
-	// same time.
-	graphLocksMu sync.Mutex
-	graphLocks   map[string]*graphLock
-	// limits are what the store says about how long the things it hands out
-	// last. Set once before any work starts, then only read.
-	limits               tams.ServiceLimits
-	apiVersion           tams.APIVersion
-	profileAssignments   []flowProfileAssignment
-	profileMu            sync.Mutex
-	profileCache         map[string]tams.Profile
-	flowStatusMu         sync.Mutex
-	flowStatuses         map[string]string
-	client               TAMSClient
-	prober               media.Prober
-	segmenter            media.Segmenter
-	logger               *slog.Logger
-	baseLogger           *slog.Logger
-	observability        *observability.Run
-	ownsObservability    bool
-	toolchainOnce        sync.Once
-	toolchainVersion     string
-	toolchainFingerprint string
-	toolchainErr         error
-	// One deadline covers recovery of an entire ambiguous bulk registration;
-	// it is not renewed for each Object in the batch.
-	registrationRecoveryTimeout time.Duration
-	// One deadline covers retraction after ordinary verification failures. It
-	// starts at the first failure and is shared by every Object in that batch,
-	// so a stalled service cannot multiply shutdown time by Object count.
-	verificationRecoveryTimeout time.Duration
-	// staging is initialised at Run time so free-space preflight sees the
-	// filesystem the job will actually use.
-	staging *stagingManager
-}
-
-type ObjectStatus string
-
-const (
-	ObjectStatusPlanned                 ObjectStatus = "planned"
-	ObjectStatusUploaded                ObjectStatus = "uploaded"
-	ObjectStatusRegistered              ObjectStatus = "registered"
-	ObjectStatusVerified                ObjectStatus = "verified"
-	ObjectStatusResumed                 ObjectStatus = "resumed"
-	ObjectStatusIngested                ObjectStatus = "ingested"
-	ObjectStatusRetractionIndeterminate ObjectStatus = "registration-indeterminate"
-	ObjectStatusRejected                ObjectStatus = "registration-rejected"
-	ObjectStatusRetracted               ObjectStatus = "retracted"
-	ObjectStatusStranded                ObjectStatus = "stranded"
-)
-
-type ObjectResult struct {
-	ObjectID           string                   `json:"object_id"`
-	Timerange          string                   `json:"timerange"`
-	Bytes              int64                    `json:"bytes"`
-	SHA256             string                   `json:"sha256"`
-	Disposition        ObjectDisposition        `json:"disposition"`
-	Verification       ObjectVerificationStatus `json:"verification_status"`
-	VerificationMethod VerificationMethod       `json:"verification_method"`
-	// Status remains an internal state-machine projection while v2 exposes
-	// disposition and verification independently.
-	Status   ObjectStatus `json:"-"`
-	reported bool
-}
-
-type ObjectDisposition string
-
-const (
-	ObjectDispositionPlanned                   ObjectDisposition = "planned"
-	ObjectDispositionUploaded                  ObjectDisposition = "uploaded"
-	ObjectDispositionRegistrationIndeterminate ObjectDisposition = "registration_indeterminate"
-	ObjectDispositionRegistered                ObjectDisposition = "registered"
-	ObjectDispositionRejected                  ObjectDisposition = "rejected"
-	ObjectDispositionIngested                  ObjectDisposition = "ingested"
-	ObjectDispositionResumed                   ObjectDisposition = "resumed"
-	ObjectDispositionRetracted                 ObjectDisposition = "retracted"
-	ObjectDispositionStranded                  ObjectDisposition = "stranded"
-	ObjectDispositionUnattempted               ObjectDisposition = "unattempted"
-)
-
-type ObjectVerificationStatus string
-
-const (
-	ObjectVerificationVerified     ObjectVerificationStatus = "verified"
-	ObjectVerificationNotRequested ObjectVerificationStatus = "not_requested"
-	ObjectVerificationNotReached   ObjectVerificationStatus = "not_reached"
-	ObjectVerificationFailed       ObjectVerificationStatus = "failed"
-)
-
-type VerificationMethod string
-
-const (
-	VerificationMethodNone     VerificationMethod = "none"
-	VerificationMethodStorage  VerificationMethod = "storage"
-	VerificationMethodReadback VerificationMethod = "readback"
-)
-
-type ObjectSummary struct {
-	Total            int   `json:"total"`
-	Bytes            int64 `json:"bytes"`
-	Ingested         int   `json:"ingested"`
-	Resumed          int   `json:"resumed"`
-	Rejected         int   `json:"rejected"`
-	Retracted        int   `json:"retracted"`
-	Stranded         int   `json:"stranded"`
-	Unattempted      int   `json:"unattempted"`
-	Verified         int   `json:"verified"`
-	StorageVerified  int   `json:"storage_verified"`
-	ReadbackVerified int   `json:"readback_verified"`
-}
-
-// FlowResult reports one Flow produced from an input. Every Flow appears once
-// in Result.Flows; Result.RootFlowID points at the Flow which represents the
-// input as a whole rather than duplicating it at the Result level.
-type FlowResult struct {
-	FlowID            string          `json:"flow_id"`
-	SourceID          string          `json:"source_id"`
-	Role              string          `json:"role,omitempty"`
-	TAMSFlowProfileID string          `json:"tams_flow_profile_id,omitempty"`
-	Disposition       FlowDisposition `json:"disposition"`
-	ObjectSummary     ObjectSummary   `json:"object_summary"`
-	Objects           []ObjectResult  `json:"-"`
-	// Kind prevents terminal consumers from inferring media ownership from an
-	// empty role or Object count.
-	Kind FlowKind `json:"kind"`
-}
-
-// FlowDisposition reports what this invocation knows about each planned Flow
-// mutation. A failed PUT is indeterminate because TAMS may have committed the
-// replacement before the response was lost; later graph members are then
-// unattempted rather than misleadingly described as created.
-type FlowDisposition string
-
-const (
-	FlowPlanned       FlowDisposition = "planned"
-	FlowUnchanged     FlowDisposition = "unchanged"
-	FlowWritten       FlowDisposition = "written"
-	FlowIndeterminate FlowDisposition = "indeterminate"
-	FlowUnattempted   FlowDisposition = "unattempted"
-)
-
-type ResultStatus string
-
-const (
-	ResultStatusPlanned  ResultStatus = "planned"
-	ResultStatusIngested ResultStatus = "ingested"
-	ResultStatusResumed  ResultStatus = "resumed"
-	ResultStatusFailed   ResultStatus = "failed"
-)
-
-type VerificationStatus string
-
-const (
-	VerificationVerified        VerificationStatus = "verified"
-	VerificationNotRequested    VerificationStatus = "not_requested"
-	VerificationNotReached      VerificationStatus = "not_reached"
-	VerificationFailedRetracted VerificationStatus = "failed_retracted"
-	VerificationFailedStranded  VerificationStatus = "failed_stranded"
-
-	// ResultSchemaVersion changes for any shape, enum, or required-field change:
-	// the strict schema rejects unknown properties, so even an optional field
-	// cannot be added under the same version. Profile versions are carried by
-	// each result and batch independently of the executable and result schema.
-	ResultSchemaVersion = "2.1"
-)
-
-// Failure is the stable, disclosure-safe terminal explanation shared by the
-// journal, human receipt, and process event adapters. It never contains raw
-// provider bodies, URLs, headers, FFmpeg commands, or arbitrary error text.
-type Failure struct {
-	Code           string `json:"code"`
-	Message        string `json:"message"`
-	ActionRequired bool   `json:"action_required"`
-}
-
-type Result struct {
-	Input          string             `json:"input"`
-	Profile        string             `json:"profile"`
-	ProfileVersion string             `json:"profile_version"`
-	FFmpegVersion  string             `json:"ffmpeg_version,omitempty"`
-	MediaToolchain string             `json:"media_toolchain,omitempty"`
-	RootFlowID     string             `json:"root_flow_id,omitempty"`
-	Bytes          int64              `json:"bytes,omitempty"`
-	SHA256         string             `json:"sha256,omitempty"`
-	Status         ResultStatus       `json:"status"`
-	Verification   VerificationStatus `json:"verification"`
-	Flows          []FlowResult       `json:"flows"`
-	Failure        *Failure           `json:"failure,omitempty"`
-	// Error retains detailed in-process diagnostics for direct internal callers
-	// and tests. It is deliberately excluded from every serialized or rendered
-	// contract; external process consumers use Failure instead.
-	Error string `json:"-"`
-}
-
-func (r *Result) rootFlow() *FlowResult {
-	for index := range r.Flows {
-		if r.Flows[index].FlowID == r.RootFlowID {
-			return &r.Flows[index]
-		}
-	}
-	return nil
-}
-
-type BatchResult struct {
-	SchemaVersion  string   `json:"schema_version"`
-	ToolVersion    string   `json:"tool_version"`
-	ToolCommit     string   `json:"tool_commit"`
-	ToolBuildDate  string   `json:"tool_build_date,omitempty"`
-	ProfileVersion string   `json:"profile_version"`
-	RunID          string   `json:"run_id"`
-	Results        []Result `json:"results"`
-	Succeeded      int      `json:"succeeded"`
-	Failed         int      `json:"failed"`
-}
-
-type ResultContract struct {
-	SchemaVersion  string
-	ToolVersion    string
-	ToolCommit     string
-	ToolBuildDate  string
-	ProfileVersion string
-	RunID          string
-}
-
-type ResultObserver func(index int, result Result) error
-
 func New(config Config, client TAMSClient, prober media.Prober, segmenter media.Segmenter, logger *slog.Logger, reporter progress.Reporter) (*Pipeline, error) {
 	if config.DryRunMode == "" {
-		if config.DryRun {
-			config.DryRunMode = DryRunExact
-		} else {
-			config.DryRunMode = DryRunOff
-		}
+		config.DryRunMode = DryRunOff
 	}
 	if err := config.DryRunMode.Validate(); err != nil {
 		return nil, err
 	}
-	config.DryRun = config.DryRunMode != DryRunOff
 	if config.VerificationMode == "" {
-		if config.Verify {
-			config.VerificationMode = VerificationReadback
-		} else {
-			config.VerificationMode = VerificationNone
-		}
+		config.VerificationMode = VerificationNone
 	}
 	if err := config.VerificationMode.Validate(); err != nil {
 		return nil, err
 	}
-	config.Verify = config.VerificationMode != VerificationNone
 	if config.Profile == "" {
 		config.Profile = ProfileCustom
 	}
@@ -496,7 +122,7 @@ func New(config Config, client TAMSClient, prober media.Prober, segmenter media.
 			return nil, fmt.Errorf("%s must be a UUID: %w", identifier.label, err)
 		}
 	}
-	if (!config.DryRun || len(profileAssignments) > 0) && client == nil {
+	if (config.DryRunMode == DryRunOff || len(profileAssignments) > 0) && client == nil {
 		return nil, errors.New("TAMS client is required unless dry-run is enabled without a TAMS Flow Profile")
 	}
 	if prober == nil {
@@ -508,9 +134,7 @@ func New(config Config, client TAMSClient, prober media.Prober, segmenter media.
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	baseLogger := logger
 	run := config.Observability
-	ownsObservability := run == nil
 	if run == nil {
 		run = observability.New(uuid.NewString(), logger)
 	}
@@ -523,8 +147,8 @@ func New(config Config, client TAMSClient, prober media.Prober, segmenter media.
 	}
 	return &Pipeline{
 		config: config, runID: run.RunID(), client: client, prober: prober, segmenter: segmenter, logger: logger,
-		observability: run, baseLogger: baseLogger, ownsObservability: ownsObservability,
-		reporter: reporter, transfers: make(chan struct{}, config.Transfers),
+		observability: run,
+		reporter:      reporter, transfers: make(chan struct{}, config.Transfers),
 		probes: make(chan struct{}, config.ProbeConcurrency), mediaProcesses: semaphore.NewWeighted(2),
 		rollingRenders:              make(chan struct{}, 1),
 		graphLocks:                  make(map[string]*graphLock),
@@ -566,36 +190,17 @@ func (p *Pipeline) Run(ctx context.Context, items []source.Item) (BatchResult, e
 // index is the input's zero-based position and remains stable even when inputs
 // run concurrently. A caller can therefore durably append results without
 // waiting for the whole batch or adding its own synchronization.
+// Each Pipeline belongs to one invocation; create a new Pipeline to resume.
 func (p *Pipeline) RunObserved(ctx context.Context, items []source.Item, observe ResultObserver) (BatchResult, error) {
-	p.profileMu.Lock()
-	clear(p.profileCache)
-	p.profileMu.Unlock()
-	p.flowStatusMu.Lock()
-	clear(p.flowStatuses)
-	p.flowStatusMu.Unlock()
-	// Media provenance belongs to this invocation. A Pipeline is deliberately
-	// reusable, but its configured executable may have been patched between
-	// runs, and a transient version lookup failure in one run must not poison
-	// every later run. mediaToolchain still uses sync.Once to keep the lookup to
-	// one process when several inputs in this invocation need FFmpeg.
-	defer p.resetMediaToolchain()
-	// ResultContract may have been read before this call so a journal could make
-	// its start record durable. Direct library callers that did not bind an
-	// invocation-wide observer get a fresh isolated run on deliberate Pipeline
-	// reuse. The CLI supplies its own observer, generated before source
-	// resolution, and owns that invocation's lifetime itself.
-	if p.ownsObservability {
-		defer func() {
-			p.observability = observability.New(uuid.NewString(), p.baseLogger)
-			p.runID = p.observability.RunID()
-			p.logger = p.observability.Logger()
-		}()
-	}
 	if len(items) == 0 {
 		return p.newBatch([]Result{}), errors.New("no source items resolved")
 	}
 	if (p.config.FlowID != "" || p.config.SourceID != "") && len(items) != 1 {
 		return p.failAll(items, errors.New("explicit flow-id and source-id may only be used with one resolved input"), observe)
+	}
+	if err := p.checkProbeToolchain(ctx); err != nil {
+		return p.failAll(items, withFailure(
+			FailureCodeMediaToolUnavailable, FailureMessageMediaToolUnavailable, true, err), observe)
 	}
 	staging, err := newStagingManager(p.config.TempDirectory, p.config.StagingByteBudget, nil)
 	if err != nil {
@@ -611,7 +216,7 @@ func (p *Pipeline) RunObserved(ctx context.Context, items []source.Item, observe
 		"staging_bytes", staging.limit, "staging_filesystem_free_bytes", staging.initialFree)
 
 	storageID := p.config.StorageID
-	if !p.config.DryRun {
+	if p.config.DryRunMode == DryRunOff {
 		resolvedStorageID, err := p.runStartupPreflight(ctx)
 		if err != nil {
 			return p.failAll(items, err, observe)
@@ -645,9 +250,9 @@ func (p *Pipeline) RunObserved(ctx context.Context, items []source.Item, observe
 					terminal <- indexedResult{index: index, result: p.failedResult(items[index], err)}
 					continue
 				}
-				if !p.config.DryRun {
+				if p.config.DryRunMode == DryRunOff {
 					phases := []progress.Phase{progress.PhaseStore}
-					if p.config.Verify {
+					if p.config.VerificationMode != VerificationNone {
 						phases = append(phases, progress.PhaseVerify)
 					}
 					tracker := progress.NewTracker(p.reporter, progress.Scope{
@@ -665,9 +270,9 @@ func (p *Pipeline) RunObserved(ctx context.Context, items []source.Item, observe
 					result.Error = err.Error()
 					result.Verification = p.verificationFailureStatus(err)
 					result.Failure = describeRunFailure(result, err, ctx)
-				} else if p.config.Verify && !p.config.DryRun {
+				} else if p.config.VerificationMode != VerificationNone && p.config.DryRunMode == DryRunOff {
 					result.Verification = VerificationVerified
-				} else if p.config.Verify {
+				} else if p.config.VerificationMode != VerificationNone {
 					result.Verification = VerificationNotReached
 				} else {
 					result.Verification = VerificationNotRequested
@@ -722,8 +327,7 @@ func (p *Pipeline) RunObserved(ctx context.Context, items []source.Item, observe
 	}
 
 	// Inputs which were not dispatched before cancellation still receive a
-	// terminal result. This keeps the batch and a graceful-interruption journal
-	// index-complete, while a hard kill retains every result synced before it.
+	// terminal result. This keeps graceful-interruption output complete.
 	cause := context.Cause(runCtx)
 	if cause == nil {
 		cause = errors.New("input did not reach a terminal state")
@@ -785,17 +389,17 @@ func (p *Pipeline) failedResult(item source.Item, cause error) Result {
 	}
 	var classified *classifiedFailure
 	if errors.As(cause, &classified) {
-		result.Failure = describeFailure(result, cause)
+		result.Failure = DescribeFailure(result, cause)
 	} else if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
 		result.Failure = interruptedFailure()
 	} else {
-		result.Failure = describeFailure(result, cause)
+		result.Failure = DescribeFailure(result, cause)
 	}
 	return result
 }
 
 func (p *Pipeline) verificationFailureStatus(err error) VerificationStatus {
-	if !p.config.Verify {
+	if p.config.VerificationMode == VerificationNone {
 		return VerificationNotRequested
 	}
 	var verificationErr *VerificationError
@@ -809,7 +413,7 @@ func (p *Pipeline) verificationFailureStatus(err error) VerificationStatus {
 }
 
 func (p *Pipeline) initialVerificationStatus() VerificationStatus {
-	if p.config.Verify {
+	if p.config.VerificationMode != VerificationNone {
 		return VerificationNotReached
 	}
 	return VerificationNotRequested
@@ -1037,7 +641,7 @@ func (p *Pipeline) ingestOne(ctx context.Context, item source.Item, storageID st
 	}, result.Flows); err != nil {
 		return result, err
 	}
-	if p.config.DryRun {
+	if p.config.DryRunMode != DryRunOff {
 		return result, nil
 	}
 
@@ -1149,131 +753,6 @@ func (p *Pipeline) warnUnsupportedCodecs(item source.Item, codecs []media.Unsupp
 			"stream_index", codec.StreamIndex,
 		)
 	}
-}
-
-type stagedFile struct {
-	path   string
-	size   int64
-	sha256 string
-	// owned reports whether the file at path was created by this run. A staged
-	// copy of a remote input is ours alone and cannot change underneath us; a
-	// local input belongs to whoever is running Tamsin and may be rewritten at
-	// any point, so the two cannot be treated alike.
-	owned   bool
-	cleanup func()
-	lease   *stagingLease
-}
-
-func stage(ctx context.Context, item source.Item, tempRoot string, retries int, lease *stagingLease,
-	run *observability.Run) (stagedFile, error) {
-	if item.Open == nil {
-		return stagedFile{}, errors.New("source item has no opener")
-	}
-	input, err := item.Open(ctx)
-	if err != nil {
-		return stagedFile{}, err
-	}
-
-	if item.LocalPath != "" {
-		hash := sha256.New()
-		size, err := copyContext(ctx, hash, input)
-		_ = input.Close()
-		if err != nil {
-			return stagedFile{}, fmt.Errorf("hash input %q: %w", item.LocalPath, err)
-		}
-		if item.Size >= 0 && size != item.Size {
-			return stagedFile{}, fmt.Errorf("input %q changed size while being read: expected %d, got %d", item.LocalPath, item.Size, size)
-		}
-		return stagedFile{path: item.LocalPath, size: size, sha256: hex.EncodeToString(hash.Sum(nil)), cleanup: func() {}, lease: lease}, nil
-	}
-
-	directory, err := os.MkdirTemp(tempRoot, "tamsin-input-")
-	if err != nil {
-		_ = input.Close()
-		return stagedFile{}, fmt.Errorf("create input staging directory: %w", err)
-	}
-	var stagedBytes int64
-	cleanup := func() {
-		_ = os.RemoveAll(directory)
-		lease.subtract(stagedBytes)
-		stagedBytes = 0
-	}
-	filename := filepath.Join(directory, safeFilename(item.Name))
-	output, err := os.OpenFile(filename, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		_ = input.Close()
-		cleanup()
-		return stagedFile{}, fmt.Errorf("create staged input: %w", err)
-	}
-	// A transfer that dies partway is resumed rather than restarted. Staging a
-	// large input is often the longest part of an ingest, and losing an hour of
-	// it to a dropped connection at the end is the difference between a retry
-	// that costs seconds and one that costs the whole transfer again.
-	hash := sha256.New()
-	var (
-		size     int64
-		copyErr  error
-		attempts int
-	)
-	for attempt := 0; ; attempt++ {
-		attempts = attempt + 1
-		var written int64
-		written, copyErr = copyContext(ctx, io.MultiWriter(stagingWriter{lease: lease, destination: output}, hash), input)
-		size += written
-		stagedBytes = size
-		_ = input.Close()
-		if copyErr == nil {
-			break
-		}
-		// A source that cannot be reopened, a cancelled run, and an exhausted
-		// allowance all mean the failure stands.
-		if ctx.Err() != nil || !worthResuming(copyErr, item.Reopen != nil, attempt, retries) {
-			break
-		}
-		run.Retry(observability.OperationSourceTransfer, attempts+1, retries+1, 0, copyErr, 0)
-		resumed, continuing, reopenErr := item.Reopen(ctx, size)
-		if reopenErr != nil {
-			copyErr = errors.Join(copyErr, reopenErr)
-			break
-		}
-		if !continuing {
-			// The source is answering from the beginning, so what has been
-			// written is not a prefix of what is about to arrive and every
-			// record of it has to go: the file, the digest, and the count.
-			if _, err := output.Seek(0, io.SeekStart); err != nil {
-				_ = resumed.Close()
-				copyErr = errors.Join(copyErr, err)
-				break
-			}
-			if err := output.Truncate(0); err != nil {
-				_ = resumed.Close()
-				copyErr = errors.Join(copyErr, err)
-				break
-			}
-			hash.Reset()
-			lease.subtract(size)
-			size = 0
-			stagedBytes = 0
-		}
-		input = resumed
-	}
-	closeErr := output.Close()
-	if copyErr != nil {
-		cleanup()
-		return stagedFile{}, fmt.Errorf("stage input %s failed after %d attempt(s): %w", safeURI(item.URI), attempts, copyErr)
-	}
-	if closeErr != nil {
-		cleanup()
-		return stagedFile{}, fmt.Errorf("close staged input: %w", closeErr)
-	}
-	if item.Size >= 0 && size != item.Size {
-		cleanup()
-		return stagedFile{}, fmt.Errorf("input %s size mismatch: expected %d, got %d", safeURI(item.URI), item.Size, size)
-	}
-	return stagedFile{
-		path: filename, size: size, sha256: hex.EncodeToString(hash.Sum(nil)),
-		owned: true, cleanup: cleanup, lease: lease,
-	}, nil
 }
 
 type preparedObject struct {
@@ -1456,7 +935,7 @@ func (p *Pipeline) ingestIndependently(ctx context.Context, item source.Item, st
 	if err := p.executeFlowPlan(ctx, safeURI(item.URI), graph, storageID, targets, result.Flows); err != nil {
 		return result, err
 	}
-	if p.config.DryRun {
+	if p.config.DryRunMode != DryRunOff {
 		return result, nil
 	}
 
@@ -1492,7 +971,7 @@ func (p *Pipeline) expectTransfers(ctx context.Context, objects []preparedObject
 		bytes += object.size
 	}
 	p.setProgressTotals(tracker, progress.PhaseStore, len(objects), bytes)
-	if p.config.Verify {
+	if p.config.VerificationMode != VerificationNone {
 		p.setProgressTotals(tracker, progress.PhaseVerify, len(objects), bytes)
 	}
 }
@@ -1596,867 +1075,6 @@ func (p *Pipeline) rejectUnusableMediaOptions() error {
 		"%s cannot take effect without segmentation, because the input is stored as it stands; "+
 			"set --segment-duration, or remove the option",
 		strings.Join(unusable, " and "))
-}
-
-// planFlowGraph resolves every final effective Flow before writing any of
-// them. That means schema and association failures cannot leave a prefix of the
-// graph in the service, and it makes preservation decisions from one coherent
-// read of the graph rather than interleaving reads with replacements.
-func (p *Pipeline) planFlowGraph(ctx context.Context, graph flowGraph) ([]plannedFlowWrite, error) {
-	var err error
-	graph, err = p.assignFlowProfiles(graph)
-	if err != nil {
-		return nil, err
-	}
-	planned := make([]plannedFlowWrite, 0, len(graph.flows))
-	for _, member := range graph.flows {
-		member, err = p.expandFlowProfile(ctx, member)
-		if err != nil {
-			return nil, err
-		}
-		plan, err := p.planFlowWrite(ctx, member)
-		if err != nil {
-			return nil, err
-		}
-		if err := contracts.ValidateFlowGet(p.apiVersion, plan.effective); err != nil {
-			return nil, fmt.Errorf(
-				"final Flow metadata for %s (%s) is not valid against pinned TAMS %d.%d at %w",
-				member.id, member.role, tams.SpecMajor, tams.SpecMinor, err)
-		}
-		if err := contracts.ValidateFlowPut(p.apiVersion, plan.request); err != nil {
-			return nil, fmt.Errorf("flow PUT metadata for %s (%s) is not valid against TAMS %s at %w",
-				member.id, member.role, p.apiVersion, err)
-		}
-		planned = append(planned, plan)
-	}
-	if err := validateFlowGraph(graph, planned); err != nil {
-		return nil, fmt.Errorf("final Flow graph is not valid: %w", err)
-	}
-	return planned, nil
-}
-
-// planFlowWrite applies the ownership rule without mutating TAMS. A PUT
-// replaces a Flow, so the final value must preserve everything this run does
-// not own. The dry-run path has no store to read and validates the generated
-// value as-is.
-func (p *Pipeline) planFlowWrite(ctx context.Context, member graphFlow) (plannedFlowWrite, error) {
-	plan := plannedFlowWrite{member: member, effective: member.flow, changed: true}
-	plan.request = flowPutProjection(member.flow, member.profileID)
-	if p.config.DryRun {
-		return plan, nil
-	}
-	existing, err := p.client.Flow(ctx, member.id)
-	if err != nil {
-		var httpErr *tams.HTTPError
-		if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound {
-			// Writing anyway would risk replacing metadata that is there but
-			// could not be read, and that cannot be undone.
-			return plannedFlowWrite{}, fmt.Errorf("read flow %s before planning the Flow graph: %w", member.id, err)
-		}
-		return plan, nil
-	}
-
-	plan.existed = true
-	existingProfileID := stringField(existing, "profile_id")
-	if existingProfileID != member.profileID {
-		return plannedFlowWrite{}, fmt.Errorf(
-			"flow %s already exists with profile_id %q; refusing to attach, repoint, or remove immutable Profile identity %q",
-			member.id, existingProfileID, member.profileID)
-	}
-	plan.effective = preserveForeignMetadata(existing, member.flow, p.config.FlowMetadata)
-	plan.request = flowPutProjection(plan.effective, member.profileID)
-	plan.changed = !equalJSONValues(plan.effective, existing)
-	return plan, nil
-}
-
-// writeFlow commits one already validated member through the same
-// ownership-aware path for elemental Flows and collectors alike.
-func (p *Pipeline) writeFlow(ctx context.Context, plan plannedFlowWrite) error {
-	if !plan.changed {
-		p.logger.Debug("flow already describes this ingest", "flow_id", plan.member.id)
-		return nil
-	}
-	action, verb := "creating", "create"
-	if plan.existed {
-		action, verb = "updating", "update"
-	}
-	p.logger.Info(action+" flow", "flow_id", plan.member.id, "role", plan.member.role)
-	if _, err := p.client.PutFlow(ctx, plan.member.id, plan.request); err != nil {
-		return fmt.Errorf("%s flow %s: %w", verb, plan.member.id, err)
-	}
-	return nil
-}
-
-// commitFlowGraph writes children before their collector, as required by the
-// Collection Item schema. TAMS has no transaction spanning Flow PUTs. A failed
-// PUT can therefore leave an unavoidable partial metadata mutation (including
-// the ambiguous case where the service committed but the response was lost),
-// which is reported explicitly. No Object has been allocated at this point.
-func (p *Pipeline) commitFlowGraphObserved(ctx context.Context, planned []plannedFlowWrite, results []FlowResult) error {
-	for _, plan := range planned {
-		if !plan.changed {
-			setFlowDisposition(results, plan.member.id, FlowUnchanged)
-		}
-	}
-	written := make([]string, 0, len(planned))
-	for index, plan := range planned {
-		if err := p.writeFlow(ctx, plan); err != nil {
-			setFlowDisposition(results, plan.member.id, FlowIndeterminate)
-			for _, pending := range planned[index+1:] {
-				if pending.changed {
-					setFlowDisposition(results, pending.member.id, FlowUnattempted)
-				}
-			}
-			confirmed := "no earlier Flow write was required"
-			if len(written) > 0 {
-				confirmed = "Flows written before the failure: " + strings.Join(written, ", ")
-			}
-			return fmt.Errorf(
-				"flow graph may be partially written (%s; the failing PUT may also have committed); no Media Objects were allocated: %w",
-				confirmed, err)
-		}
-		if plan.changed {
-			written = append(written, plan.member.id)
-			setFlowDisposition(results, plan.member.id, FlowWritten)
-		}
-	}
-	return nil
-}
-
-func setFlowDisposition(results []FlowResult, flowID string, disposition FlowDisposition) {
-	for index := range results {
-		if results[index].FlowID == flowID {
-			results[index].Disposition = disposition
-			return
-		}
-	}
-}
-
-func validateFlowGraph(graph flowGraph, planned []plannedFlowWrite) error {
-	if len(planned) != len(graph.flows) || len(planned) == 0 {
-		return errors.New("/ must contain every planned Flow")
-	}
-	byID := make(map[string]plannedFlowWrite, len(planned))
-	for _, plan := range planned {
-		member := plan.member
-		if byID[member.id].member.id != "" {
-			return fmt.Errorf("/id duplicates Flow %s", member.id)
-		}
-		byID[member.id] = plan
-		if plan.effective["id"] != member.id {
-			return fmt.Errorf("/id for Flow %s must equal its request identifier", member.id)
-		}
-		container, hasContainer := plan.effective["container"].(string)
-		if member.ownsMedia && (!hasContainer || container == "") {
-			return fmt.Errorf("/container for media-owning Flow %s is required", member.id)
-		}
-		if !member.ownsMedia {
-			if _, present := plan.effective["container"]; present {
-				return fmt.Errorf("/container for association-only Flow %s must be absent", member.id)
-			}
-		}
-		if _, present := plan.effective["container_mapping"]; present {
-			return fmt.Errorf("/container_mapping for Flow %s must be on its parent Collection Item", member.id)
-		}
-	}
-
-	if graph.collectorID == "" {
-		if len(planned) != 1 {
-			return errors.New("/flow_collection is missing a collector for multiple Flows")
-		}
-		if _, present := planned[0].effective["flow_collection"]; present {
-			return errors.New("/flow_collection must be absent for a single Flow")
-		}
-		return nil
-	}
-
-	collector, present := byID[graph.collectorID]
-	if !present {
-		return fmt.Errorf("/flow_collection collector %s is missing", graph.collectorID)
-	}
-	if collector.effective["format"] != "urn:x-nmos:format:multi" {
-		return fmt.Errorf("/format for collector %s must be urn:x-nmos:format:multi", graph.collectorID)
-	}
-	items, ok := collector.effective["flow_collection"].([]map[string]any)
-	if !ok {
-		return fmt.Errorf("/flow_collection for collector %s must be an array", graph.collectorID)
-	}
-	expected := make([]graphFlow, 0, len(graph.flows)-1)
-	for _, member := range graph.flows {
-		if member.id != graph.collectorID {
-			expected = append(expected, member)
-			if _, present := byID[member.id].effective["flow_collection"]; present {
-				return fmt.Errorf("/flow_collection must be absent from collected Flow %s", member.id)
-			}
-		}
-	}
-	if len(items) != len(expected) {
-		return fmt.Errorf("/flow_collection has %d items, want %d", len(items), len(expected))
-	}
-	for index, member := range expected {
-		item := items[index]
-		base := fmt.Sprintf("/flow_collection/%d", index)
-		if item["id"] != member.id {
-			return fmt.Errorf("%s/id = %v, want %s", base, item["id"], member.id)
-		}
-		if item["role"] != member.role {
-			return fmt.Errorf("%s/role = %v, want %s", base, item["role"], member.role)
-		}
-		mapping, hasMapping := item["container_mapping"]
-		switch graph.storage {
-		case media.EssenceStorageIndependent:
-			if hasMapping {
-				return fmt.Errorf("%s/container_mapping must be absent after demultiplexing", base)
-			}
-		case media.EssenceStorageMuxed, "":
-			if member.containerMapping == nil || !hasMapping || !equalJSONValues(mapping, member.containerMapping) {
-				return fmt.Errorf("%s/container_mapping does not match the input track", base)
-			}
-		default:
-			return fmt.Errorf("/ uses unsupported essence storage %q", graph.storage)
-		}
-	}
-	return nil
-}
-
-// descriptiveFields are written when a Flow is created and then left alone.
-//
-// Everything else Tamsin generates describes the media -- codec, container,
-// essence parameters, bit rates -- and has to stay accurate, so a later run
-// updates it. These two describe the content to a person, and a person may well
-// have improved on the neutral generated values. Overwriting a curated label on
-// every resume would be its own kind of data loss.
-//
-// An operator can still set them deliberately through --flow-metadata, which is
-// an instruction rather than a by-product.
-var descriptiveFields = [...]string{"label", "description"}
-
-// preserveForeignMetadata overlays what this run generated onto what the store
-// already holds, keeping anything the run does not own.
-//
-// A tag Tamsin writes carries its own prefix, so one already in the store under
-// that prefix but absent from this run is a leftover of Tamsin's own and is
-// dropped. Anything else belongs to somebody, and is kept.
-func preserveForeignMetadata(existing, generated, operatorOverrides tams.Flow) tams.Flow {
-	merged := make(tams.Flow, len(existing)+len(generated))
-	for key, value := range existing {
-		merged[key] = value
-	}
-	// These fields describe which Flow owns Media Objects and how the graph is
-	// connected. Their absence is meaningful, so merely overlaying generated
-	// values would preserve a stale arrangement across a muxed/independent
-	// rewrite. They are always Tamsin-owned and operator overrides are rejected.
-	for _, field := range [...]string{"container", "flow_collection", "container_mapping"} {
-		if _, generatedHere := generated[field]; !generatedHere {
-			delete(merged, field)
-		}
-	}
-	for key, value := range generated {
-		merged[key] = value
-	}
-	for _, field := range descriptiveFields {
-		if _, asked := operatorOverrides[field]; asked {
-			continue
-		}
-		if value, present := existing[field]; present {
-			merged[field] = value
-		}
-	}
-
-	existingTags, hasExisting := existing["tags"].(map[string]any)
-	if !hasExisting {
-		return merged
-	}
-	generatedTags, _ := generated["tags"].(map[string]any)
-	sources := make(map[string]struct{})
-	for _, tagSet := range []map[string]any{existingTags, generatedTags} {
-		collectProvenanceSources(sources, tagSet[media.ProvenanceSourcesTag])
-		// Migrate the singular tag written by earlier builds when this Flow is
-		// next touched, without losing where that ingest came from.
-		collectProvenanceSources(sources, tagSet[media.TagPrefix+"source"])
-	}
-	tags := make(map[string]any, len(existingTags)+len(generatedTags))
-	for name, value := range existingTags {
-		if strings.HasPrefix(name, media.TagPrefix) {
-			continue
-		}
-		tags[name] = value
-	}
-	for name, value := range generatedTags {
-		tags[name] = value
-	}
-	delete(tags, media.TagPrefix+"source")
-	if len(sources) > 0 {
-		ordered := make([]string, 0, len(sources))
-		for source := range sources {
-			ordered = append(ordered, source)
-		}
-		sort.Strings(ordered)
-		tags[media.ProvenanceSourcesTag] = ordered
-	}
-	merged["tags"] = tags
-	return merged
-}
-
-func collectProvenanceSources(destination map[string]struct{}, value any) {
-	add := func(source string) {
-		if source = strings.TrimSpace(source); source != "" {
-			destination[source] = struct{}{}
-		}
-	}
-	switch sources := value.(type) {
-	case string:
-		add(sources)
-	case []string:
-		for _, source := range sources {
-			add(source)
-		}
-	case []any:
-		for _, source := range sources {
-			if text, ok := source.(string); ok {
-				add(text)
-			}
-		}
-	}
-}
-
-// chunkSize decides how many Media Objects to commit together.
-//
-// The outer bound is the Object lifetime the store advertised: an Object is
-// collected if it is not registered in time, and that clock does not care how
-// many uploads run at once. commitChunk may divide this further into ready-worker
-// microbatches so the shorter presigned-URL lifetime is honoured as well.
-//
-// Half the advertised lifetime is used, leaving the other half as margin for a
-// batch that turns out slower than the one before it. A store that advertises
-// no lifetime has not told us to divide the work, so it is not divided.
-func (p *Pipeline) chunkSize(remaining []preparedObject, throughput float64) int {
-	if p.limits.ObjectRegistration <= 0 {
-		return len(remaining)
-	}
-	if throughput <= 0 {
-		throughput = assumedThroughput
-	}
-	budget := p.limits.ObjectRegistration.Seconds() / 2 * throughput
-	var bytes float64
-	fits := 0
-	for _, object := range remaining {
-		bytes += float64(object.size)
-		// At least one Object goes in every batch: an Object too large to fit
-		// the budget on its own cannot be made smaller, and is warned about
-		// when its upload is estimated.
-		if fits > 0 && bytes > budget {
-			break
-		}
-		fits++
-	}
-	return min(max(fits, 1), len(remaining))
-}
-
-// outlastsRegistration estimates whether upload alone exceeds the Object's
-// registration lifetime. URL expiry only limits when a transfer may start.
-func outlastsRegistration(size int64, throughput float64, lifetime time.Duration) (time.Duration, bool) {
-	if lifetime <= 0 || throughput <= 0 || size <= 0 {
-		return 0, false
-	}
-	expected := time.Duration(float64(size) / throughput * float64(time.Second))
-	return expected, expected > lifetime
-}
-
-// chunkTimerange covers the Segments in one registration operation, so an
-// ambiguous write can be reconciled without listing the whole Flow.
-func chunkTimerange(chunk []preparedObject) string {
-	first, last := chunk[0].start, chunk[0].start+chunk[0].duration
-	for _, object := range chunk[1:] {
-		first = min(first, object.start)
-		last = max(last, object.start+object.duration)
-	}
-	timerange, err := media.TimeRange(first, last-first)
-	if err != nil {
-		// Listing the whole Flow is wasteful but correct, and a batch that
-		// cannot describe its own span is not a reason to fail an ingest.
-		return ""
-	}
-	return timerange
-}
-
-// commitChunk brings one batch of Media Objects into the store: storage
-// allocated, bytes uploaded, Segments registered, and each one verified or
-// withdrawn before the next batch starts. Keeping that whole cycle inside one
-// batch is what bounds how long an Object sits unregistered.
-//
-// It reports how long the batch took and how many bytes it moved, so the next
-// can be sized from what this one achieved rather than from a guess.
-func (p *Pipeline) commitChunk(ctx context.Context, flowID string, chunk []preparedObject,
-	objectResults []ObjectResult, storageID string, throughput float64) (time.Duration, int64, error) {
-	if p.limits.PresignedURL <= 0 {
-		return p.commitReadyChunk(ctx, flowID, chunk, objectResults, storageID, throughput, nil)
-	}
-
-	// Storage allocation creates every PUT URL in its response. Reserve the
-	// workers that will consume them first, and ask for no more URLs than can
-	// begin immediately. Each microbatch completes registration and verification
-	// before the next allocation, preserving the Object-registration state
-	// machine as well as both advertised lifetimes.
-	started := time.Now()
-	var transferred int64
-	for offset := 0; offset < len(chunk); {
-		remaining := chunk[offset:]
-		reservation, err := p.reserveTransferBatch(ctx, min(len(remaining), max(p.config.Transfers, 1)))
-		if err != nil {
-			return 0, 0, fmt.Errorf("wait for an upload worker: %w", err)
-		}
-		ready := remaining[:min(len(remaining), reservation.count)]
-		_, bytes, err := p.commitReadyChunk(
-			ctx, flowID, ready, objectResults, storageID, throughput, reservation)
-		if err != nil {
-			return 0, 0, err
-		}
-		transferred += bytes
-		offset += len(ready)
-	}
-	return time.Since(started), transferred, nil
-}
-
-// commitReadyChunk consumes one batch whose upload workers are already
-// reserved. A nil reservation retains the defensive fallback for tests and
-// clients that have no advertised presigned-URL lifetime.
-func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []preparedObject,
-	objectResults []ObjectResult, storageID string, throughput float64,
-	reservation *transferReservation) (time.Duration, int64, error) {
-	started := time.Now()
-	if reservation != nil {
-		defer reservation.releaseAll()
-	}
-	var transferred int64
-	objectIDs := make([]string, 0, len(chunk))
-	for _, object := range chunk {
-		transferred += object.size
-		objectIDs = append(objectIDs, object.id)
-	}
-
-	allocation, err := p.client.AllocateStorage(ctx, flowID, tams.StorageRequest{
-		ObjectIDs: objectIDs, StorageID: storageID,
-	})
-	if err != nil {
-		return 0, 0, fmt.Errorf("allocate storage for %d objects: %w", len(chunk), err)
-	}
-	destinations := make(map[string]tams.PresignedURL, len(allocation.MediaObjects))
-	var uploadStartBefore time.Time
-	if p.limits.PresignedURL > 0 {
-		// The service exposes a minimum duration, not an absolute expiry. Measure
-		// it from response receipt; the schema asks services to leave grace for
-		// URL generation and response latency.
-		uploadStartBefore = time.Now().Add(p.limits.PresignedURL)
-	}
-	for _, allocated := range allocation.MediaObjects {
-		// Before 8.2 the allocation response did not identify presigned URLs.
-		if !p.apiVersion.AtLeast(8, 2) || allocated.Presigned != nil && *allocated.Presigned {
-			allocated.PutURL.StartBefore = uploadStartBefore
-		}
-		destinations[allocated.ObjectID] = allocated.PutURL
-	}
-	// Validate the complete response before starting any transfer. Returning
-	// halfway through scheduling would let earlier goroutines outlive a failed
-	// batch.
-	for _, object := range chunk {
-		destination, ok := destinations[object.id]
-		if !ok || destination.URL == "" {
-			return 0, 0, fmt.Errorf("storage allocation omitted object %s", object.id)
-		}
-	}
-
-	// A single large Object may exceed the registration window even with no
-	// queue. Warn without changing the selected media treatment.
-	for _, object := range chunk {
-		if expected, oversized := outlastsRegistration(object.size, throughput, p.limits.ObjectRegistration); oversized {
-			p.logger.Warn("media object upload may exceed its registration lifetime",
-				"flow_id", flowID, "object_id", object.id, "bytes", object.size,
-				"estimated_upload", expected.Round(time.Second), "registration_lifetime", p.limits.ObjectRegistration)
-		}
-	}
-
-	uploads, uploadCtx := errgroup.WithContext(ctx)
-	// The limit bounds how many goroutines exist, not just how many are doing
-	// something. Without it every Object in the batch got one immediately and
-	// then queued on the transfer budget, so the goroutine count followed the
-	// size of the job rather than the size of the allowance. The budget itself
-	// is still taken inside, because it is shared across concurrent Flows while
-	// this limit only governs one batch.
-	uploadLimit := max(p.config.Transfers, 1)
-	if reservation != nil {
-		uploadLimit = reservation.count
-	}
-	uploads.SetLimit(uploadLimit)
-	receipts := make(map[string]tams.UploadReceipt, len(chunk))
-	var receiptsMu sync.Mutex
-	for _, object := range chunk {
-		destination := destinations[object.id]
-		uploads.Go(func() error {
-			if reservation == nil {
-				release, err := p.acquireTransfer(uploadCtx)
-				if err != nil {
-					return err
-				}
-				defer release()
-			}
-			p.logger.Info("uploading object", "flow_id", flowID, "object_id", object.id, "bytes", object.size)
-			receipt, err := p.client.UploadFile(uploadCtx, destination, object.path)
-			if err != nil {
-				return fmt.Errorf("upload object %s: %w", object.id, err)
-			}
-			if receipt.Bytes != object.size || receipt.SHA256 != object.sha256 {
-				return withFailure(FailureCodeSourceChanged, FailureMessageSourceChanged, true,
-					fmt.Errorf("prepared object %s changed before upload: expected %d bytes with SHA-256 %s, transmitted %d bytes with SHA-256 %s",
-						object.id, object.size, object.sha256, receipt.Bytes, receipt.SHA256))
-			}
-			if receipt.StorageSHA256 != "" && receipt.StorageSHA256 != object.sha256 {
-				return fmt.Errorf("storage checksum for object %s is %s, expected SHA-256 %s",
-					object.id, receipt.StorageSHA256, object.sha256)
-			}
-			receiptsMu.Lock()
-			receipts[object.id] = receipt
-			receiptsMu.Unlock()
-			p.observability.Uploaded(object.size)
-			p.advanceProgress(uploadCtx, progress.PhaseStore, 1, object.size)
-			return nil
-		})
-	}
-	if err := uploads.Wait(); err != nil {
-		return 0, 0, err
-	}
-	if reservation != nil {
-		reservation.releaseAll()
-	}
-	records := registrationRecords(chunk, registrationUploaded)
-	for _, record := range records {
-		setRegistrationState(record, registrationUploaded, objectResults)
-	}
-
-	requests := make([]tams.SegmentRequest, 0, len(chunk))
-	for _, object := range chunk {
-		requests = append(requests, tams.SegmentRequest{
-			ObjectID: object.id, Timerange: object.timerange,
-			ObjectTimerange: object.objectTimerange, TSOffset: object.tsOffset,
-		})
-	}
-	for _, record := range records {
-		setRegistrationState(record, registrationIndeterminate, objectResults)
-	}
-	registrationRecovered := false
-	if err := p.client.RegisterSegments(ctx, flowID, requests); err != nil {
-		if resolveErr := p.reconcileRegistrationError(ctx, flowID, records, objectResults, err); resolveErr != nil {
-			return 0, 0, fmt.Errorf("register segments: %w", errors.Join(err, resolveErr))
-		}
-		// A complete readback (and verification, when enabled) proved that the
-		// bulk POST committed before its response was lost.
-		registrationRecovered = true
-	} else {
-		for _, record := range records {
-			setRegistrationState(record, registrationRegistered, objectResults)
-		}
-	}
-
-	// TAMS requires GET /objects/{objectId} to answer 404 until the Object is
-	// registered against a Flow Segment, so uploaded bytes cannot be read back
-	// before registration. With an advertised URL lifetime, verification takes
-	// a transfer slot and then fetches one exact, fresh URL in verifyOne. The
-	// per-record state machine still resolves every listing failure or omission
-	// by retracting that known-registered Segment.
-	if p.config.Verify && !registrationRecovered {
-		readback := records
-		if p.config.VerificationMode == VerificationAuto {
-			readback = make([]*registrationRecord, 0, len(records))
-			for _, record := range records {
-				if receipts[record.object.id].StorageSHA256 == "" {
-					readback = append(readback, record)
-					continue
-				}
-				p.acceptStorageVerification(ctx, record, objectResults)
-			}
-		}
-		if len(readback) > 0 && p.limits.PresignedURL > 0 {
-			for _, record := range readback {
-				record.segment = tams.Segment{
-					ObjectID: record.object.id, Timerange: record.object.timerange,
-				}
-			}
-			if err := p.verifyRegistrationRecords(ctx, flowID, readback, objectResults); err != nil {
-				return 0, 0, err
-			}
-		} else if len(readback) > 0 {
-			registered, err := p.client.ListSegments(ctx, flowID,
-				tams.SegmentListOptions{Timerange: chunkTimerange(objectsFromRecords(readback)), IncludeDownloadURLs: true})
-			if err != nil {
-				return 0, 0, p.resolveRegisteredListingFailure(ctx, flowID, readback, objectResults, err)
-			}
-			visible := make([]*registrationRecord, 0, len(readback))
-			missing := make([]*registrationRecord, 0)
-			for _, record := range readback {
-				segment := matchingSegment(registered, record.object.id, record.object.timerange)
-				if segment == nil {
-					missing = append(missing, record)
-					continue
-				}
-				record.segment = *segment
-				visible = append(visible, record)
-			}
-			if len(missing) > 0 {
-				return 0, 0, p.resolveIncompleteRegisteredListing(ctx, flowID, visible, missing, objectResults)
-			}
-			if err := p.verifyRegistrationRecords(ctx, flowID, visible, objectResults); err != nil {
-				return 0, 0, err
-			}
-		}
-	}
-	for _, object := range chunk {
-		setObjectStatus(objectResults, object.id, ObjectStatusIngested)
-	}
-	completed := make(map[string]struct{}, len(chunk))
-	for _, object := range chunk {
-		completed[object.id] = struct{}{}
-	}
-	if err := p.observeObjectBatch(ctx, flowID, objectResults, completed); err != nil {
-		return 0, 0, err
-	}
-	return time.Since(started), transferred, nil
-}
-
-// applyBitRates records what a reader will actually have to pull off the wire.
-//
-// The Flow's bit rate properties are defined over Segments rather than essence,
-// so they can only be worked out once the Segments exist -- which is why this
-// runs after preparation rather than when the Flow was built from the probe.
-// max_bit_rate in particular is what sizes a receiver's buffer, so leaving it
-// unset makes a Flow harder to play back than it needs to be.
-func (p *Pipeline) applyBitRates(flow tams.Flow, objects []preparedObject) {
-	if len(objects) == 0 {
-		return
-	}
-	segments := make([]media.SegmentMeasurement, len(objects))
-	for index, object := range objects {
-		segments[index] = media.SegmentMeasurement{Bytes: object.size, Duration: object.duration}
-	}
-	average, peak, ok := media.SegmentBitRates(segments, p.config.SegmentDuration)
-	if !ok {
-		return
-	}
-	flow["avg_bit_rate"] = average
-	flow["max_bit_rate"] = peak
-}
-
-// acquireProbe takes a slot from the global media-measurement budget.
-func (p *Pipeline) acquireProbe(ctx context.Context) (func(), error) {
-	select {
-	case p.probes <- struct{}{}:
-		releaseProcess, err := p.acquireMediaProcess(ctx, 1)
-		if err != nil {
-			<-p.probes
-			return nil, err
-		}
-		return func() {
-			releaseProcess()
-			<-p.probes
-		}, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-func (p *Pipeline) acquireMediaProcess(ctx context.Context, weight int64) (func(), error) {
-	if err := p.mediaProcesses.Acquire(ctx, weight); err != nil {
-		return nil, err
-	}
-	return func() { p.mediaProcesses.Release(weight) }, nil
-}
-
-func (p *Pipeline) acquireRollingRender(ctx context.Context) (func(), error) {
-	select {
-	case p.rollingRenders <- struct{}{}:
-		return func() { <-p.rollingRenders }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-// retractionTimeout bounds cleanup. Retraction runs detached from the caller's
-// context so cancellation cannot skip it, which means it needs a deadline of
-// its own or a wedged service could hang a run that is already finishing.
-const retractionTimeout = 30 * time.Second
-
-// acquireTransfer takes a slot from the global transfer budget, returning the
-// release function. It respects cancellation so a failing sibling does not
-// leave callers queued behind work that will be discarded.
-func (p *Pipeline) acquireTransfer(ctx context.Context) (func(), error) {
-	select {
-	case p.transfers <- struct{}{}:
-		return func() { <-p.transfers }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-// transferReservation holds slots in the global transfer budget before a
-// service is asked to generate upload URLs. An allocated URL is therefore
-// handed only to work that can begin immediately, rather than to a goroutine
-// queued behind an unrelated Flow's transfers.
-type transferReservation struct {
-	pipeline *Pipeline
-	count    int
-}
-
-func (r *transferReservation) releaseAll() {
-	if r == nil || r.pipeline == nil {
-		return
-	}
-	for range r.count {
-		<-r.pipeline.transfers
-	}
-	r.pipeline = nil
-	r.count = 0
-}
-
-// reserveTransferBatch waits for one global transfer slot, then takes as many
-// additional slots as are immediately free. Waiting for every desired slot
-// would deadlock when two concurrent Flows each held part of the budget. The
-// returned count is consequently the safe allocation batch size right now.
-func (p *Pipeline) reserveTransferBatch(ctx context.Context, desired int) (*transferReservation, error) {
-	desired = min(max(desired, 1), cap(p.transfers))
-	select {
-	case p.transfers <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-
-	reserved := 1
-	for reserved < desired {
-		select {
-		case p.transfers <- struct{}{}:
-			reserved++
-		default:
-			return &transferReservation{pipeline: p, count: reserved}, nil
-		}
-	}
-	return &transferReservation{pipeline: p, count: reserved}, nil
-}
-
-func (p *Pipeline) registerFlow(ctx context.Context, flowID string, objects []preparedObject, objectResults []ObjectResult, storageID string) error {
-	// One listing answers the resume question for every Object. Asking per
-	// Object cost a round trip each, which dominates on a high-latency link.
-	// Download URLs are only wanted if a resumed Object will be verified. When
-	// they are not, the service is spared signing one per Segment for a listing
-	// that is only being asked which Objects exist.
-	existing, err := p.client.ListSegments(ctx, flowID,
-		tams.SegmentListOptions{
-			// This first listing answers identity only. A verification worker asks
-			// for its own URL after it holds a transfer slot.
-			IncludeDownloadURLs: p.config.Verify && p.limits.PresignedURL <= 0,
-		})
-	if err != nil {
-		return fmt.Errorf("list existing segments: %w", err)
-	}
-	throughput := float64(0)
-	return p.registerPreparedObjects(ctx, flowID, objects, objectResults, storageID, existing, &throughput)
-}
-
-func (p *Pipeline) registerRollingChunk(ctx context.Context, flowID string, objects []preparedObject,
-	objectResults []ObjectResult, storageID string, throughput *float64) error {
-	existing, err := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{
-		Timerange:           chunkTimerange(objects),
-		IncludeDownloadURLs: p.config.Verify && p.limits.PresignedURL <= 0,
-	})
-	if err != nil {
-		return fmt.Errorf("list existing segments for rolling batch: %w", err)
-	}
-	return p.registerPreparedObjects(ctx, flowID, objects, objectResults, storageID, existing, throughput)
-}
-
-func (p *Pipeline) registerPreparedObjects(ctx context.Context, flowID string, objects []preparedObject,
-	objectResults []ObjectResult, storageID string, existing []tams.Segment, throughput *float64) error {
-	if throughput == nil {
-		throughput = new(float64)
-	}
-
-	missing := make([]preparedObject, 0, len(objects))
-	var resumed []verificationTask
-	for _, object := range objects {
-		segment := matchingSegment(existing, object.id, object.timerange)
-		if segment == nil {
-			missing = append(missing, object)
-			continue
-		}
-		// A resumed Object credits the upload it did not need to repeat. Its
-		// verification is scheduled with the rest, so that unit is credited there.
-		p.advanceProgress(ctx, progress.PhaseStore, 1, object.size)
-		if p.config.Verify {
-			resumed = append(resumed, verificationTask{object: object, segment: *segment})
-		}
-		setObjectStatus(objectResults, object.id, ObjectStatusResumed)
-	}
-	// Resumed Objects are checked before missing uploads. When URL lifetimes are
-	// advertised, the tasks intentionally carry no URL: verifyOne refreshes each
-	// only after its worker owns transfer capacity.
-	outcomes, verifyErr := p.verifyAllWithOutcomes(ctx, flowID, resumed)
-	for index, outcome := range outcomes {
-		if outcome == outcomeVerified {
-			setObjectVerification(objectResults, resumed[index].object.id,
-				ObjectVerificationVerified, VerificationMethodReadback)
-		}
-	}
-	if verifyErr != nil {
-		for index, outcome := range outcomes {
-			switch outcome {
-			case outcomeRetracted:
-				setObjectStatus(objectResults, resumed[index].object.id, ObjectStatusRetracted)
-				setObjectVerification(objectResults, resumed[index].object.id,
-					ObjectVerificationFailed, VerificationMethodReadback)
-			case outcomeRetractionFailed:
-				setObjectStatus(objectResults, resumed[index].object.id, ObjectStatusStranded)
-				setObjectVerification(objectResults, resumed[index].object.id,
-					ObjectVerificationFailed, VerificationMethodReadback)
-			}
-		}
-		return verifyErr
-	}
-	if len(resumed) > 0 {
-		completed := make(map[string]struct{}, len(resumed))
-		for _, task := range resumed {
-			completed[task.object.id] = struct{}{}
-		}
-		if err := p.observeObjectBatch(ctx, flowID, objectResults, completed); err != nil {
-			return err
-		}
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	if err := p.setFlowStatus(ctx, flowID, flowStatusIngesting); err != nil {
-		return fmt.Errorf("mark Flow ingesting before Object allocation: %w", err)
-	}
-
-	// Media Objects are committed in batches rather than all at once. A store
-	// collects an Object that is not registered against a Segment in time, and
-	// promises only five minutes, so allocating storage for a whole programme
-	// and registering it an hour later is relying on a guarantee that was never
-	// given. Each batch is allocated, uploaded, registered and verified before
-	// the next begins, which keeps every Object's unregistered life to the
-	// length of one batch.
-	for offset := 0; offset < len(missing); {
-		chunk := missing[offset:min(offset+p.chunkSize(missing[offset:], *throughput), len(missing))]
-		elapsed, transferred, err := p.commitChunk(ctx, flowID, chunk, objectResults, storageID, *throughput)
-		if err != nil {
-			return err
-		}
-		if elapsed > 0 && transferred > 0 {
-			*throughput = float64(transferred) / elapsed.Seconds()
-		}
-		offset += len(chunk)
-	}
-
-	for _, object := range missing {
-		setObjectStatus(objectResults, object.id, ObjectStatusIngested)
-	}
-	return nil
 }
 
 // prepareEssenceObjects stages the Media Objects for a single elementary
@@ -2995,17 +1613,28 @@ func (p *Pipeline) mediaToolchain(ctx context.Context) (string, string, error) {
 			return
 		}
 		p.toolchainVersion, _, _ = strings.Cut(toolchainReport, "\n")
+		if err := media.ValidateToolVersion(p.toolchainVersion, "FFmpeg"); err != nil {
+			p.toolchainErr = err
+			return
+		}
 		p.toolchainFingerprint = mediaToolchainFingerprint(
 			p.config.Profile, p.config.ProfileVersion, toolchainReport)
 	})
 	return p.toolchainVersion, p.toolchainFingerprint, p.toolchainErr
 }
 
-func (p *Pipeline) resetMediaToolchain() {
-	p.toolchainOnce = sync.Once{}
-	p.toolchainVersion = ""
-	p.toolchainFingerprint = ""
-	p.toolchainErr = nil
+func (p *Pipeline) checkProbeToolchain(ctx context.Context) error {
+	release, err := p.acquireMediaProcess(ctx, 1)
+	if err != nil {
+		return fmt.Errorf("wait to inspect FFprobe version: %w", err)
+	}
+	report, versionErr := p.prober.Version(ctx)
+	release()
+	if versionErr != nil {
+		return fmt.Errorf("read FFprobe version: %w", versionErr)
+	}
+	line, _, _ := strings.Cut(strings.TrimSpace(strings.ReplaceAll(report, "\r\n", "\n")), "\n")
+	return media.ValidateToolVersion(line, "FFprobe")
 }
 
 func mediaToolchainFingerprint(profile, profileVersion, ffmpegReport string) string {
@@ -3049,137 +1678,6 @@ func generatedLabel(digest string) string {
 	}
 	return prefix + digest
 }
-func matchingSegment(segments []tams.Segment, objectID, timerange string) *tams.Segment {
-	for index := range segments {
-		if segments[index].ObjectID == objectID && segments[index].Timerange == timerange {
-			return &segments[index]
-		}
-	}
-	return nil
-}
-
-func (p *Pipeline) newObjectResult(object preparedObject) ObjectResult {
-	verification := ObjectVerificationNotReached
-	if !p.config.Verify {
-		verification = ObjectVerificationNotRequested
-	}
-	return ObjectResult{
-		ObjectID: object.id, Timerange: object.timerange, Bytes: object.size, SHA256: object.sha256,
-		Status: ObjectStatusPlanned, Disposition: ObjectDispositionPlanned,
-		Verification: verification, VerificationMethod: VerificationMethodNone,
-	}
-}
-
-func setObjectStatus(objects []ObjectResult, objectID string, status ObjectStatus) {
-	for index := range objects {
-		if objects[index].ObjectID == objectID {
-			objects[index].Status = status
-			if disposition := objectDispositionForStatus(status); disposition != "" {
-				objects[index].Disposition = disposition
-			}
-			return
-		}
-	}
-}
-
-func setObjectVerification(objects []ObjectResult, objectID string,
-	status ObjectVerificationStatus, method VerificationMethod) {
-	for index := range objects {
-		if objects[index].ObjectID == objectID {
-			objects[index].Verification = status
-			objects[index].VerificationMethod = method
-			return
-		}
-	}
-}
-
-func finalizeObjectResult(object *ObjectResult) {
-	if object.Disposition == "" {
-		object.Disposition = objectDispositionForStatus(object.Status)
-		if object.Disposition == "" {
-			object.Disposition = ObjectDispositionUnattempted
-		}
-	}
-	if object.Verification == "" {
-		object.Verification = ObjectVerificationNotReached
-	}
-	if object.VerificationMethod == "" {
-		object.VerificationMethod = VerificationMethodNone
-	}
-}
-
-func objectDispositionForStatus(status ObjectStatus) ObjectDisposition {
-	switch status {
-	case ObjectStatusPlanned:
-		return ObjectDispositionPlanned
-	case ObjectStatusUploaded:
-		return ObjectDispositionUploaded
-	case ObjectStatusRegistered, ObjectStatusVerified:
-		return ObjectDispositionRegistered
-	case ObjectStatusResumed:
-		return ObjectDispositionResumed
-	case ObjectStatusIngested:
-		return ObjectDispositionIngested
-	case ObjectStatusRejected:
-		return ObjectDispositionRejected
-	case ObjectStatusRetractionIndeterminate:
-		return ObjectDispositionRegistrationIndeterminate
-	case ObjectStatusRetracted:
-		return ObjectDispositionRetracted
-	case ObjectStatusStranded:
-		return ObjectDispositionStranded
-	default:
-		return ""
-	}
-}
-
-func compactObjectResults(flows []FlowResult) {
-	for flowIndex := range flows {
-		if flows[flowIndex].ObjectSummary.Total > 0 {
-			continue
-		}
-		var summary ObjectSummary
-		for objectIndex := range flows[flowIndex].Objects {
-			object := &flows[flowIndex].Objects[objectIndex]
-			finalizeObjectResult(object)
-			addObjectSummary(&summary, *object)
-		}
-		flows[flowIndex].ObjectSummary = summary
-	}
-}
-
-func addObjectSummary(summary *ObjectSummary, object ObjectResult) {
-	if summary == nil {
-		return
-	}
-	finalizeObjectResult(&object)
-	summary.Total++
-	summary.Bytes += object.Bytes
-	switch object.Disposition {
-	case ObjectDispositionIngested:
-		summary.Ingested++
-	case ObjectDispositionResumed:
-		summary.Resumed++
-	case ObjectDispositionRejected:
-		summary.Rejected++
-	case ObjectDispositionRetracted:
-		summary.Retracted++
-	case ObjectDispositionStranded, ObjectDispositionRegistrationIndeterminate:
-		summary.Stranded++
-	case ObjectDispositionUnattempted, ObjectDispositionPlanned, ObjectDispositionUploaded, ObjectDispositionRegistered:
-		summary.Unattempted++
-	}
-	if object.Verification == ObjectVerificationVerified {
-		summary.Verified++
-		switch object.VerificationMethod {
-		case VerificationMethodStorage:
-			summary.StorageVerified++
-		case VerificationMethodReadback:
-			summary.ReadbackVerified++
-		}
-	}
-}
-
 func mergeFlow(destination, override tams.Flow) {
 	for key, value := range override {
 		if key == "tags" {
@@ -3242,7 +1740,7 @@ func safeURI(raw string) string {
 	return parsed.String()
 }
 
-// SafeInputURI returns the representation safe for result output and durable
-// journals. It retains only the canonical scheme, authority, and path; userinfo,
+// SafeInputURI returns the representation safe for structured output. It
+// retains only the canonical scheme, authority, and path; userinfo,
 // query material, and fragments are never persisted.
 func SafeInputURI(raw string) string { return safeURI(raw) }

@@ -7,10 +7,10 @@ import (
 	"maps"
 	"os"
 
-	"github.com/livewyer-ops/tamsin/contracts"
 	"github.com/livewyer-ops/tamsin/internal/media"
 	"github.com/livewyer-ops/tamsin/internal/progress"
 	"github.com/livewyer-ops/tamsin/internal/tams"
+	"github.com/livewyer-ops/tamsin/internal/tamsschema"
 )
 
 const (
@@ -207,7 +207,7 @@ func (e *rollingExecution) flush(state *rollingFlowState) error {
 	}
 
 	var operationErr error
-	if e.pipeline.config.DryRun {
+	if e.pipeline.config.DryRunMode != DryRunOff {
 		operationErr = e.pipeline.observeObjectBatch(e.ctx, state.flowID, objectResults, objectIDs)
 	} else {
 		operationErr = e.pipeline.registerRollingChunk(
@@ -225,7 +225,7 @@ func (e *rollingExecution) flush(state *rollingFlowState) error {
 
 	flowResult := &e.result.Flows[state.resultIndex]
 	for _, objectResult := range objectResults {
-		addObjectSummary(&flowResult.ObjectSummary, objectResult)
+		AccumulateObjectSummary(&flowResult.ObjectSummary, objectResult)
 		if e.pipeline.config.RetainObjectResults || actionRequiredObject(objectResult) {
 			flowResult.Objects = append(flowResult.Objects, objectResult)
 		}
@@ -264,7 +264,7 @@ func (e *rollingExecution) finish() error {
 
 func (e *rollingExecution) publishTotals(final bool) {
 	tracker := progress.FromContext(e.ctx)
-	if tracker == nil || e.pipeline.config.DryRun {
+	if tracker == nil || e.pipeline.config.DryRunMode != DryRunOff {
 		return
 	}
 	set := func(phase progress.Phase) {
@@ -274,7 +274,7 @@ func (e *rollingExecution) publishTotals(final bool) {
 		}
 	}
 	set(progress.PhaseStore)
-	if e.pipeline.config.Verify {
+	if e.pipeline.config.VerificationMode != VerificationNone {
 		set(progress.PhaseVerify)
 	}
 }
@@ -307,7 +307,7 @@ func (p *Pipeline) beginRollingFlowPlan(ctx context.Context, inputURI string, gr
 }
 
 func (p *Pipeline) finishRollingFlowMetadata(ctx context.Context, graph flowGraph, planned []plannedFlowWrite) error {
-	if p.config.DryRun {
+	if p.config.DryRunMode != DryRunOff {
 		return nil
 	}
 	byID := make(map[string]graphFlow, len(graph.flows))
@@ -330,11 +330,11 @@ func (p *Pipeline) finishRollingFlowMetadata(ctx context.Context, graph flowGrap
 			}
 		}
 		planned[index].request = flowPutProjection(planned[index].effective, planned[index].member.profileID)
-		if err := contracts.ValidateFlowGet(p.apiVersion, planned[index].effective); err != nil {
+		if err := tamsschema.ValidateFlowGet(p.apiVersion, planned[index].effective); err != nil {
 			return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
 				fmt.Errorf("final rolling Flow metadata for %s is invalid at %w", member.id, err))
 		}
-		if err := contracts.ValidateFlowPut(p.apiVersion, planned[index].request); err != nil {
+		if err := tamsschema.ValidateFlowPut(p.apiVersion, planned[index].request); err != nil {
 			return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
 				fmt.Errorf("final rolling Flow PUT metadata for %s is invalid at %w", member.id, err))
 		}
@@ -442,7 +442,7 @@ func (p *Pipeline) ingestMuxedRolling(ctx context.Context, itemLabel string, sta
 	if err := p.finishRollingFlowMetadata(ctx, graph, planned); err != nil {
 		return result, err
 	}
-	if p.config.DryRun {
+	if p.config.DryRunMode != DryRunOff {
 		return result, nil
 	}
 	result.Status = rollingResultStatus(result)
@@ -577,7 +577,7 @@ func (p *Pipeline) ingestIndependentRolling(ctx context.Context, itemLabel strin
 	if err := p.finishRollingFlowMetadata(ctx, graph, planned); err != nil {
 		return result, err
 	}
-	if p.config.DryRun {
+	if p.config.DryRunMode != DryRunOff {
 		return result, nil
 	}
 	result.Status = rollingResultStatus(result)

@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -38,12 +37,21 @@ func fakeDoctorTool(t *testing.T, name, version string) string {
 	return filename
 }
 
+func writeTestConfig(t *testing.T, directory, contents string) string {
+	t.Helper()
+	path := filepath.Join(directory, "config.yaml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func doctorArgs(t *testing.T, format string) []string {
 	t.Helper()
 	return []string{
 		"--format", format,
-		"--ffprobe", fakeDoctorTool(t, "ffprobe", "ffprobe version doctor-test"),
-		"--ffmpeg", fakeDoctorTool(t, "ffmpeg", "ffmpeg version doctor-test"),
+		"--ffprobe", fakeDoctorTool(t, "ffprobe", "ffprobe version 5.1 doctor-test"),
+		"--ffmpeg", fakeDoctorTool(t, "ffmpeg", "ffmpeg version 5.1 doctor-test"),
 		"--retries", "0",
 		"doctor", "--temp-dir", t.TempDir(),
 	}
@@ -69,6 +77,25 @@ func checkNamed(t *testing.T, result doctorResult, name string) doctorCheck {
 	}
 	t.Fatalf("doctor report has no %q check: %#v", name, result.Checks)
 	return doctorCheck{}
+}
+
+func TestDoctorRejectsUnsupportedMediaToolVersion(t *testing.T) {
+	t.Parallel()
+	arguments := doctorArgs(t, "json")
+	for index := range arguments {
+		if arguments[index] == "--ffprobe" {
+			arguments[index+1] = fakeDoctorTool(t, "ffprobe-old", "ffprobe version 4.4 unsupported")
+			break
+		}
+	}
+	code, result, _, _ := executeDoctor(t, arguments)
+	check := checkNamed(t, result, "ffprobe")
+	if code != ExitMedia || check.Status != doctorFail {
+		t.Fatalf("unsupported FFprobe exit/check = %d/%#v", code, check)
+	}
+	if !strings.Contains(check.Error, "configured executable") || strings.Contains(check.Error, "4.4") {
+		t.Fatalf("unsupported FFprobe diagnostic is unsafe or unactionable: %q", check.Error)
+	}
 }
 
 func assertDoctorCheckOrder(t *testing.T, result doctorResult) {
@@ -179,7 +206,7 @@ func TestDoctorChecksFFmpegOnlyForMediaWritingTreatment(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			arguments := []string{
-				"--format", "json", "--ffprobe", fakeDoctorTool(t, "ffprobe", "ffprobe version test"),
+				"--format", "json", "--ffprobe", fakeDoctorTool(t, "ffprobe", "ffprobe version 5.1 test"),
 				"--ffmpeg", missing, "doctor", "--temp-dir", t.TempDir(), "--profile", testCase.profile,
 			}
 			code, result, stdout, stderr := executeDoctor(t, arguments)
@@ -219,8 +246,8 @@ func TestDoctorDoesNotReportMediaToolControlledText(t *testing.T) {
 		const ffmpegSecret = "ffmpeg-banner-credential"
 		arguments := []string{
 			"--format", "json",
-			"--ffprobe", fakeDoctorTool(t, "ffprobe", "ffprobe version "+probeSecret),
-			"--ffmpeg", fakeDoctorTool(t, "ffmpeg", "ffmpeg version "+ffmpegSecret),
+			"--ffprobe", fakeDoctorTool(t, "ffprobe", "ffprobe version 5.1 "+probeSecret),
+			"--ffmpeg", fakeDoctorTool(t, "ffmpeg", "ffmpeg version 5.1 "+ffmpegSecret),
 			"doctor", "--temp-dir", t.TempDir(), "--profile", "essence-segments",
 		}
 		code, result, stdout, stderr := executeDoctor(t, arguments)
@@ -252,8 +279,8 @@ func TestDoctorDoesNotReportMediaToolControlledText(t *testing.T) {
 			}
 			arguments := []string{
 				"--format", "json",
-				"--ffprobe", fakeDoctorTool(t, "ffprobe", "ffprobe version safe"),
-				"--ffmpeg", fakeDoctorTool(t, "ffmpeg", "ffmpeg version safe"),
+				"--ffprobe", fakeDoctorTool(t, "ffprobe", "ffprobe version 5.1 safe"),
+				"--ffmpeg", fakeDoctorTool(t, "ffmpeg", "ffmpeg version 5.1 safe"),
 				testCase.flag, toxicTool,
 				"doctor", "--temp-dir", t.TempDir(), "--profile", testCase.profile,
 			}
@@ -294,11 +321,9 @@ func TestDoctorReportsStagingWritabilityAndSpace(t *testing.T) {
 
 	t.Run("configured budget exceeds free space", func(t *testing.T) {
 		directory := t.TempDir()
-		inspection, err := ingest.InspectStaging(directory, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		budget := strconv.FormatInt(inspection.FilesystemFreeBytes+1, 10)
+		// This is below MaxInt64 but cannot plausibly be freed by another test
+		// between inspection and validation.
+		budget := "8191PiB"
 		arguments := doctorArgs(t, "json")
 		arguments = append(arguments, "--profile", "preserve", "--temp-dir", directory, "--staging-byte-budget", budget)
 		code, result, stdout, stderr := executeDoctor(t, arguments)
@@ -456,13 +481,11 @@ func TestDoctorOnlineOAuthCodeModeIsNonInteractive(t *testing.T) {
 	}))
 	defer server.Close()
 
-	const querySecret = "doctor-authorization-query-secret"
 	arguments := doctorArgs(t, "json")
 	arguments = append([]string{
 		"--endpoint", server.URL, "--allow-insecure-auth-loopback",
 		"--auth", "oauth-code",
 		"--token-url", "https://identity.example.test/token",
-		"--authorization-url", "https://identity.example.test/authorize?configured=" + querySecret,
 		"--client-id", "doctor-client",
 	}, arguments...)
 	arguments = append(arguments, "--online")
@@ -474,8 +497,7 @@ func TestDoctorOnlineOAuthCodeModeIsNonInteractive(t *testing.T) {
 	if requests.Load() != 0 {
 		t.Fatalf("non-interactive doctor caused %d network request(s)", requests.Load())
 	}
-	if strings.Contains(stdout, querySecret) || strings.Contains(stderr, querySecret) ||
-		strings.Contains(stderr, "Open this URL") {
+	if strings.Contains(stderr, "Open this URL") {
 		t.Fatalf("doctor exposed an interactive authorization prompt; stdout = %s; stderr = %s", stdout, stderr)
 	}
 }
@@ -489,14 +511,13 @@ func TestDoctorOnlineReportsUnsafeOAuthEndpointBeforeMissingCode(t *testing.T) {
 	}))
 	defer server.Close()
 
-	const querySecret = "unsafe-authorization-query-secret"
 	arguments := doctorArgs(t, "json")
 	arguments = append([]string{
 		"--endpoint", server.URL, "--allow-insecure-auth-loopback",
 		"--auth", "oauth-code",
 		"--token-url", "http://identity.example.test/token",
-		"--authorization-url", "http://identity.example.test/authorize?configured=" + querySecret,
 		"--client-id", "doctor-client",
+		"--oauth-code", "pre-obtained-code",
 	}, arguments...)
 	arguments = append(arguments, "--online")
 	code, result, stdout, stderr := executeDoctor(t, arguments)
@@ -507,9 +528,6 @@ func TestDoctorOnlineReportsUnsafeOAuthEndpointBeforeMissingCode(t *testing.T) {
 	}
 	if requests.Load() != 0 {
 		t.Fatalf("unsafe OAuth configuration caused %d network request(s)", requests.Load())
-	}
-	if strings.Contains(stdout, querySecret) || strings.Contains(stderr, querySecret) {
-		t.Fatalf("unsafe OAuth error exposed a URL query; stdout = %s; stderr = %s", stdout, stderr)
 	}
 }
 

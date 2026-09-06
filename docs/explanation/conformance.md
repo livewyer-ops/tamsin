@@ -1,119 +1,89 @@
-# TAMS ingest conformance
+# TAMS conformance
 
-TAMSin targets BBC TAMS 8.2 at commit [`ebb18b09cc6effe70a3464fc0282e9663d0a583f`](https://github.com/bbc/tams/commit/ebb18b09cc6effe70a3464fc0282e9663d0a583f). This is the exact submodule revision used by the pinned TAMOSS 8.2 preview at commit [`5ec9df15f661a5db230577074e2e55d10444d4ea`](https://github.com/livewyer-ops/tamoss/commit/5ec9df15f661a5db230577074e2e55d10444d4ea). TAMS 8.1 remains the compatibility floor, pinned separately rather than being silently replaced by the target.
+TAMSin targets BBC TAMS 8.2 at commit
+[`34fb31b80cb8afb3194f28c8b787301379caacf8`](https://github.com/bbc/tams/commit/34fb31b80cb8afb3194f28c8b787301379caacf8)
+and TAMOSS `8.2.0-oss1-rc4` at commit
+[`c17e20fe4aa732e6c0b30f904ca25e3dd2cf2c9c`](https://github.com/livewyer-ops/tamoss/commit/c17e20fe4aa732e6c0b30f904ca25e3dd2cf2c9c).
+TAMS 8.1 remains the compatibility floor at TAMS commit
+[`98d307b09b5ebf79278aa7d3aad53295154e2c17`](https://github.com/bbc/tams/commit/98d307b09b5ebf79278aa7d3aad53295154e2c17).
 
-The target inventory is [`contracts/tams-v8.2.json`](../../contracts/tams-v8.2.json). It explicitly extends the complete [`TAMS 8.1 compatibility inventory`](../../contracts/tams-v8.1.json). Together they are the source of truth for both TAMS and TAMOSS revisions and for the live matrix. Tests fail if pins diverge, inherited review documents disappear, an authentication mechanism lacks an implementation mapping, or an ingest operation is removed from coverage.
+The machine-readable pins and operations are in
+[`contracts/tams-v8.1.json`](../../contracts/tams-v8.1.json) and
+[`contracts/tams-v8.2.json`](../../contracts/tams-v8.2.json). The live matrix
+starts the pinned TAMOSS release for each contract and runs representative
+local, directory, manifest, HTTP, S3 and standard-input ingests.
 
-## Authentication coverage
+The live matrix checks exact Segment deletion using curl. TAMSin's own
+verification-failure retraction and asynchronous deletion-request monitoring
+are covered by HTTP-level client and ingest tests, not induced against the
+live store.
 
-- HTTP Basic
-- HTTP Bearer/JWT
-- `access_token` URL query authentication
-- OAuth2 client credentials acquisition for bearer tokens
-- OAuth2 authorization-code acquisition for bearer tokens, using a pre-obtained code or validated localhost callback
+## Supported ingest surface
 
-## Upload and ingest operation coverage
+TAMSin uses only the TAMS operations needed to:
 
-| Operation | Ingest use |
-| --- | --- |
-| `GET_service` | Compatibility and lifetime preflight; also used by `doctor --online` |
-| `GET_storage-backends` | Backend selection; also used by `doctor --online` |
-| `GET_profiles-profileId` | Validate an assigned TAMS 8.2 Flow Profile before mutation |
-| `PUT_flows-flowId` | Deterministic Flow creation |
-| `GET_flows-flowId` | Collision, resume and created-Flow verification |
-| `POST_flows-flowId-storage` | Media Object allocation |
-| `POST_flows-flowId-segments` | Segment registration |
-| `GET_flows-flowId-segments` | Resume and checksum verification |
-| `DELETE_flows-flowId-segments` | Retract a Segment that failed verification |
-| `GET_flow-delete-requests-request-id` | Monitor asynchronous Segment retraction |
-| `GET_objects` | Registered Object verification |
+- read service compatibility and storage backends;
+- read and write Flows;
+- list, register and retract Flow Segments;
+- allocate Object storage and read Objects for verification; and
+- fetch an assigned TAMS 8.2 Flow Profile.
 
-General TAMS discovery, inspection, administration and vendor-extension
-requests are outside TAMSin. Keeping those operations out makes this inventory
-an exact account of the ingest product rather than a growing general API
-surface.
+General listing, editing, deletion, webhooks and service administration are out
+of scope and belong in
+[tamsctl](https://github.com/livewyer-ops/tamsctl).
 
-Segment listing implements the paging and `get_urls` controls on the pinned
-operation rather than treating its first response as complete. Each `rel=next`
-target is resolved against the exact URL of the page that supplied it, so
-absolute, path-relative, and query-only references follow standard URL
-semantics. All Link field-values are parsed as RFC 8288 lists, including commas
-inside URI-references or quoted parameters and case-insensitive relation token
-lists; malformed or multiple `rel=next` links fail rather than truncating the
-result. Before another authenticated request is made, the resolved URL must
-remain on the configured origin and beneath the configured API base path.
-Encoded slash/backslash and recursively encoded dot-segment ambiguity is
-rejected before credentials are attached; cycles are rejected. Collection is
-atomic and bounded to 1,000 pages, 100,000 Segments, and 64 MiB of successful
-JSON page bodies, so an endlessly novel or oversized cursor stream cannot
-return a plausible partial result or grow memory without a fixed limit.
-Identity-only ingest listings are lean through an empty `accept_get_urls` and
-discard any unexpected `get_urls`, including on pages whose cursor replaced the
-original query. Verification paths request fresh download URLs only at the
-points that immediately consume them. Presigned response headers are canonicalized
-before use; invalid or case-duplicate names are rejected, and the newer
-`headers` object takes precedence over the legacy `content-type` member.
+Before the first mutation, TAMSin validates the service version and advertised
+Object/URL lifetimes, resolves storage, probes media, builds the complete Flow
+graph, checks existing Flow identity, validates generated metadata, and checks
+any assigned TAMS Flow Profile. A planning failure therefore makes no partial
+write.
 
-## Verification layers
+For TAMS 8.2, a Profile-backed Flow is compared using strict JSON structure and
+exact numeric value semantics, then written in compact `profile_id` form. JSON
+integers larger than 2^53 retain precision. For Profile-backed Flows,
+`avg_bit_rate` is the Profile's encoding target, not measured output;
+`max_bit_rate` remains Flow-specific measured metadata.
+Mismatch diagnostics identify a bounded JSON-pointer-style path and whether a
+field is missing or different; values and unrecognised extension keys are
+redacted. Omitted optional fields remain omitted, including schema defaults.
+Consequently, a valid service Profile that omits an optional field generated by
+TAMSin can still fail this strict match, even if a schema default would give it
+the same meaning. TAMSin does not rewrite metadata to force a match.
 
-- Unit/contract tests exercise every authentication transport, typed TAMS client operation, timeline conversion, Flow mapping, source resolver, retry rule, upload checksum, resume transition, partial failure, configuration precedence, and CLI exit behaviour.
-- The published doctor-report v1 schema is validated against real offline,
-  online, and failure reports. Online doctor tests prove its startup checks use
-  only `GET /service` and `GET /service/storage-backends`, share ingest's API,
-  lifetime, storage-selection, authentication, and TLS rules, and never proceed
-  from an invalid partial configuration.
-- Every final effective Flow is validated at runtime against the matching TAMS 8.1 or 8.2 JSON Schemas vendored in [`contracts/schemas/`](../../contracts/schemas/), after generated metadata, TAMS Flow Profile expansion, operator overrides, and preserved existing enrichment have been composed but before the first PUT. An 8.2 Profile-backed PUT is separately validated in its compact `profile_id` form. Cross-Flow checks then enforce media ownership, exact collection membership, and each parent Collection Item's `container_mapping`. The same revisioned schemas back offline contract tests.
-- End-to-end CLI behaviour is covered by [`testscript`](https://github.com/rogpeppe/go-internal) archives in [`cmd/tamsin/testdata/script/`](../../cmd/tamsin/testdata/script/), the harness the Go team uses for the `go` command itself. Each archive is a readable transcript asserting real arguments, exit codes, and the separation of stdout presentation/event records from diagnostic stderr, with fixtures inlined as `txtar` members. Scripts run the CLI in-process, so coverage remains attributable to the packages under test. Run `go test ./cmd/tamsin -update` to refresh golden output after an intentional change.
-- The race detector covers concurrent batch execution.
-- `make test` passes `-coverpkg=./internal/...` so coverage is attributed to the package a statement lives in rather than to the package whose test ran it; without it the contract and CLI suites, which drive `internal/` from outside, report nothing. Read the aggregate with `make coverage`. The per-package lines are each test binary's share of the whole internal tree and are easy to misread as a regression.
-- The E2E workflow runs `make e2e-existing` against both pinned TAMOSS contracts and exercises the native TAMS storage allocation/upload/registration/readback path from the OCI image. Every ingested Flow is read back and checked against that service revision rather than against TAMSin's own output. The 8.2 run additionally exercises the Flow status lifecycle; 8.1 proves those additive writes do not leak across the compatibility boundary. The matrix covers whole-file ingest, an explicit `--segment-format`, both essence-storage arrangements against a genuine multiplex, and the live service's exact Segment-deletion semantics. TAMSin's verification-failure retraction path, including asynchronous deletion-request monitoring, is exercised against deterministic HTTP integration servers.
-- The live matrix covers local file plus deterministic resume, directory, text manifest, HTTP, stdin, and S3 sources plus bearer, URL-token, and OAuth client-credential authentication. Basic and authorization-code behaviour use deterministic local identity/API servers because the TAMOSS local profile does not expose those grants as unattended test principals. Unit regressions additionally bind every credential-bearing request to the configured TAMS origin and reject cross-origin HTTPS redirects before token injection.
+## Flow and Object rules
 
-## Specification rules
+- Independently stored essences own their Objects and are grouped by a
+  containerless Multi-Flow collector that owns no Objects.
+- A muxed Flow owns the Objects and maps collected tracks through ordered
+  collection items.
+- Flow, Source and Object identifiers are deterministic from source content,
+  treatment and technical graph rather than locator or tool patch version.
+- Segment timeranges do not overlap. Initial Object identity is supported on
+  the 8.2 path but TAMSin does not manufacture fragmented-MP4 initialisation
+  media.
+- Upload and registration batches are scheduled against advertised lifetimes;
+  network performance can still prevent registration in time. Presigned URL
+  expiry limits when a transfer starts, not when it finishes. Non-presigned
+  URLs do not receive that start deadline.
+- Verification uses trustworthy storage checksum evidence or bounded readback,
+  according to `--verify`; `none` explicitly skips byte verification.
+- Verification failure retracts the exact Object/timerange Segment and waits
+  for observable absence. An indeterminate or stranded result is explicit and
+  requires operator review.
 
-The 8.1 inventory records the compatibility rules and the 8.2 delta records every added requirement or reviewed non-applicable document. Each rule names its source and asserting test. Contract tests evaluate their union: the 8.2 target cannot conceal an omitted base rule, and a changed pin becomes a reviewable checklist diff.
+## Metadata limits
 
-`not_applicable` records documents reviewed and found not to constrain ingest, with the reason. That distinction matters: an unlisted document is unread, not cleared.
+TAMSin emits only metadata it can establish from the input and selected
+treatment. It does not infer editorial purpose, source lineage generation, or
+unknown codecs. Fixed versus variable frame rate comes from presentation
+timestamps; uncertain interlace and PsF distinctions are omitted. See
+[media metadata](../reference/media-metadata.md) for the field matrix.
 
-The inventory covers every ADR and application note present at the pinned
-commit, excluding their index READMEs. Rules name the documents that constrain
-this ingest path; every other document is recorded under `not_applicable` with
-its reason. Contract tests derive the reviewed-document counts from those
-unique source references and require them to match the recorded upstream
-totals, so matching `read` and `total` numbers cannot conceal an unclassified
-document.
+`--flow-metadata` can supply complete workflow-owned metadata but cannot change
+Flow/Source identity, format or collection ownership. TAMSin preserves existing
+operator-owned labels, descriptions and non-`_tamsin_` tags when resuming a
+Flow.
 
-## Deliberate omissions
-
-- The typed 8.2 Segment API accepts explicit `init_object_id`, and storage allocation accepts the corresponding content type. TAMSin does not yet manufacture fragmented-MP4 initialisation Objects: that high-level packaging mode needs a complete allocation, verification, resume, and playback contract rather than merely exposing the new field.
-- `_tams_segmentation_rate` is not set. It is an implementation-specific tag superseded by the core `segment_duration` Flow property, which TAMSin populates, and AppNote 0003 directs implementers to prefer core API metadata over tags.
-- Container MIME types are a supported-profile mapping, not an attempt to classify every format FFmpeg can read. Extensions and the host MIME database are not trusted; an unknown direct Object is declared as `application/octet-stream` with a warning, while an empty collector still omits `container` as AppNote 0006 requires. `--flow-metadata` is the explicit override for a workflow with more specific knowledge.
-- Video `vfr` is established from decoded presentation timestamps rather than FFprobe's summary-rate fields; fixed 30000/1001 quantisation and true mixed cadence have real-media regressions. Interlace metadata is emitted only for FFprobe's unambiguous evidence. MXF `progressive` is omitted because FFmpeg collapses both full-frame and segmented-frame descriptors to that value; `tb`/`bt` and PsF are also omitted because FFprobe cannot distinguish them reliably. A workflow with production metadata may override the complete `essence_parameters` object. The exact field matrix is in [Media metadata support](../reference/media-metadata.md).
-- Codec names follow a finite supported profile. An unknown FFprobe codec is omitted and warned about rather than converted into a fabricated `video/x-*`, `audio/x-*`, or `application/x-*` value. Because the pinned elemental Flow schemas require `codec`, a final Flow without a valid explicit override fails schema preflight before mutation.
-- `generation` is operator-owned source-lineage metadata. TAMSin preserves an existing or explicitly supplied value but does not invent `0` from stream copy: local treatment cannot establish how many generations occurred before the input reached this process.
-- Named ingest profiles are TAMSin product policy rather than TAMS conformance
-  requirements. The resolved profile is recorded separately from core Flow
-  fields; implementation-specific profile and media-toolchain provenance stays
-  under the AppNote 0003 `_tamsin_` tag prefix.
-- TAMS Flow Profiles are distinct immutable 8.2 technical contracts. Assignment
-  is explicit, participates in generated identity, requires an exact technical
-  match with `avg_bit_rate` inherited as the Profile's encoding target, and is never inferred from the
-  local treatment profile or silently changed on an existing Flow. Numeric
-  metadata is compared by exact JSON value rather than by its in-memory Go type;
-  presence, non-numeric types, object fields, and array order remain strict.
-  Omitted optional fields remain omitted, so a valid service Profile that relies
-  on a schema default can still fail to match an explicitly generated field.
-- Storage-backend discovery follows guarded pagination and accepts unused
-  string or array tags. Verification accepts both presigned and non-presigned
-  media URLs. The 8.2 allocation flag controls presigned upload start deadlines;
-  URL expiry does not limit completion of an active transfer. Upload and
-  registration are scheduled against Object lifetimes, not guaranteed to finish
-  within them under all network conditions.
-- Generated Flow identity contains staged content, resolved media treatment,
-  and the normalised technical graph, never an input locator, display label, or
-  credential. Child Flows derive from the root. Canonical credential-free
-  locators are accumulated as `_tamsin_sources` provenance, while Source and
-  Object identifier recipes remain stable.
-- Every Flow in the graph is read before any is written, and TAMSin only replaces what it generates. Technical metadata — codec, container, essence parameters, bit rates — is refreshed, because it has to stay true of the media. `label` and `description` are written when the Flow is created and then left alone, since a person may have improved them. TAMSin uses a locator-neutral description and a short content-derived label; use `--flow-metadata` for an editorial name. Tags whose names begin with `_tamsin_` are TAMSin's and are rewritten, except that canonical `_tamsin_sources` provenance is accumulated; every other tag is somebody else's and is kept. When nothing TAMSin owns has changed, the Flow is not written at all. `--flow-metadata` can override descriptive and technical fields, but not `/id`, `/source_id`, `/format`, or collection ownership paths; those are rejected as usage errors with the JSON path and a specific alternative.
-
-Changing either TAMS or TAMOSS pin requires updating the appropriate base or delta inventory, reviewing upstream OpenAPI, ADR, and Application Note changes, and extending both contract and live-matrix tests before the pin is accepted.
+Changing a TAMS or TAMOSS pin requires reviewing the affected ingest surface,
+updating the contract, extending focused tests where behaviour changed, and
+passing both live compatibility jobs.

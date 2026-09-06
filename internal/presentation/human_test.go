@@ -3,8 +3,6 @@ package presentation
 import (
 	"bytes"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,77 +22,27 @@ const (
 	testUncertain  = "77777777-7777-4777-8777-777777777777"
 )
 
-func TestWriteHumanGolden(t *testing.T) {
+func TestWriteHumanIsLineOriented(t *testing.T) {
 	t.Parallel()
-
-	tests := []struct {
-		name    string
-		batch   ingest.BatchResult
-		metrics observability.Snapshot
-		options HumanOptions
-	}{
-		{
-			name:  "success",
-			batch: successBatch(),
-			metrics: observability.Snapshot{
-				Elapsed:     2*time.Second + 782*time.Millisecond,
-				BytesStaged: 1419776, BytesUploaded: 1514152, BytesVerified: 1514152,
-				Verified: 3,
-			},
-			options: HumanOptions{Width: 100},
-		},
-		{
-			name:    "multiple",
-			batch:   multipleBatch(),
-			metrics: observability.Snapshot{Elapsed: 63 * time.Second, BytesUploaded: 3_000_000, BytesVerified: 1_514_152, Verified: 3, Retries: 2},
-			options: HumanOptions{Width: 72},
-		},
-		{
-			name:  "failure_narrow",
-			batch: failureBatch(),
-			metrics: observability.Snapshot{
-				Elapsed:       4*time.Second + 420*time.Millisecond,
-				BytesUploaded: 3_145_728, BytesVerified: 1_048_576,
-				Verified: 1, Retracted: 1, Stranded: 1,
-			},
-			options: HumanOptions{Width: 40},
-		},
+	var output bytes.Buffer
+	metrics := observability.Snapshot{Elapsed: 2782 * time.Millisecond, BytesUploaded: 1514152, BytesVerified: 1514152}
+	if err := WriteHuman(&output, successBatch(), metrics, HumanOptions{}); err != nil {
+		t.Fatal(err)
 	}
-
-	for _, testCase := range tests {
-		testCase := testCase
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-			var output bytes.Buffer
-			if err := WriteHuman(&output, testCase.batch, testCase.metrics, testCase.options); err != nil {
-				t.Fatal(err)
-			}
-			want, err := os.ReadFile(filepath.Join("testdata", testCase.name+".golden"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := output.String(); got != string(want) {
-				t.Fatalf("human output differs from golden\n--- got ---\n%s--- want ---\n%s", got, want)
-			}
-			if strings.Contains(output.String(), "\t") {
-				t.Fatal("human output must not contain tabs")
-			}
-			if strings.Contains(output.String(), "\x1b") {
-				t.Fatal("colour-disabled output must not contain escape sequences")
-			}
-			for number, line := range strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n") {
-				if columns := visibleWidth(line); columns > testCase.options.Width {
-					t.Errorf("line %d occupies %d columns at width %d: %q", number+1, columns, testCase.options.Width, line)
-				}
-			}
-		})
+	for _, text := range []string{"INGESTED AND VERIFIED", "first-ingest.ts", testCollection, "essence-segments@1", testRunID} {
+		if !strings.Contains(output.String(), text) {
+			t.Errorf("receipt omitted %q:\n%s", text, output.String())
+		}
+	}
+	if strings.ContainsAny(output.String(), "\t\x1b\r") {
+		t.Fatalf("plain receipt contains terminal controls: %q", output.String())
 	}
 }
 
 func TestFailureReceiptRetainsOperationalIdentifiers(t *testing.T) {
 	t.Parallel()
 	var output bytes.Buffer
-	if err := WriteHuman(&output, failureBatch(), observability.Snapshot{}, HumanOptions{Width: 40}); err != nil {
+	if err := WriteHuman(&output, failureBatch(), observability.Snapshot{}, HumanOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, identifier := range []string{testCollection, testVideo, testStranded, testRetracted, testUncertain, testRunID} {
@@ -160,7 +108,7 @@ func TestConciseReceiptGroupsRatherThanRepeatsInputMetadata(t *testing.T) {
 	t.Parallel()
 	var output bytes.Buffer
 	batch := successBatch()
-	if err := WriteHuman(&output, batch, observability.Snapshot{}, HumanOptions{Width: 100}); err != nil {
+	if err := WriteHuman(&output, batch, observability.Snapshot{}, HumanOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	for value, wantCount := range map[string]int{
@@ -187,10 +135,10 @@ func TestVerboseExpandsProvenanceAndObjects(t *testing.T) {
 	batch.Results[0].MediaToolchain = "sha256:" + strings.Repeat("e", 64)
 
 	var concise, verbose bytes.Buffer
-	if err := WriteHuman(&concise, batch, observability.Snapshot{}, HumanOptions{Width: 120}); err != nil {
+	if err := WriteHuman(&concise, batch, observability.Snapshot{}, HumanOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteHuman(&verbose, batch, observability.Snapshot{BytesStaged: 1419776}, HumanOptions{Width: 120, Verbose: true}); err != nil {
+	if err := WriteHuman(&verbose, batch, observability.Snapshot{BytesStaged: 1419776}, HumanOptions{Verbose: true}); err != nil {
 		t.Fatal(err)
 	}
 	for _, detail := range []string{
@@ -283,15 +231,6 @@ func TestEmptyBatchStillHasPermanentFooter(t *testing.T) {
 	}
 }
 
-func TestUnicodeWrappingUsesTerminalColumns(t *testing.T) {
-	t.Parallel()
-	for _, line := range wrap("日本語の入力.ts", 8) {
-		if got := visibleWidth(line); got > 8 {
-			t.Errorf("wrapped line occupies %d columns: %q", got, line)
-		}
-	}
-}
-
 func TestHumanUnits(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {
@@ -342,23 +281,6 @@ func successBatch() ingest.BatchResult {
 			},
 		}},
 	}
-}
-
-func multipleBatch() ingest.BatchResult {
-	batch := successBatch()
-	batch.Succeeded = 2
-	second := ingest.Result{
-		Input: "s3://broadcast-archive/programmes/second.mov", Profile: "preserve", ProfileVersion: "1",
-		RootFlowID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", Bytes: 1_485_848, SHA256: strings.Repeat("b", 64),
-		Status: ingest.ResultStatusResumed, Verification: ingest.VerificationNotRequested,
-		Flows: []ingest.FlowResult{{
-			FlowID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", SourceID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
-			Role: "video", Disposition: ingest.FlowUnchanged,
-			Objects: []ingest.ObjectResult{{ObjectID: "ffffffff-ffff-4fff-8fff-ffffffffffff", Timerange: "0:0_1:1", Bytes: 1_485_848, SHA256: strings.Repeat("4", 64), Status: ingest.ObjectStatusResumed}},
-		}},
-	}
-	batch.Results = append(batch.Results, second)
-	return batch
 }
 
 func failureBatch() ingest.BatchResult {

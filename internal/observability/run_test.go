@@ -117,41 +117,19 @@ func TestMetricsAreConcurrentAndInvocationScoped(t *testing.T) {
 	}
 }
 
-func TestSummaryIsDiagnosticAndDeterministic(t *testing.T) {
+func TestSnapshotContainsElapsedTimeAndOutcomes(t *testing.T) {
 	t.Parallel()
-	var output bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&output, nil))
-	run := New("47f553fb-c362-447a-95bc-07f44302cf8e", logger)
+	run := New("47f553fb-c362-447a-95bc-07f44302cf8e", nil)
 	run.now = func() time.Time { return run.started.Add(2 * time.Second) }
 	run.Staged(11)
 	run.Uploaded(7)
 	run.Verification(7, OutcomeVerified)
 	run.Verification(3, OutcomeRetracted)
 	run.Verification(5, OutcomeStranded)
-	run.Summary()
-	run.Summary()
-
-	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("terminal summaries = %d, want exactly one: %s", len(lines), output.String())
-	}
-	record := decodeRecord(t, lines[0])
-	if record["msg"] != "ingest run metrics" || record["elapsed"] != float64(2_000_000_000) ||
-		record["bytes_staged"] != float64(11) || record["bytes_uploaded"] != float64(7) ||
-		record["bytes_verified"] != float64(7) || record["verified"] != float64(1) ||
-		record["retracted"] != float64(1) || record["stranded"] != float64(1) {
-		t.Fatalf("summary record = %#v", record)
-	}
-}
-
-func TestSummaryRespectsExplicitDiagnosticLevel(t *testing.T) {
-	t.Parallel()
-	var output bytes.Buffer
-	summaryLogger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	run := NewWithSummaryLogger("1c7e31cc-25d7-4546-8b2b-b49c9324a150", nil, summaryLogger)
-	run.Summary()
-	if output.Len() != 0 {
-		t.Fatalf("warn-level logger emitted info metrics: %s", output.String())
+	metrics := run.Snapshot()
+	if metrics.Elapsed != 2*time.Second || metrics.BytesStaged != 11 || metrics.BytesUploaded != 7 ||
+		metrics.BytesVerified != 7 || metrics.Verified != 1 || metrics.Retracted != 1 || metrics.Stranded != 1 {
+		t.Fatalf("snapshot = %#v", metrics)
 	}
 }
 

@@ -33,7 +33,7 @@ func TestRefreshedSignedURLResumesTheSameGeneratedGraph(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	config := Config{
-		Concurrency: 1, Transfers: 2, Verify: true, SegmentDuration: time.Second,
+		Concurrency: 1, Transfers: 2, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}
 	run := func(rawURL string) Result {
@@ -182,7 +182,7 @@ func TestGeneratedIdentityIncludesEffectiveMediaInterpretation(t *testing.T) {
 	run := func(filename string) Result {
 		t.Helper()
 		pipeline, err := New(Config{
-			DryRun: true, SegmentDuration: 0, EssenceStorage: media.EssenceStorageMuxed,
+			DryRunMode: DryRunExact, SegmentDuration: 0, EssenceStorage: media.EssenceStorageMuxed,
 		}, nil, filenameSensitiveProber{}, nil, discardLogger(), nil)
 		if err != nil {
 			t.Fatal(err)
@@ -391,12 +391,12 @@ func TestCanonicalProvenanceDropsCredentialBearingURLParts(t *testing.T) {
 
 func TestLocalMutationFailsBeforeAnyTAMSMutation(t *testing.T) {
 	for _, segmented := range []bool{false, true} {
-		for _, verify := range []bool{false, true} {
+		for _, verification := range []VerificationMode{VerificationNone, VerificationReadback} {
 			name := "whole"
 			if segmented {
 				name = "segmented"
 			}
-			if verify {
+			if verification != VerificationNone {
 				name += "-verified"
 			}
 			t.Run(name, func(t *testing.T) {
@@ -413,7 +413,7 @@ func TestLocalMutationFailsBeforeAnyTAMSMutation(t *testing.T) {
 				}
 				prober := &mutatingProber{target: filename, replacement: []byte("media-B")}
 				pipeline, err := New(Config{
-					Concurrency: 1, Transfers: 1, Verify: verify, SegmentDuration: duration,
+					Concurrency: 1, Transfers: 1, VerificationMode: verification, SegmentDuration: duration,
 					EssenceStorage: media.EssenceStorageMuxed,
 				}, client, prober, segmenter, discardLogger(), nil)
 				if err != nil {
@@ -465,7 +465,7 @@ func (filenameSensitiveProber) Probe(_ context.Context, filename string) (media.
 }
 
 func (filenameSensitiveProber) Version(context.Context) (string, error) {
-	return "filename-sensitive test prober", nil
+	return "ffprobe version 5.1 filename-sensitive test", nil
 }
 
 type mutatingProber struct {
@@ -486,5 +486,5 @@ func (p *mutatingProber) Probe(ctx context.Context, filename string) (media.Prob
 }
 
 func (*mutatingProber) Version(context.Context) (string, error) {
-	return "mutating test prober", nil
+	return "ffprobe version 5.1 mutating test", nil
 }

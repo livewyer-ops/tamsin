@@ -25,7 +25,7 @@ func TestJSONTTYPublishesPermanentMetricsInTheEventStream(t *testing.T) {
 	}
 	var stdout bytes.Buffer
 	code := Execute(context.Background(), []string{
-		"--profile", "preserve", "--ffprobe", fakeMediaTool(t, directory), "--format", "json", "--dry-run", "-d", "0", input,
+		"--profile", "preserve", "--ffprobe", fakeMediaTool(t, directory), "--format", "json", "--dry-run=fast", "-d", "0", input,
 	}, strings.NewReader(""), &stdout, terminal)
 	if code != ExitOK {
 		t.Fatalf("exit = %d; stdout = %s", code, stdout.String())

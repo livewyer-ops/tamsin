@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 // The public command tree is assembled by hand across root.go and config.go, so
@@ -17,11 +16,10 @@ func TestCommandTreeExposesEveryAddressableCommand(t *testing.T) {
 	t.Parallel()
 
 	want := map[string][]string{
-		"tamsin":        {"completion", "config", "doctor", "ingest", "profiles"},
-		"tamsin config": {"show", "validate"},
+		"tamsin": {"completion", "doctor", "ingest", "profiles"},
 	}
 
-	app := &application{v: viper.New()}
+	app := &application{v: newSettings()}
 	got := map[string][]string{}
 	collectCommandTree(app.rootCommand(), got)
 

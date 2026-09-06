@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/livewyer-ops/tamsin/ingestevent"
+	"github.com/livewyer-ops/tamsin/internal/ingestevent"
 )
 
 const (
@@ -173,5 +173,26 @@ func TestPublishedSchemaAllowsStartupFailureAndCompatibleMinorExtensions(t *test
 	future["protocol"] = "another.protocol"
 	if err := validate(t, schema, future); err == nil {
 		t.Fatal("schema accepted the wrong process protocol")
+	}
+}
+
+func TestPartialRunSchemaPinsExitCode(t *testing.T) {
+	t.Parallel()
+	schema := compileTamsinSchema(t, "ingest-events-v2.json")
+	record := map[string]any{
+		"protocol": "tamsin.ingest.events", "protocol_version": "2.1", "type": "run.finished", "seq": 4,
+		"run_id": eventRunID, "emitted_at": "2026-08-09T08:35:46Z", "elapsed_ms": 10,
+		"payload": map[string]any{
+			"outcome": "partial", "exit_code": 4, "total": 2, "succeeded": 1, "failed": 1, "elapsed_ms": 10,
+			"bytes_staged": 0, "bytes_uploaded": 0, "bytes_verified": 0, "retries": 0,
+			"objects_verified": 0, "objects_retracted": 0, "objects_stranded": 0,
+		},
+	}
+	if err := validate(t, schema, record); err != nil {
+		t.Fatalf("partial run with exit 4 does not satisfy schema: %v", err)
+	}
+	record["payload"].(map[string]any)["exit_code"] = 7
+	if err := validate(t, schema, record); err == nil {
+		t.Fatal("schema accepted a partial run with an exit code other than 4")
 	}
 }

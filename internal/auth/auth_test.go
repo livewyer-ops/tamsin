@@ -71,7 +71,7 @@ func TestHeaderAndURLAuthentication(t *testing.T) {
 				testCase.assert(t, request)
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
 			})
-			transport, mode, err := NewRoundTripper(context.Background(), testCase.config, base, io.Discard)
+			transport, mode, err := NewRoundTripper(context.Background(), testCase.config, base)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -116,7 +116,7 @@ func TestOAuthClientCredentials(t *testing.T) {
 		Mode: ModeOAuthClient, Endpoint: apiServer.URL,
 		TokenURL: tokenServer.URL, ClientID: "client", ClientSecret: "secret",
 		AllowInsecureLoopback: true,
-	}, isolatedTransport(), io.Discard)
+	}, isolatedTransport())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestOAuthTokenErrorsDoNotLeakCredentialsOrResponseBodies(t *testing.T) {
 		Mode: ModeOAuthClient, Endpoint: "https://tams.example.test",
 		TokenURL: tokenServer.URL, ClientID: "client", ClientSecret: "secret-value",
 		AllowInsecureLoopback: true,
-	}, isolatedTransport(), io.Discard)
+	}, isolatedTransport())
 	if err == nil {
 		t.Fatal("token acquisition unexpectedly succeeded")
 	}
@@ -179,7 +179,7 @@ func TestOAuthTokenRequestDoesNotFollowRedirect(t *testing.T) {
 		Mode: ModeOAuthClient, Endpoint: "https://tams.example.test",
 		TokenURL: tokenServer.URL, ClientID: "client", ClientSecret: "secret-value",
 		AllowInsecureLoopback: true,
-	}, isolatedTransport(), io.Discard)
+	}, isolatedTransport())
 	if err == nil {
 		t.Fatal("redirected token acquisition unexpectedly succeeded")
 	}
@@ -217,7 +217,7 @@ func TestOAuthAuthorizationCode(t *testing.T) {
 		ClientID: "client", RedirectURL: "https://app.example/callback", OAuthCode: "one-time-code",
 		PKCEVerifier:          "0123456789012345678901234567890123456789012",
 		AllowInsecureLoopback: true,
-	}, isolatedTransport(), io.Discard)
+	}, isolatedTransport())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,14 +244,6 @@ func TestResolveModeRequiresUnambiguousOAuthGrant(t *testing.T) {
 			config: Config{
 				OAuthCode: "one-time-code", TokenURL: "https://identity.example/token",
 				ClientID: "client", RedirectURL: "https://application.example/callback",
-			},
-			want: ModeOAuthCode,
-		},
-		{
-			name: "authorization endpoint signals code grant",
-			config: Config{
-				AuthURL: "https://identity.example/authorize", TokenURL: "https://identity.example/token",
-				ClientID: "client", RedirectURL: "http://localhost:53682/callback",
 			},
 			want: ModeOAuthCode,
 		},
@@ -302,7 +294,7 @@ func TestPreobtainedAuthorizationCodeDoesNotRequireAuthorizationEndpoint(t *test
 		Endpoint: "https://tams.example.test", TokenURL: tokenServer.URL,
 		ClientID: "client", RedirectURL: "https://application.example/callback",
 		OAuthCode: "one-time-code", AllowInsecureLoopback: true,
-	}, isolatedTransport(), io.Discard)
+	}, isolatedTransport())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +456,7 @@ func TestAuthenticatedTAMSModesRejectRemoteHTTPBeforeTransport(t *testing.T) {
 				calls.Add(1)
 				return nil, nil
 			})
-			_, _, err := NewRoundTripper(context.Background(), config, base, io.Discard)
+			_, _, err := NewRoundTripper(context.Background(), config, base)
 			if err == nil || !strings.Contains(err.Error(), "HTTPS") {
 				t.Fatalf("NewRoundTripper() error = %v, want HTTPS rejection", err)
 			}
@@ -497,7 +489,7 @@ func TestCredentialTransportsRejectRuntimeHTTPBeforeInjection(t *testing.T) {
 				calls.Add(1)
 				return nil, nil
 			})
-			transport, _, err := NewRoundTripper(context.Background(), config, base, io.Discard)
+			transport, _, err := NewRoundTripper(context.Background(), config, base)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -541,7 +533,7 @@ func TestCredentialTransportBlocksHTTPSDowngradeRedirect(t *testing.T) {
 
 	transport, _, err := NewRoundTripper(context.Background(), Config{
 		Mode: ModeBearer, Endpoint: redirector.URL, BearerToken: "bearer-secret",
-	}, redirector.Client().Transport, io.Discard)
+	}, redirector.Client().Transport)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,7 +570,7 @@ func TestCredentialTransportBlocksCrossOriginHTTPSRedirect(t *testing.T) {
 
 	transport, _, err := NewRoundTripper(context.Background(), Config{
 		Mode: ModeBearer, Endpoint: redirector.URL, BearerToken: "bearer-secret",
-	}, redirector.Client().Transport, io.Discard)
+	}, redirector.Client().Transport)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -621,15 +613,7 @@ func TestOAuthEndpointsRejectRemoteHTTPBeforeNetwork(t *testing.T) {
 			name: "authorization code token endpoint",
 			config: Config{
 				Mode: ModeOAuthCode, Endpoint: "https://tams.example.test",
-				TokenURL: "http://identity.example.test/token?code=code-secret", AuthURL: "https://identity.example.test/authorize",
-				ClientID: "client", RedirectURL: "https://application.example.test/callback", OAuthCode: "one-time-secret",
-			},
-		},
-		{
-			name: "authorization endpoint",
-			config: Config{
-				Mode: ModeOAuthCode, Endpoint: "https://tams.example.test",
-				TokenURL: "https://identity.example.test/token", AuthURL: "http://identity.example.test/authorize?state=url-secret",
+				TokenURL: "http://identity.example.test/token?code=code-secret",
 				ClientID: "client", RedirectURL: "https://application.example.test/callback", OAuthCode: "one-time-secret",
 			},
 		},
@@ -642,7 +626,7 @@ func TestOAuthEndpointsRejectRemoteHTTPBeforeNetwork(t *testing.T) {
 				calls.Add(1)
 				return nil, nil
 			})
-			_, _, err := NewRoundTripper(context.Background(), testCase.config, base, io.Discard)
+			_, _, err := NewRoundTripper(context.Background(), testCase.config, base)
 			if err == nil || !strings.Contains(err.Error(), "HTTPS") {
 				t.Fatalf("NewRoundTripper() error = %v, want HTTPS rejection", err)
 			}
@@ -671,7 +655,7 @@ func TestUnauthenticatedHTTPRemainsAvailable(t *testing.T) {
 	})
 	transport, mode, err := NewRoundTripper(context.Background(), Config{
 		Mode: ModeNone, Endpoint: "http://service.example.test/tams",
-	}, base, io.Discard)
+	}, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,41 +670,5 @@ func TestUnauthenticatedHTTPRemainsAvailable(t *testing.T) {
 	_ = response.Body.Close()
 	if calls.Load() != 1 {
 		t.Fatalf("base transport called %d times", calls.Load())
-	}
-}
-
-func TestInteractiveCallbackRemainsHTTPLoopbackOnly(t *testing.T) {
-	t.Parallel()
-	accepted := []string{
-		"http://localhost:53682/callback",
-		"HTTP://LOCALHOST:53682/callback",
-		"http://127.0.0.1:53682/callback",
-		"http://127.12.3.4:53682/callback",
-		"http://[::1]:53682/callback",
-		"http://[0:0:0:0:0:0:0:1]:53682/callback",
-	}
-	for _, rawURL := range accepted {
-		if _, err := parseInteractiveRedirect(rawURL); err != nil {
-			t.Errorf("parseInteractiveRedirect(%q) error = %v", rawURL, err)
-		}
-	}
-
-	rejected := []string{
-		"https://localhost:53682/callback",
-		"http://localhost.example.test:53682/callback",
-		"http://127.0.0.1.example.test:53682/callback",
-		"http://192.0.2.10:53682/callback",
-		"http://[::]:53682/callback",
-		"http://user:callback-secret@localhost:53682/callback",
-	}
-	for _, rawURL := range rejected {
-		_, err := parseInteractiveRedirect(rawURL)
-		if err == nil {
-			t.Errorf("parseInteractiveRedirect(%q) unexpectedly succeeded", rawURL)
-			continue
-		}
-		if strings.Contains(err.Error(), "callback-secret") {
-			t.Errorf("callback validation leaked userinfo: %v", err)
-		}
 	}
 }

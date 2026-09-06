@@ -41,10 +41,12 @@ it is not a synonym for a complete streaming workflow.
 Use `--profile NAME` or pin the contract as `--profile NAME@1`. An individual
 media flag is applied after the profile. If it changes a profile setting, or if
 `--ffmpeg-arg` is supplied, the resolved result is reported as `custom@1`. A
-custom treatment is limited to a single essence and requires explicit output
-`codec` and complete `essence_parameters` in `--flow-metadata`. Multi-stream
-transcodes must be performed before ingest because one override cannot
-describe each output essence truthfully.
+custom treatment using `--ffmpeg-arg` is limited to a single essence and
+requires explicit output `codec` and complete `essence_parameters` in
+`--flow-metadata`. Changing only a packaging setting such as Segment duration
+does not impose that restriction. Multi-stream transcodes must be performed
+before ingest because one override cannot describe each output essence
+truthfully.
 
 ```sh
 tamsin --profile preserve -i master.mxf -o https://tams.example.com
@@ -125,6 +127,6 @@ unused tool does not manufacture a new Flow for identical source bytes.
 
 ## See also
 
-- [Choose how essences are stored](../how-to/choose-how-essences-are-stored.md)
-- [Prepare MPEG-TS Segments](../how-to/prepare-mpegts-segments.md)
-- [Container media-type decision](../explanation/decisions/0005-container-media-types.md)
+- [Media metadata](media-metadata.md)
+- [Integrity and rollback](../explanation/integrity.md)
+- [TAMS conformance](../explanation/conformance.md)

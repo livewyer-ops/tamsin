@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -25,13 +27,11 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/observability"
 	"github.com/livewyer-ops/tamsin/internal/presentation"
 	"github.com/livewyer-ops/tamsin/internal/progress"
-	"github.com/livewyer-ops/tamsin/internal/resultjournal"
 	"github.com/livewyer-ops/tamsin/internal/source"
 	"github.com/livewyer-ops/tamsin/internal/tams"
 	"github.com/livewyer-ops/tamsin/internal/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"github.com/spf13/viper"
 )
 
 // defaultSegmentDuration targets Media Objects that are, in the words of TAMS
@@ -43,15 +43,17 @@ const defaultSegmentDuration = 10 * time.Second
 
 const maxConfigFileBytes = 2 << 20
 
+var diagnosticURLPattern = regexp.MustCompile(`(?i)\b(?:https?|s3)://[^\s<>"']+`)
+
 type application struct {
-	v                *viper.Viper
-	persistentFlags  *pflag.FlagSet
-	stdin            io.Reader
-	stdout           io.Writer
-	stderr           io.Writer
-	runID            string
-	configFile       string
-	ingestInvocation bool
+	v                 *settings
+	stdin             io.Reader
+	stdout            io.Writer
+	stderr            io.Writer
+	runID             string
+	configFile        string
+	configFileWarning string
+	ingestInvocation  bool
 	// ingestTerminalFrozen marks the point after which all terminal projections
 	// share one cancellation decision. Execute must not let a later caller
 	// cancellation rewrite only the process exit code.
@@ -65,7 +67,7 @@ type application struct {
 }
 
 func Execute(ctx context.Context, arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	app := &application{v: viper.New(), stdin: stdin, stdout: stdout, stderr: stderr, runID: uuid.NewString()}
+	app := &application{v: newSettings(), stdin: stdin, stdout: stdout, stderr: stderr, runID: uuid.NewString()}
 	explicitFormat, requestedJSON := requestedIngestFormat(arguments)
 	command := app.rootCommand()
 	// Command discovery happens before Cobra parses flags so even a malformed
@@ -91,7 +93,11 @@ func Execute(ctx context.Context, arguments []string, stdin io.Reader, stdout, s
 			machineJSON = requestedJSON
 		}
 		if app.ingestInvocation && machineJSON {
-			if resolvedCode, eventErr := app.finishBootstrapEvents(ctx, err, code); eventErr == nil && app.events != nil && app.events.Finished() {
+			structuredErr := err
+			if code == ExitUsage {
+				structuredErr = withDiagnosticHint(err, app.safeUsageHint(err))
+			}
+			if resolvedCode, eventErr := app.finishBootstrapEvents(ctx, structuredErr, code); eventErr == nil && app.events != nil && app.events.Finished() {
 				return resolvedCode
 			} else if eventErr != nil {
 				err = errors.Join(err, fmt.Errorf("write structured ingest failure: %w", eventErr))
@@ -155,8 +161,7 @@ func (a *application) rootCommand() *cobra.Command {
 	a.addPersistentFlags(root)
 	root.PersistentPreRunE = func(command *cobra.Command, _ []string) error {
 		a.ingestInvocation = command == root || command.Name() == "ingest"
-		if command.Annotations[helpGroupAnnotation] == "true" ||
-			command.Annotations[configIndependentAnnotation] == "true" {
+		if command.Annotations[configIndependentAnnotation] == "true" {
 			return nil
 		}
 		if err := a.loadConfig(); err != nil {
@@ -200,7 +205,6 @@ func (a *application) rootCommand() *cobra.Command {
 
 	root.AddCommand(a.ingestCommand())
 	root.AddCommand(retiredAPICommand())
-	root.AddCommand(a.configCommand())
 	root.AddCommand(a.doctorCommand())
 	root.AddCommand(a.profilesCommand())
 	root.AddCommand(a.completionCommand(root))
@@ -244,11 +248,10 @@ func (a *application) ingestCommand() *cobra.Command {
 
 func (a *application) addPersistentFlags(command *cobra.Command) {
 	flags := command.PersistentFlags()
-	a.persistentFlags = flags
 	flags.String("config", "", "configuration file (default: $XDG_CONFIG_HOME/tamsin/config.yaml)")
 	flags.StringP("endpoint", "o", "", "TAMS API endpoint")
 	flags.String("format", "human", "result format: human or json")
-	flags.String("progress", "auto", "progress reporting: auto, tty, plain, or none")
+	flags.String("progress", "auto", "progress reporting: auto, plain, or none")
 	flags.String("color", "auto", "color output: auto, always, or never")
 	flags.BoolP("quiet", "q", false, "suppress successful human output")
 	flags.BoolP("verbose", "v", false, "show expanded human result details")
@@ -270,7 +273,6 @@ func (a *application) addPersistentFlags(command *cobra.Command) {
 	flags.String("token", "", "bearer token (prefer TAMSIN_AUTH_TOKEN)")
 	flags.String("url-token", "", "TAMS access_token value (prefer endpoint URL or environment)")
 	flags.String("token-url", "", "OAuth token endpoint")
-	flags.String("authorization-url", "", "OAuth authorization endpoint")
 	flags.String("client-id", "", "OAuth client ID")
 	flags.String("client-secret", "", "OAuth client secret (prefer TAMSIN_AUTH_CLIENT_SECRET)")
 	flags.String("redirect-url", "http://127.0.0.1:53682/callback", "OAuth authorization-code redirect URL")
@@ -280,16 +282,10 @@ func (a *application) addPersistentFlags(command *cobra.Command) {
 	flags.Bool("allow-insecure-auth-loopback", false,
 		"allow credentials over HTTP to explicit loopback hosts (unsafe)")
 
+	a.v.flags = flags
 	for _, definition := range configDefinitions() {
-		if definition.flag == "" {
-			continue
-		}
-		flag := flags.Lookup(definition.flag)
-		if flag == nil {
+		if definition.flag != "" && flags.Lookup(definition.flag) == nil {
 			panic("configuration definition names an unknown persistent flag: " + definition.flag)
-		}
-		if err := a.v.BindPFlag(definition.key, flag); err != nil {
-			panic(err)
 		}
 	}
 }
@@ -314,19 +310,38 @@ func (a *application) loadConfig() error {
 	if err != nil {
 		return fmt.Errorf("read configuration %q: %w", filename, err)
 	}
-	if err := a.validateConfigFile(data); err != nil {
+	values, err := decodeConfigFile(data)
+	if err != nil {
 		return fmt.Errorf("read configuration %q: %w", filename, err)
 	}
-	a.v.SetConfigFile(filename)
-	// The public contract is YAML, independent of a mounted file's suffix.
-	// Parsing the already-validated bytes also avoids reading a different file
-	// if the path is replaced between validation and precedence resolution.
-	a.v.SetConfigType("yaml")
-	if err := a.v.ReadConfig(bytes.NewReader(data)); err != nil {
-		return fmt.Errorf("read configuration %q: %w", filename, err)
-	}
+	a.v.file = values
 	a.configFile = filename
+	if runtime.GOOS != "windows" {
+		if info, statErr := os.Stat(filename); statErr == nil && info.Mode().Perm()&0o077 != 0 && a.configFileContainsSecrets() {
+			a.configFileWarning = "configuration contains secret values and is readable by group or other users; restrict it to mode 0600"
+		}
+	}
 	return nil
+}
+
+func (a *application) configFileContainsSecrets() bool {
+	for _, definition := range configDefinitions() {
+		value, configured := a.v.file[definition.key]
+		if !definition.secret || !configured {
+			continue
+		}
+		switch definition.kind {
+		case configString:
+			if value, _ := value.(string); value != "" {
+				return true
+			}
+		case configStrings:
+			if value, _ := value.([]string); len(value) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func readConfigFile(filename string) ([]byte, error) {
@@ -381,7 +396,7 @@ func (a *application) validateGlobalConfig() error {
 		return fmt.Errorf("invalid log level %q", a.v.GetString("log.level"))
 	}
 	switch strings.ToLower(a.v.GetString("progress")) {
-	case "auto", "tty", "plain", "none":
+	case "auto", "plain", "none":
 	default:
 		return fmt.Errorf("invalid progress mode %q", a.v.GetString("progress"))
 	}
@@ -428,7 +443,6 @@ type ingestFlagValues struct {
 	sourceID          string
 	metadataFile      string
 	tamsFlowProfiles  []string
-	journal           string
 	stdinName         string
 	inputHeaders      []string
 	s3Region          string
@@ -439,8 +453,7 @@ type ingestFlagValues struct {
 }
 
 type ingestLifecycleOutput struct {
-	events  *ingestEventOutput
-	journal *resultjournal.Writer
+	events *ingestEventOutput
 }
 
 func (o *ingestLifecycleOutput) InputStarted(index int) error {
@@ -458,22 +471,41 @@ func (o *ingestLifecycleOutput) FlowPlanned(index int, plan ingest.FlowPlan) err
 }
 
 func (o *ingestLifecycleOutput) ObjectsCompleted(index int, flowID string, objects []ingest.ObjectResult) error {
-	var eventErr, journalErr error
-	if o.events != nil {
-		eventErr = o.events.ObjectsCompleted(index, flowID, objects)
+	if o.events == nil {
+		return nil
 	}
-	if o.journal != nil {
-		journalErr = o.journal.WriteObjectBatch(index, flowID, objects)
-	}
-	return errors.Join(eventErr, journalErr)
+	return o.events.ObjectsCompleted(index, flowID, objects)
+}
+
+func addTreatmentFlags(command *cobra.Command, profile *string, segmentDuration *time.Duration,
+	segmentFormat, essenceStorage *string, ffmpegArgs *[]string) {
+	flags := command.Flags()
+	flags.StringVar(profile, "profile", "", profileFlagDescription())
+	registerProfileCompletion(command)
+	flags.DurationVarP(segmentDuration, "segment-duration", "d", defaultSegmentDuration,
+		"target duration of each TAMS Flow Segment; 0 disables segmentation, leaving storage to decide whole input or whole essence")
+	flags.StringVar(segmentFormat, "segment-format", string(media.SegmentFormatSource),
+		"container for Flow Segments: source or mpegts")
+	flags.StringVar(essenceStorage, "essence-storage", string(media.EssenceStorageIndependent),
+		"how a muxed input is stored: independent (one Flow per essence) or muxed (keep the multiplex)")
+	flags.StringArrayVar(ffmpegArgs, "ffmpeg-arg", nil, "additional explicit FFmpeg argument (repeatable)")
+}
+
+func addReadinessFlags(command *cobra.Command, tempDirectory, stagingByteBudget, storageID *string) {
+	flags := command.Flags()
+	flags.StringVar(tempDirectory, "temp-dir", "", "staging directory")
+	flags.StringVar(stagingByteBudget, "staging-byte-budget", "auto",
+		"global temporary-media budget: auto or a byte size such as 80GiB")
+	flags.StringVar(storageID, "storage-id", "", "target TAMS storage backend ID")
 }
 
 func addIngestFlags(command *cobra.Command) *ingestFlagValues {
 	values := &ingestFlagValues{}
 	flags := command.Flags()
 	flags.StringArrayVarP(&values.inputs, "input", "i", nil, "input path or URI (repeatable)")
-	flags.StringVar(&values.profile, "profile", "", profileFlagDescription())
-	registerProfileCompletion(command)
+	addTreatmentFlags(command, &values.profile, &values.segmentDuration, &values.segmentFormat,
+		&values.essenceStorage, &values.ffmpegArgs)
+	addReadinessFlags(command, &values.tempDirectory, &values.stagingByteBudget, &values.storageID)
 	// Left at zero so --help does not print a number that is only true on the
 	// machine that printed it. The real default is resolved from configuration
 	// below, the same way --probe-concurrency does it.
@@ -485,30 +517,16 @@ func addIngestFlags(command *cobra.Command) *ingestFlagValues {
 		"maximum queued FFprobe measurements (local media processes are capped at two)")
 	flags.StringVar(&values.dryRun, "dry-run", string(ingest.DryRunOff),
 		"local-only planning mode: fast or exact")
-	flags.Lookup("dry-run").NoOptDefVal = string(ingest.DryRunFast)
 	flags.StringVar(&values.verify, "verify", string(ingest.VerificationAuto),
 		"Object integrity policy: auto, readback, or none")
-	flags.Lookup("verify").NoOptDefVal = string(ingest.VerificationAuto)
-	flags.StringVar(&values.tempDirectory, "temp-dir", "", "staging directory")
-	flags.StringVar(&values.stagingByteBudget, "staging-byte-budget", "auto",
-		"global temporary-media budget: auto or a byte size such as 80GiB")
 	flags.IntVar(&values.maxInputs, "max-inputs", source.DefaultMaxInputs,
 		"maximum unique inputs after directory, manifest, and S3 prefix expansion")
-	flags.DurationVarP(&values.segmentDuration, "segment-duration", "d", defaultSegmentDuration,
-		"target duration of each TAMS Flow Segment; 0 disables segmentation, leaving storage to decide whole input or whole essence")
-	flags.StringVar(&values.segmentFormat, "segment-format", string(media.SegmentFormatSource),
-		"container for Flow Segments: source or mpegts")
-	flags.StringVar(&values.essenceStorage, "essence-storage", string(media.EssenceStorageIndependent),
-		"how a muxed input is stored: independent (one Flow per essence) or muxed (keep the multiplex)")
-	flags.StringArrayVar(&values.ffmpegArgs, "ffmpeg-arg", nil, "additional explicit FFmpeg argument (repeatable)")
 	flags.StringVar(&values.start, "start", "0:0", "Flow start as a TAMS timestamp")
-	flags.StringVar(&values.storageID, "storage-id", "", "target TAMS storage backend ID")
 	flags.StringVar(&values.flowID, "flow-id", "", "Flow UUID for a single resolved input")
 	flags.StringVar(&values.sourceID, "source-id", "", "Source UUID for a single resolved input")
 	flags.StringVar(&values.metadataFile, "flow-metadata", "", "JSON Flow metadata overrides")
 	flags.StringArrayVar(&values.tamsFlowProfiles, "tams-flow-profile", nil,
 		"TAMS 8.2 Flow Profile assignment as [video|audio|image|data[:N]=]UUID (repeatable)")
-	flags.StringVar(&values.journal, "journal", "", "create a new one-run durable JSONL result file")
 	flags.StringVar(&values.stdinName, "stdin-name", "stdin.bin",
 		"filename hint; explicitly selects stdin unless input is configured or passed with --input")
 	flags.StringArrayVar(&values.inputHeaders, "input-header", nil, "HTTP input header as 'Name: value' (repeatable)")
@@ -523,10 +541,9 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 	defer cancel(nil)
 
 	var (
-		options   *ingestFlagValues
-		batch     ingest.BatchResult
-		haveBatch bool
-		run       *observability.Run
+		options *ingestFlagValues
+		batch   ingest.BatchResult
+		run     *observability.Run
 	)
 	if strings.EqualFold(a.v.GetString("format"), "json") {
 		output, err := newIngestEventOutput(a.stdout, a.runID, cancel)
@@ -535,7 +552,7 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 		}
 		a.events = output
 		// Only the caller-owned command context represents a protocol-level
-		// interruption. Internal cancellation (journal/event sink failure) stops
+		// interruption. Internal cancellation from an event sink failure stops
 		// pipeline work but must remain a failed run, not manufacture a signal.
 		output.WatchCancellation(command.Context())
 		defer func() {
@@ -543,12 +560,8 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 			if run != nil {
 				metrics = run.Snapshot()
 			}
-			var completed *ingest.BatchResult
-			if haveBatch {
-				completed = &batch
-			}
 			requestedCode := exitCode(returnErr)
-			resolvedCode, err := output.Finish(completed, returnErr, requestedCode, options, metrics, command.Context())
+			resolvedCode, err := output.Finish(returnErr, requestedCode, options, metrics, command.Context())
 			if err != nil {
 				returnErr = withExit(ExitGeneral, errors.Join(returnErr, fmt.Errorf("finish ingest event stream: %w", err)))
 			} else {
@@ -590,24 +603,26 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 		run.SetRetryObserver(a.events.Retry)
 	}
 	logger = run.Logger()
+	if a.configFileWarning != "" {
+		logger.Warn(a.configFileWarning, "config_file", a.configFile)
+	}
 	defer func() {
 		if returnErr != nil {
 			run.Failure(returnErr)
 		}
 	}()
-	transport := a.httpTransport()
+	transport := a.httpTransport(options.concurrency, options.transfers)
 	inputHeaders, err := parseHeaders(options.inputHeaders)
 	if err != nil {
 		return withExit(ExitUsage, err)
 	}
-	retryClient := retryablehttp.NewClient()
-	retryClient.Logger = nil
-	retryClient.RetryMax = a.v.GetInt("http.retries")
-	retryClient.Backoff = observedSourceBackoff(run, retryClient.RetryMax)
-	// Source bodies are whole media. The optional absolute deadline remains on
-	// the client; byte-level idle detection is applied to each body by source.
-	retryClient.HTTPClient = &http.Client{Transport: transport, Timeout: a.v.GetDuration("http.transfer_timeout")}
-	inputHTTPClient := retryClient.StandardClient()
+	inputHTTPClient := newInputHTTPClient(
+		transport,
+		a.v.GetDuration("http.transfer_timeout"),
+		a.v.GetInt("http.retries"),
+		run,
+		inputHeaders,
+	)
 	awsHTTPClient := &http.Client{
 		Transport: transport, Timeout: a.v.GetDuration("http.transfer_timeout"), CheckRedirect: rejectRedirect,
 	}
@@ -649,10 +664,9 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 			return withExit(ExitAuth, err)
 		}
 	}
-	lifecycleOutput := &ingestLifecycleOutput{events: a.events}
 	var lifecycleObserver ingest.LifecycleObserver
-	if a.events != nil || options.journal != "" {
-		lifecycleObserver = lifecycleOutput
+	if a.events != nil {
+		lifecycleObserver = &ingestLifecycleOutput{events: a.events}
 	}
 	pipeline, err := ingest.New(ingest.Config{
 		Observability: run, LifecycleObserver: lifecycleObserver,
@@ -666,31 +680,14 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 	if err != nil {
 		return withExit(ExitUsage, err)
 	}
-	var journal *resultjournal.Writer
-	if options.journal != "" {
-		journal, err = resultjournal.Open(options.journal, pipeline.ResultContract(), items)
-		if err != nil {
-			return withExit(ExitGeneral, err)
-		}
-		lifecycleOutput.journal = journal
-	}
-	var journalResultErr error
 	var observe ingest.ResultObserver
-	if journal != nil || a.events != nil {
+	if a.events != nil {
 		observe = func(index int, result ingest.Result) error {
-			var eventErr error
-			if a.events != nil {
-				eventErr = a.events.Result(index, result)
-			}
-			if journal != nil && journalResultErr == nil {
-				journalResultErr = journal.WriteInput(index, result)
-			}
-			return errors.Join(eventErr, journalResultErr)
+			return a.events.Result(index, result)
 		}
 	}
 	var pipelineErr error
 	batch, pipelineErr = pipeline.RunObserved(runCtx, items, observe)
-	haveBatch = true
 	// The transient region must be closed before either human or structured
 	// permanent output begins. This also protects PTY recorders which combine
 	// stdout and stderr into one byte stream.
@@ -699,23 +696,14 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 	if a.events != nil {
 		terminal = a.events.FreezeTerminal(command.Context())
 	}
-	// This is the single terminal linearization point for the journal, human or
-	// NDJSON result, and process status. A later caller cancellation is treated
+	// This is the single terminal linearization point for human or NDJSON output
+	// and process status. A later caller cancellation is treated
 	// as shutdown after terminalization began and cannot rewrite one projection.
 	a.ingestTerminalFrozen = true
-	var journalErr error
-	if journal != nil {
-		journalErr = errors.Join(journalResultErr,
-			journal.WriteSummary(batch, pipelineErr, terminal.interrupted), journal.Close())
-	}
-
 	var resultErr error
 	switch {
 	case terminal.interrupted:
 		resultErr = withExit(ExitInterrupted, terminal.cause)
-	case journalErr != nil:
-		resultErr = withExit(ExitGeneral, safeProcessFailure(
-			ingest.FailureCodeJournalWrite, ingest.FailureMessageJournalWrite, true, journalErr))
 	case pipelineErr != nil:
 		if a.events != nil && a.events.Err() != nil {
 			resultErr = withExit(ExitGeneral, pipelineErr)
@@ -729,38 +717,37 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 		if outputErr := a.writeBatch(batch, run.Snapshot()); outputErr != nil {
 			return withExit(ExitGeneral, outputErr)
 		}
-		a.humanReceipt = journalErr == nil && resultErr != nil && (batch.Failed > 0 || pipelineErr != nil)
+		a.humanReceipt = resultErr != nil && (batch.Failed > 0 || pipelineErr != nil)
 	}
 	return resultErr
 }
 
 func (a *application) ingestOptions(command *cobra.Command, args []string, raw *ingestFlagValues) (*ingestFlagValues, string, error) {
 	options := *raw
-	options.inputs = stringArrayOption(command.Flags(), "input", raw.inputs, a.configStrings("input"))
-	options.profile = stringOption(command.Flags(), "profile", raw.profile, a.v.GetString("ingest.profile"))
-	options.concurrency = intOption(command.Flags(), "concurrency", raw.concurrency, a.v.GetInt("ingest.concurrency"))
-	options.transfers = intOption(command.Flags(), "transfers", raw.transfers, a.v.GetInt("ingest.transfers"))
-	options.probeConcurrency = intOption(command.Flags(), "probe-concurrency", raw.probeConcurrency, a.v.GetInt("ingest.probe_concurrency"))
-	options.dryRun = stringOption(command.Flags(), "dry-run", raw.dryRun, a.v.GetString("ingest.dry_run"))
-	options.verify = stringOption(command.Flags(), "verify", raw.verify, a.v.GetString("ingest.verify"))
-	options.tempDirectory = stringOption(command.Flags(), "temp-dir", raw.tempDirectory, a.v.GetString("ingest.temp_directory"))
-	options.stagingByteBudget = stringOption(command.Flags(), "staging-byte-budget", raw.stagingByteBudget, a.v.GetString("ingest.staging_byte_budget"))
-	options.maxInputs = intOption(command.Flags(), "max-inputs", raw.maxInputs, a.v.GetInt("ingest.max_inputs"))
-	options.segmentDuration = durationOption(command.Flags(), "segment-duration", raw.segmentDuration, a.v.GetDuration("ingest.segment_duration"))
-	options.segmentFormat = stringOption(command.Flags(), "segment-format", raw.segmentFormat, a.v.GetString("ingest.segment_format"))
-	options.essenceStorage = stringOption(command.Flags(), "essence-storage", raw.essenceStorage, a.v.GetString("ingest.essence_storage"))
-	options.ffmpegArgs = stringArrayOption(command.Flags(), "ffmpeg-arg", raw.ffmpegArgs, a.configStrings("media.ffmpeg_args"))
-	options.start = stringOption(command.Flags(), "start", raw.start, a.v.GetString("ingest.start"))
-	options.storageID = stringOption(command.Flags(), "storage-id", raw.storageID, a.v.GetString("ingest.storage_id"))
-	options.flowID = stringOption(command.Flags(), "flow-id", raw.flowID, a.v.GetString("ingest.flow_id"))
-	options.sourceID = stringOption(command.Flags(), "source-id", raw.sourceID, a.v.GetString("ingest.source_id"))
-	options.metadataFile = stringOption(command.Flags(), "flow-metadata", raw.metadataFile, a.v.GetString("ingest.flow_metadata"))
-	options.tamsFlowProfiles = stringArrayOption(command.Flags(), "tams-flow-profile", raw.tamsFlowProfiles, a.configStrings("ingest.tams_flow_profiles"))
-	options.journal = stringOption(command.Flags(), "journal", raw.journal, a.v.GetString("ingest.journal"))
-	options.stdinName = stringOption(command.Flags(), "stdin-name", raw.stdinName, a.v.GetString("source.stdin_name"))
-	options.inputHeaders = stringArrayOption(command.Flags(), "input-header", raw.inputHeaders, a.configStrings("source.http_headers"))
-	options.s3Region = stringOption(command.Flags(), "s3-region", raw.s3Region, a.v.GetString("source.s3_region"))
-	options.s3Endpoint = stringOption(command.Flags(), "s3-endpoint", raw.s3Endpoint, a.v.GetString("source.s3_endpoint"))
+	options.inputs = a.configStringArray(command, "input", "input")
+	options.profile = a.configString(command, "profile", "ingest.profile")
+	options.concurrency = a.configInt(command, "concurrency", "ingest.concurrency")
+	options.transfers = a.configInt(command, "transfers", "ingest.transfers")
+	options.probeConcurrency = a.configInt(command, "probe-concurrency", "ingest.probe_concurrency")
+	options.dryRun = a.configString(command, "dry-run", "ingest.dry_run")
+	options.verify = a.configString(command, "verify", "ingest.verify")
+	options.tempDirectory = a.configString(command, "temp-dir", "ingest.temp_directory")
+	options.stagingByteBudget = a.configString(command, "staging-byte-budget", "ingest.staging_byte_budget")
+	options.maxInputs = a.configInt(command, "max-inputs", "ingest.max_inputs")
+	options.segmentDuration = a.configDuration(command, "segment-duration", "ingest.segment_duration")
+	options.segmentFormat = a.configString(command, "segment-format", "ingest.segment_format")
+	options.essenceStorage = a.configString(command, "essence-storage", "ingest.essence_storage")
+	options.ffmpegArgs = a.configStringArray(command, "ffmpeg-arg", "media.ffmpeg_args")
+	options.start = a.configString(command, "start", "ingest.start")
+	options.storageID = a.configString(command, "storage-id", "ingest.storage_id")
+	options.flowID = a.configString(command, "flow-id", "ingest.flow_id")
+	options.sourceID = a.configString(command, "source-id", "ingest.source_id")
+	options.metadataFile = a.configString(command, "flow-metadata", "ingest.flow_metadata")
+	options.tamsFlowProfiles = a.configStringArray(command, "tams-flow-profile", "ingest.tams_flow_profiles")
+	options.stdinName = a.configString(command, "stdin-name", "source.stdin_name")
+	options.inputHeaders = a.configStringArray(command, "input-header", "source.http_headers")
+	options.s3Region = a.configString(command, "s3-region", "source.s3_region")
+	options.s3Endpoint = a.configString(command, "s3-endpoint", "source.s3_endpoint")
 	options.s3PathStyle = boolOption(command.Flags(), "s3-path-style", raw.s3PathStyle, a.v.GetBool("source.s3_path_style"))
 	options.ffprobe = a.v.GetString("media.ffprobe")
 	options.ffmpeg = a.v.GetString("media.ffmpeg")
@@ -774,16 +761,7 @@ func (a *application) ingestOptions(command *cobra.Command, args []string, raw *
 	if strings.TrimSpace(options.profile) == "" {
 		return nil, "", errors.New("ingest profile is required; choose one with --profile (run `tamsin profiles` to compare them)")
 	}
-	profile, err := resolveTreatment(treatmentSettings{
-		selection:               options.profile,
-		segmentDuration:         options.segmentDuration,
-		segmentFormat:           media.SegmentFormat(options.segmentFormat),
-		essenceStorage:          media.EssenceStorage(options.essenceStorage),
-		ffmpegArgs:              options.ffmpegArgs,
-		segmentDurationExplicit: a.ingestOptionExplicit(command.Flags(), "segment-duration", "ingest.segment_duration"),
-		segmentFormatExplicit:   a.ingestOptionExplicit(command.Flags(), "segment-format", "ingest.segment_format"),
-		essenceStorageExplicit:  a.ingestOptionExplicit(command.Flags(), "essence-storage", "ingest.essence_storage"),
-	})
+	profile, err := a.resolvedConfigProfile(command)
 	if err != nil {
 		return nil, "", err
 	}
@@ -835,33 +813,16 @@ func (a *application) ingestOptions(command *cobra.Command, args []string, raw *
 	return &options, strings.TrimRight(endpoint, "/"), nil
 }
 
-// ingestOptionExplicit reports whether an individual media setting came from
-// an operator rather than from its built-in default. Named profiles are
-// applied first, then only these explicit values override them.
-func (a *application) ingestOptionExplicit(flags *pflag.FlagSet, flagName, key string) bool {
-	return flags.Changed(flagName) || a.configValueExplicit(key)
-}
-
 func (a *application) tamsClient(ctx context.Context, endpoint string, base *http.Transport,
 	run *observability.Run) (*tams.Client, auth.Mode, error) {
 	// Peer response bodies are untrusted and may reflect credentials or signed
-	// values. CLI output never needs them; status and typed TAMS fields carry the
-	// safe operational signal while direct library users may opt into bodies.
-	return a.tamsClientWithErrorPolicy(ctx, endpoint, base, true, run)
-}
-
-// tamsClientWithErrorPolicy keeps authentication and TLS construction shared
-// while allowing doctor to suppress every untrusted response body. A doctor
-// report is commonly attached to support tickets and must never reproduce a
-// peer's response secret.
-func (a *application) tamsClientWithErrorPolicy(ctx context.Context, endpoint string, base *http.Transport,
-	suppressErrorBody bool, run *observability.Run) (*tams.Client, auth.Mode, error) {
+	// values. CLI output uses status and typed fields, never response error bodies.
 	cleanEndpoint, endpointToken, err := auth.ExtractURLToken(endpoint)
 	if err != nil {
 		return nil, "", err
 	}
 	config := a.authenticationConfig(cleanEndpoint, endpointToken)
-	transport, mode, err := auth.NewRoundTripper(ctx, config, base, a.stderr)
+	transport, mode, err := auth.NewRoundTripper(ctx, config, base)
 	if err != nil {
 		return nil, "", err
 	}
@@ -870,7 +831,7 @@ func (a *application) tamsClientWithErrorPolicy(ctx context.Context, endpoint st
 		Timeout: a.v.GetDuration("http.timeout"), TransferTimeout: a.v.GetDuration("http.transfer_timeout"), TransferIdleTimeout: a.v.GetDuration("http.transfer_idle_timeout"),
 		Retries: a.v.GetInt("http.retries"), UserAgent: "tamsin/" + version.Version,
 		RedactValues:      config.RedactionValues(),
-		SuppressErrorBody: suppressErrorBody || mode == auth.ModeOAuthClient || mode == auth.ModeOAuthCode,
+		SuppressErrorBody: true,
 		Observability:     run,
 	})
 	if err != nil {
@@ -897,12 +858,29 @@ func observedSourceBackoff(run *observability.Run, retries int) retryablehttp.Ba
 	}
 }
 
+func newInputHTTPClient(transport http.RoundTripper, timeout time.Duration, retries int,
+	run *observability.Run, headers http.Header) *http.Client {
+	retryClient := retryablehttp.NewClient()
+	retryClient.Logger = nil
+	retryClient.RetryMax = retries
+	retryClient.Backoff = observedSourceBackoff(run, retries)
+	// Source bodies are whole media. The optional absolute deadline remains on
+	// the client; byte-level idle detection is applied to each body by source.
+	// The redirect policy belongs on retryablehttp's inner client because that
+	// client, rather than StandardClient, follows source redirects.
+	retryClient.HTTPClient = source.HTTPClientWithSafeRedirects(&http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+	}, headers)
+	return retryClient.StandardClient()
+}
+
 func (a *application) authenticationConfig(endpoint, endpointToken string) auth.Config {
 	config := auth.Config{
 		Mode: auth.Mode(a.v.GetString("auth.mode")), Endpoint: endpoint,
 		Username: a.v.GetString("auth.username"), Password: a.v.GetString("auth.password"),
 		BearerToken: a.v.GetString("auth.token"), URLToken: a.v.GetString("auth.url_token"), TokenURL: a.v.GetString("auth.token_url"),
-		AuthURL: a.v.GetString("auth.authorization_url"), ClientID: a.v.GetString("auth.client_id"), ClientSecret: a.v.GetString("auth.client_secret"),
+		ClientID: a.v.GetString("auth.client_id"), ClientSecret: a.v.GetString("auth.client_secret"),
 		RedirectURL: a.v.GetString("auth.redirect_url"), Scopes: a.configStrings("auth.scopes"), OAuthCode: a.v.GetString("auth.code"),
 		PKCEVerifier: a.v.GetString("auth.pkce_verifier"), Timeout: a.v.GetDuration("http.timeout"),
 		AllowInsecureLoopback: a.v.GetBool("auth.allow_insecure_loopback"),
@@ -913,8 +891,10 @@ func (a *application) authenticationConfig(endpoint, endpointToken string) auth.
 	return config
 }
 
-func (a *application) httpTransport() *http.Transport {
+func (a *application) httpTransport(concurrency, transfers int) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns, transport.MaxIdleConnsPerHost = httpIdleConnectionLimits(
+		concurrency, transfers)
 	// These bound connection setup and response headers. Body stalls are a
 	// separate state and are handled by the progress watchdog around each media
 	// transfer; ResponseHeaderTimeout cannot see a body after headers arrive.
@@ -926,23 +906,23 @@ func (a *application) httpTransport() *http.Transport {
 	return transport
 }
 
-// reporter decides whether an operator is watching. Progress is drawn only to
-// stderr and only when stderr is a terminal, because a redrawing line in a
-// captured log is noise and on stdout it would corrupt the result.
+func httpIdleConnectionLimits(concurrency, transfers int) (total, perHost int) {
+	if transfers <= 0 {
+		transfers = concurrency
+	}
+	perHost = min(max(max(concurrency, transfers), 2), 32)
+	return min(perHost*2, 64), perHost
+}
+
+// reporter keeps human progress on stderr and leaves JSON output to events.
 func (a *application) reporter() progress.Reporter {
 	if strings.EqualFold(a.v.GetString("format"), "json") || a.v.GetBool("quiet") {
 		return progress.Discard{}
 	}
-	return progress.New(a.stderr, progress.Options{
-		Mode:      progress.Mode(strings.ToLower(a.v.GetString("progress"))),
-		Width:     outputWidth(a.stderr),
-		WidthFunc: func() int { return outputWidth(a.stderr) },
-	})
+	return progress.New(a.stderr, progress.Options{Mode: progress.Mode(strings.ToLower(a.v.GetString("progress")))})
 }
 
-// loggerFor routes diagnostics through the progress renderer's serializer.
-// This lets a live renderer clear and restore its rows without changing the
-// operator's configured log level or interleaving records with progress.
+// loggerFor serialises diagnostics with human progress on stderr.
 func (a *application) loggerFor(reporter progress.Reporter) (*slog.Logger, error) {
 	writer := a.stderr
 	if line, drawing := reporter.(*progress.Line); drawing {
@@ -1006,8 +986,13 @@ func readFlowMetadata(filename string) (tams.Flow, error) {
 		return nil, errors.New("flow metadata exceeds 2 MiB")
 	}
 	var metadata tams.Flow
-	if err := json.Unmarshal(data, &metadata); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&metadata); err != nil {
 		return nil, fmt.Errorf("decode Flow metadata: %w", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return nil, errors.New("flow metadata must contain exactly one JSON object")
 	}
 	return metadata, nil
 }
@@ -1026,35 +1011,43 @@ func parseHeaders(values []string) (http.Header, error) {
 	return headers, nil
 }
 
-func stringOption(flags *pflag.FlagSet, name, flagValue, configured string) string {
-	if flags.Changed(name) {
-		return flagValue
+func (a *application) safeUsageHint(err error) string {
+	if err == nil {
+		return ""
 	}
-	return configured
-}
-
-func intOption(flags *pflag.FlagSet, name string, flagValue, configured int) int {
-	if flags.Changed(name) {
-		return flagValue
+	hint := err.Error()
+	for _, definition := range configDefinitions() {
+		switch definition.kind {
+		case configString:
+			if value := a.v.GetString(definition.key); value != "" {
+				switch {
+				case definition.secret && len(value) >= 4:
+					hint = strings.ReplaceAll(hint, value, "<redacted>")
+				case definition.redactURL:
+					hint = strings.ReplaceAll(hint, value, auth.RedactURL(value))
+				}
+			}
+		case configStrings:
+			if definition.secret {
+				for _, value := range a.v.GetStringSlice(definition.key) {
+					if len(value) >= 4 {
+						hint = strings.ReplaceAll(hint, value, "<redacted>")
+					}
+				}
+			}
+		}
 	}
-	return configured
+	hint = diagnosticURLPattern.ReplaceAllStringFunc(hint, auth.RedactURL)
+	clean := strings.Map(func(value rune) rune {
+		if value < 0x20 || value == 0x7f {
+			return ' '
+		}
+		return value
+	}, hint)
+	return strings.Join(strings.Fields(clean), " ")
 }
 
 func boolOption(flags *pflag.FlagSet, name string, flagValue, configured bool) bool {
-	if flags.Changed(name) {
-		return flagValue
-	}
-	return configured
-}
-
-func durationOption(flags *pflag.FlagSet, name string, flagValue, configured time.Duration) time.Duration {
-	if flags.Changed(name) {
-		return flagValue
-	}
-	return configured
-}
-
-func stringArrayOption(flags *pflag.FlagSet, name string, flagValue, configured []string) []string {
 	if flags.Changed(name) {
 		return flagValue
 	}

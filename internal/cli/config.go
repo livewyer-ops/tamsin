@@ -21,6 +21,7 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/netio"
 	"github.com/livewyer-ops/tamsin/internal/source"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -49,14 +50,96 @@ type configPosition struct {
 	column int
 }
 
+// settings is the complete configuration resolver used by the CLI. It stores
+// only validated file values and resolves changed persistent flags,
+// non-empty environment variables, file values, then defaults.
+type settings struct {
+	definitions map[string]configDefinition
+	file        map[string]any
+	flags       *pflag.FlagSet
+}
+
+func newSettings() *settings {
+	return &settings{
+		definitions: configDefinitionMap(),
+		file:        make(map[string]any),
+	}
+}
+
+func (s *settings) InConfig(key string) bool {
+	_, ok := s.file[key]
+	return ok
+}
+
+func (s *settings) value(key string) any {
+	definition, known := s.definitions[key]
+	if known && definition.flag != "" && s.flags != nil {
+		if flag := s.flags.Lookup(definition.flag); flag != nil && flag.Changed {
+			return flagValue(s.flags, definition)
+		}
+	}
+	if raw, ok := os.LookupEnv(configEnvironmentName(key)); ok && raw != "" {
+		if value, err := environmentValue(configEnvironmentName(key), raw, definition.kind); err == nil {
+			return value
+		}
+	}
+	if value, ok := s.file[key]; ok {
+		return value
+	}
+	return definition.defaultValue
+}
+
+func flagValue(flags *pflag.FlagSet, definition configDefinition) any {
+	switch definition.kind {
+	case configString:
+		value, _ := flags.GetString(definition.flag)
+		return value
+	case configBool:
+		value, _ := flags.GetBool(definition.flag)
+		return value
+	case configInt:
+		value, _ := flags.GetInt(definition.flag)
+		return value
+	case configDuration:
+		value, _ := flags.GetDuration(definition.flag)
+		return value
+	case configStrings:
+		value, _ := flags.GetStringSlice(definition.flag)
+		return value
+	default:
+		return nil
+	}
+}
+
+func (s *settings) GetString(key string) string {
+	value, _ := s.value(key).(string)
+	return value
+}
+
+func (s *settings) GetBool(key string) bool {
+	value, _ := s.value(key).(bool)
+	return value
+}
+
+func (s *settings) GetInt(key string) int {
+	value, _ := s.value(key).(int)
+	return value
+}
+
+func (s *settings) GetDuration(key string) time.Duration {
+	value, _ := s.value(key).(time.Duration)
+	return value
+}
+
+func (s *settings) GetStringSlice(key string) []string {
+	values, _ := s.value(key).([]string)
+	return append([]string(nil), values...)
+}
+
 // configDefinitions is the single allow-list for file and TAMSIN_* settings.
-// Keep it sorted: effective output and validation diagnostics then remain
-// deterministic, and a new runtime setting cannot be added without making an
-// explicit decision about its type, default, and disclosure policy here.
 func configDefinitions() []configDefinition {
 	return []configDefinition{
 		{key: "auth.allow_insecure_loopback", kind: configBool, defaultValue: false, flag: "allow-insecure-auth-loopback", fileAllowed: true},
-		{key: "auth.authorization_url", kind: configString, defaultValue: "", flag: "authorization-url", redactURL: true, fileAllowed: true},
 		{key: "auth.client_id", kind: configString, defaultValue: "", flag: "client-id", fileAllowed: true},
 		{key: "auth.client_secret", kind: configString, defaultValue: "", flag: "client-secret", secret: true, fileAllowed: true},
 		{key: "auth.code", kind: configString, defaultValue: "", flag: "oauth-code", secret: true, fileAllowed: true},
@@ -85,7 +168,6 @@ func configDefinitions() []configDefinition {
 		{key: "ingest.essence_storage", kind: configString, defaultValue: string(media.EssenceStorageIndependent), fileAllowed: true},
 		{key: "ingest.flow_id", kind: configString, defaultValue: "", fileAllowed: true},
 		{key: "ingest.flow_metadata", kind: configString, defaultValue: "", fileAllowed: true},
-		{key: "ingest.journal", kind: configString, defaultValue: "", fileAllowed: true},
 		{key: "ingest.max_inputs", kind: configInt, defaultValue: source.DefaultMaxInputs, fileAllowed: true},
 		{key: "ingest.probe_concurrency", kind: configInt, defaultValue: 2, fileAllowed: true},
 		{key: "ingest.profile", kind: configString, defaultValue: "", fileAllowed: true},
@@ -135,44 +217,42 @@ func configEnvironmentName(key string) string {
 }
 
 func (a *application) configureDefaults() {
-	a.v.SetEnvPrefix("TAMSIN")
-	a.v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
-	a.v.AutomaticEnv()
-	for _, definition := range configDefinitions() {
-		a.v.SetDefault(definition.key, definition.defaultValue)
+	if a.v == nil {
+		a.v = newSettings()
 	}
 }
 
-func (a *application) validateConfigFile(data []byte) error {
+func decodeConfigFile(data []byte) (map[string]any, error) {
+	values := make(map[string]any)
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	var document yaml.Node
 	if err := decoder.Decode(&document); err != nil {
 		if errors.Is(err, io.EOF) {
-			return nil
+			return values, nil
 		}
-		return fmt.Errorf("decode YAML: %w", err)
+		return nil, fmt.Errorf("decode YAML: %w", err)
 	}
 	if len(document.Content) > 0 {
 		root := dereferenceYAMLNode(document.Content[0])
 		if root.Kind != yaml.MappingNode {
-			return fmt.Errorf("configuration document must be a mapping, got %s", yamlKindName(root))
+			return nil, fmt.Errorf("configuration document must be a mapping, got %s", yamlKindName(root))
 		}
-		if err := validateConfigMapping(root, "", configDefinitionMap(), make(map[string]configPosition)); err != nil {
-			return err
+		if err := decodeConfigMapping(root, "", configDefinitionMap(), make(map[string]configPosition), values); err != nil {
+			return nil, err
 		}
 	}
 
 	var trailing yaml.Node
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err != nil {
-			return fmt.Errorf("decode trailing YAML document: %w", err)
+			return nil, fmt.Errorf("decode trailing YAML document: %w", err)
 		}
-		return errors.New("configuration must contain exactly one YAML document")
+		return nil, errors.New("configuration must contain exactly one YAML document")
 	}
-	return nil
+	return values, nil
 }
 
-func validateConfigMapping(node *yaml.Node, prefix string, definitions map[string]configDefinition, seen map[string]configPosition) error {
+func decodeConfigMapping(node *yaml.Node, prefix string, definitions map[string]configDefinition, seen map[string]configPosition, values map[string]any) error {
 	for index := 0; index < len(node.Content); index += 2 {
 		keyNode := dereferenceYAMLNode(node.Content[index])
 		valueNode := dereferenceYAMLNode(node.Content[index+1])
@@ -200,6 +280,25 @@ func validateConfigMapping(node *yaml.Node, prefix string, definitions map[strin
 			if err := validateYAMLValue(path, valueNode, definition.kind); err != nil {
 				return err
 			}
+			var value any
+			if err := valueNode.Decode(&value); err != nil {
+				return fmt.Errorf("decode configuration key %q: %w", path, err)
+			}
+			switch definition.kind {
+			case configDuration:
+				// Validation permits a duration string or unitless zero only.
+				value = time.Duration(0)
+				if valueNode.Tag == "!!str" {
+					value, _ = time.ParseDuration(valueNode.Value)
+				}
+			case configStrings:
+				var items []string
+				if err := valueNode.Decode(&items); err != nil {
+					return err
+				}
+				value = items
+			}
+			values[path] = value
 			continue
 		}
 
@@ -207,16 +306,12 @@ func validateConfigMapping(node *yaml.Node, prefix string, definitions map[strin
 			if valueNode.Kind != yaml.MappingNode {
 				return fmt.Errorf("configuration key %q at line %d, column %d must be a mapping, got %s", path, valueNode.Line, valueNode.Column, yamlKindName(valueNode))
 			}
-			if err := validateConfigMapping(valueNode, path, definitions, seen); err != nil {
+			if err := decodeConfigMapping(valueNode, path, definitions, seen, values); err != nil {
 				return err
 			}
 			continue
 		}
 
-		correction := closestConfigKey(path, configCandidatePaths(definitions))
-		if correction != "" {
-			return fmt.Errorf("unknown configuration key %q at line %d, column %d; did you mean %q?", path, keyNode.Line, keyNode.Column, correction)
-		}
 		return fmt.Errorf("unknown configuration key %q at line %d, column %d", path, keyNode.Line, keyNode.Column)
 	}
 	return nil
@@ -340,84 +435,13 @@ func hasConfigChildren(path string, definitions map[string]configDefinition) boo
 	return false
 }
 
-func configCandidatePaths(definitions map[string]configDefinition) []string {
-	candidates := make(map[string]struct{}, len(definitions)*2)
-	for key, definition := range definitions {
-		if !definition.fileAllowed {
-			continue
-		}
-		candidates[key] = struct{}{}
-		parts := strings.Split(key, ".")
-		for index := 1; index < len(parts); index++ {
-			candidates[strings.Join(parts[:index], ".")] = struct{}{}
-		}
-	}
-	result := make([]string, 0, len(candidates))
-	for candidate := range candidates {
-		result = append(result, candidate)
-	}
-	sort.Strings(result)
-	return result
-}
-
-func closestConfigKey(input string, candidates []string) string {
-	inputRunes := []rune(input)
-	threshold := max(2, len(inputRunes)/3)
-	best := ""
-	bestDistance := -1
-	for _, candidate := range candidates {
-		candidateRunes := []rune(candidate)
-		// Length difference is a lower bound for Levenshtein distance. Skip
-		// impossible suggestions before scanning a potentially hostile key.
-		if difference := len(inputRunes) - len(candidateRunes); difference > threshold || difference < -threshold {
-			continue
-		}
-		distance := editDistance(inputRunes, candidateRunes)
-		if bestDistance < 0 || distance < bestDistance || distance == bestDistance && candidate < best {
-			best = candidate
-			bestDistance = distance
-		}
-	}
-	if bestDistance < 0 || bestDistance > threshold {
-		return ""
-	}
-	return best
-}
-
-func editDistance(a, b []rune) int {
-	previous := make([]int, len(b)+1)
-	current := make([]int, len(b)+1)
-	for index := range previous {
-		previous[index] = index
-	}
-	for leftIndex, leftRune := range a {
-		current[0] = leftIndex + 1
-		for rightIndex, rightRune := range b {
-			cost := 0
-			if leftRune != rightRune {
-				cost = 1
-			}
-			current[rightIndex+1] = min(
-				previous[rightIndex+1]+1,
-				current[rightIndex]+1,
-				previous[rightIndex]+cost,
-			)
-		}
-		previous, current = current, previous
-	}
-	return previous[len(b)]
-}
-
 func (a *application) validateConfigEnvironment() error {
 	definitions := configDefinitionMap()
 	known := make(map[string]configDefinition, len(definitions))
-	knownNames := make([]string, 0, len(definitions))
 	for _, definition := range definitions {
 		name := configEnvironmentName(definition.key)
 		known[name] = definition
-		knownNames = append(knownNames, name)
 	}
-	sort.Strings(knownNames)
 
 	environment := os.Environ()
 	sort.Strings(environment)
@@ -428,15 +452,10 @@ func (a *application) validateConfigEnvironment() error {
 		}
 		definition, exists := known[name]
 		if !exists {
-			correction := closestConfigKey(name, knownNames)
-			if correction != "" {
-				return fmt.Errorf("unsupported environment variable %q; did you mean %q?", name, correction)
-			}
 			return fmt.Errorf("unsupported environment variable %q", name)
 		}
-		// Viper deliberately treats an empty known variable as unset. It still
-		// has to be a known name: a misspelled empty Secret/ConfigMap key is just
-		// as likely to become non-empty on the next deployment.
+		// Empty known variables are unset. Unknown empty names still fail because
+		// mounted configuration may become non-empty later.
 		if value == "" {
 			continue
 		}
@@ -448,31 +467,39 @@ func (a *application) validateConfigEnvironment() error {
 }
 
 func validateEnvironmentValue(name, value string, kind configKind) error {
-	switch kind {
-	case configBool:
-		if _, err := strconv.ParseBool(value); err != nil {
-			return fmt.Errorf("environment variable %s must be a boolean", name)
-		}
-	case configInt:
-		if _, err := strconv.Atoi(value); err != nil {
-			return fmt.Errorf("environment variable %s must be an integer", name)
-		}
-	case configDuration:
-		if _, err := time.ParseDuration(value); err != nil {
-			return fmt.Errorf("environment variable %s must be a duration", name)
-		}
-	case configStrings:
-		if _, err := decodeEnvironmentStrings(name, value); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err := environmentValue(name, value, kind)
+	return err
 }
 
-// decodeEnvironmentStrings retains Viper's established whitespace-separated
-// scalar behavior while adding JSON arrays as the lossless representation for
-// values which contain spaces or commas. A leading '[' is unambiguously an
-// attempt to use the documented array form and is therefore validated strictly.
+func environmentValue(name, value string, kind configKind) (any, error) {
+	switch kind {
+	case configBool:
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return nil, fmt.Errorf("environment variable %s must be a boolean", name)
+		}
+		return parsed, nil
+	case configInt:
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return nil, fmt.Errorf("environment variable %s must be an integer", name)
+		}
+		return parsed, nil
+	case configDuration:
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			return nil, fmt.Errorf("environment variable %s must be a duration", name)
+		}
+		return parsed, nil
+	case configStrings:
+		return decodeEnvironmentStrings(name, value)
+	default:
+		return value, nil
+	}
+}
+
+// decodeEnvironmentStrings accepts whitespace-separated values and JSON arrays
+// for entries that contain spaces or commas.
 func decodeEnvironmentStrings(name, value string) ([]string, error) {
 	trimmed := strings.TrimSpace(value)
 	if !strings.HasPrefix(trimmed, "[") {
@@ -485,23 +512,7 @@ func decodeEnvironmentStrings(name, value string) ([]string, error) {
 	return values, nil
 }
 
-// configStrings applies the same precedence as Viper without accepting its
-// lossy strings.Fields conversion for JSON-encoded environment arrays.
 func (a *application) configStrings(key string) []string {
-	if definition, exists := configDefinitionMap()[key]; exists && definition.flag != "" && a.persistentFlags != nil {
-		if flag := a.persistentFlags.Lookup(definition.flag); flag != nil && flag.Changed {
-			return a.v.GetStringSlice(key)
-		}
-	}
-	if value, exists := os.LookupEnv(configEnvironmentName(key)); exists && value != "" {
-		values, err := decodeEnvironmentStrings(configEnvironmentName(key), value)
-		if err == nil {
-			return values
-		}
-		// Execution validates the environment before reading effective values.
-		// Keep this defensive path inert for direct package callers.
-		return nil
-	}
 	return a.v.GetStringSlice(key)
 }
 
@@ -634,10 +645,8 @@ type treatmentSettings struct {
 	essenceStorageExplicit  bool
 }
 
-// resolveTreatment is the one input-independent media-policy validator used by
-// config inspection, doctor, and ingest. Keeping the precedence-specific value
-// collection outside this function prevents those command surfaces from
-// disagreeing about whether the same effective treatment can take effect.
+// resolveTreatment is the input-independent media-policy validator shared by
+// doctor and ingest.
 func resolveTreatment(settings treatmentSettings) (ingest.Profile, error) {
 	overrides := ingest.ProfileOverrides{FFmpegArgs: len(settings.ffmpegArgs) > 0}
 	if settings.segmentDurationExplicit {
@@ -698,7 +707,6 @@ func (a *application) validateConfiguredURLs(command *cobra.Command) error {
 		value string
 	}{
 		{label: "OAuth token URL", value: a.v.GetString("auth.token_url")},
-		{label: "OAuth authorization URL", value: a.v.GetString("auth.authorization_url")},
 		{label: "OAuth redirect URL", value: a.v.GetString("auth.redirect_url")},
 		{label: "S3 endpoint", value: a.configString(command, "s3-endpoint", "source.s3_endpoint")},
 	} {
@@ -741,219 +749,4 @@ func validateAbsoluteHTTPURL(label, raw string) error {
 		return fmt.Errorf("%s must not contain userinfo", label)
 	}
 	return nil
-}
-
-func (a *application) validateAuthConfiguration() error {
-	cleanEndpoint := ""
-	endpointToken := ""
-	if endpoint := a.v.GetString("endpoint"); endpoint != "" {
-		var err error
-		endpointToken, err = validateTAMSEndpoint(endpoint)
-		if err != nil {
-			return err
-		}
-		cleanEndpoint, _, err = auth.ExtractURLToken(endpoint)
-		if err != nil {
-			return err
-		}
-	}
-	config := a.authenticationConfig(cleanEndpoint, endpointToken)
-	mode, err := config.ResolveMode()
-	if err != nil {
-		return err
-	}
-	if err := config.Validate(mode); err != nil {
-		return err
-	}
-	return nil
-}
-
-type effectiveConfigValue struct {
-	Value        any    `json:"value"`
-	Source       string `json:"source"`
-	SourceDetail string `json:"source_detail,omitempty"`
-	ResolvedFrom string `json:"resolved_from,omitempty"`
-}
-
-type effectiveConfigResult struct {
-	ConfigFile string                          `json:"config_file,omitempty"`
-	Effective  map[string]effectiveConfigValue `json:"effective"`
-}
-
-func (a *application) configCommand() *cobra.Command {
-	command := helpGroupCommand("config", "Validate and inspect configuration")
-	command.AddCommand(a.configValidateCommand())
-	command.AddCommand(a.configShowCommand())
-	return command
-}
-
-func (a *application) configValidateCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "validate",
-		Short: "Validate the effective configuration without running an ingest",
-		Args:  usageArgs(cobra.NoArgs),
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if err := a.validateAuthConfiguration(); err != nil {
-				return withExit(ExitUsage, err)
-			}
-			result := map[string]any{"status": "valid"}
-			if a.configFile != "" {
-				result["config_file"] = a.configFile
-			}
-			return a.writeValue(result)
-		},
-	}
-}
-
-func (a *application) configShowCommand() *cobra.Command {
-	var effective bool
-	command := &cobra.Command{
-		Use:   "show --effective",
-		Short: "Show redacted effective values and their provenance",
-		Args:  usageArgs(cobra.NoArgs),
-		RunE: func(command *cobra.Command, _ []string) error {
-			if !effective {
-				return withExit(ExitUsage, errors.New("config show requires --effective"))
-			}
-			return a.writeValue(a.effectiveConfig(command))
-		},
-	}
-	command.Flags().BoolVar(&effective, "effective", false, "show resolved values after precedence is applied")
-	return command
-}
-
-func (a *application) effectiveConfig(command *cobra.Command) effectiveConfigResult {
-	result := effectiveConfigResult{
-		ConfigFile: a.configFile,
-		Effective:  make(map[string]effectiveConfigValue),
-	}
-	profile, err := a.resolvedConfigProfile(command)
-	if err != nil {
-		// Persistent pre-run validation already reports this to users. Retain a
-		// defensive fallback for direct unit callers rather than panicking.
-		profile = ingest.Profile{
-			Name: ingest.ProfileCustom, Version: ingest.CustomProfileVersion,
-			SegmentDuration: a.v.GetDuration("ingest.segment_duration"),
-			SegmentFormat:   media.SegmentFormat(a.v.GetString("ingest.segment_format")),
-			EssenceStorage:  media.EssenceStorage(a.v.GetString("ingest.essence_storage")),
-		}
-	}
-	for _, definition := range configDefinitions() {
-		value := a.effectiveConfigValue(definition, profile)
-		source, detail := a.configSource(command, definition)
-		result.Effective[definition.key] = effectiveConfigValue{
-			Value: value, Source: source, SourceDetail: detail, ResolvedFrom: a.configResolution(definition, profile),
-		}
-	}
-	return result
-}
-
-func (a *application) configResolution(definition configDefinition, profile ingest.Profile) string {
-	if definition.key == "ingest.transfers" && a.v.GetInt(definition.key) == 0 {
-		return "ingest.concurrency"
-	}
-	if definition.key == "ingest.probe_concurrency" && a.v.GetInt(definition.key) == 0 {
-		return "automatic media process budget"
-	}
-	switch definition.key {
-	case "ingest.segment_duration", "ingest.segment_format", "ingest.essence_storage":
-		if !a.configValueExplicit(definition.key) {
-			return "ingest.profile"
-		}
-	case "ingest.profile":
-		if profile.Name == ingest.ProfileCustom {
-			return "ingest.profile + explicit media overrides"
-		}
-	}
-	return ""
-}
-
-func (a *application) effectiveConfigValue(definition configDefinition, profile ingest.Profile) any {
-	if definition.key == "config" && a.configFile != "" {
-		return a.configFile
-	}
-	if definition.key == "ingest.transfers" && a.v.GetInt(definition.key) == 0 {
-		return a.v.GetInt("ingest.concurrency")
-	}
-	if definition.key == "ingest.probe_concurrency" && a.v.GetInt(definition.key) == 0 {
-		return 2
-	}
-	switch definition.key {
-	case "ingest.profile":
-		return profile.Name
-	case "ingest.segment_duration":
-		return profile.SegmentDuration.String()
-	case "ingest.segment_format":
-		return string(profile.SegmentFormat)
-	case "ingest.essence_storage":
-		return string(profile.EssenceStorage)
-	}
-	var value any
-	switch definition.kind {
-	case configString:
-		value = a.v.GetString(definition.key)
-	case configBool:
-		value = a.v.GetBool(definition.key)
-	case configInt:
-		value = a.v.GetInt(definition.key)
-	case configDuration:
-		value = a.v.GetDuration(definition.key).String()
-	case configStrings:
-		value = a.configStrings(definition.key)
-	default:
-		panic("unknown configuration kind")
-	}
-
-	if definition.secret {
-		switch typed := value.(type) {
-		case string:
-			if typed != "" {
-				return "<redacted>"
-			}
-		case []string:
-			redacted := make([]string, len(typed))
-			for index := range typed {
-				redacted[index] = "<redacted>"
-			}
-			return redacted
-		}
-	}
-	if definition.redactURL {
-		if typed, ok := value.(string); ok && typed != "" {
-			return redactConfiguredURL(typed)
-		}
-	}
-	if definition.key == "input" {
-		inputs := value.([]string)
-		redacted := make([]string, len(inputs))
-		for index, input := range inputs {
-			redacted[index] = redactConfiguredURL(input)
-		}
-		return redacted
-	}
-	return value
-}
-
-func redactConfiguredURL(value string) string {
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.Scheme == "" {
-		return value
-	}
-	return auth.RedactURL(value)
-}
-
-func (a *application) configSource(command *cobra.Command, definition configDefinition) (string, string) {
-	if definition.flag != "" {
-		if flag := command.Flag(definition.flag); flag != nil && flag.Changed {
-			return "flag", "--" + definition.flag
-		}
-	}
-	environment := configEnvironmentName(definition.key)
-	if value, exists := os.LookupEnv(environment); exists && value != "" {
-		return "env", environment
-	}
-	if definition.fileAllowed && a.v.InConfig(definition.key) {
-		return "file", a.configFile
-	}
-	return "default", ""
 }

@@ -93,7 +93,7 @@ func (p *Pipeline) reconcileRegistrationError(ctx context.Context, flowID string
 		// Verification refreshes an exact URL after its worker holds transfer
 		// capacity. Asking for URLs during ambiguity readback would age them in
 		// both the recovery work and the bounded verification queue.
-		IncludeDownloadURLs: p.config.Verify && p.limits.PresignedURL <= 0,
+		IncludeDownloadURLs: p.config.VerificationMode != VerificationNone && p.limits.PresignedURL <= 0,
 	})
 	if listErr != nil {
 		cleanupErr := p.retractRegistrationRecords(recoveryCtx, flowID, records, results,
@@ -119,14 +119,14 @@ func (p *Pipeline) reconcileRegistrationError(ctx context.Context, flowID string
 	// Verification, when enabled, is still required before treating it as a
 	// success; without verification the completed registration is sufficient.
 	if len(unresolved) == 0 {
-		if !p.config.Verify {
+		if p.config.VerificationMode == VerificationNone {
 			return nil
 		}
 		return p.verifyRegistrationRecordsWithinRecovery(recoveryCtx, flowID, visible, results)
 	}
 
 	var resolutionErrs []error
-	if p.config.Verify {
+	if p.config.VerificationMode != VerificationNone {
 		if err := p.verifyRegistrationRecordsWithinRecovery(recoveryCtx, flowID, visible, results); err != nil {
 			resolutionErrs = append(resolutionErrs, err)
 		}

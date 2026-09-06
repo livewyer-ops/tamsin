@@ -26,7 +26,7 @@ env TAMSIN_FORMAT=
 
 # An explicitly named config file that cannot be read is an error, not a
 # silent fallback to defaults.
-! exec tamsin --config missing.yaml --profile essence-segments -d 0 --dry-run -i input.mp4
+! exec tamsin --config missing.yaml --profile essence-segments -d 0 --dry-run=fast -i input.mp4
 stderr 'read configuration'
 
 # Nested keys map to underscore-separated environment names.
@@ -45,7 +45,7 @@ ingest:
 pretend media bytes
 -- ffprobe --
 #!/bin/sh
-if [ "$1" = "-version" ]; then echo "ffprobe version stub"; exit 0; fi
+if [ "$1" = "-version" ]; then echo "ffprobe version 5.1 stub"; exit 0; fi
 for arg in "$@"; do
   if [ "$arg" = "-show_frames" ]; then
     printf '%s\n' \

@@ -1,85 +1,29 @@
 {
+  "schema_version": "1.0",
   "extends": "tams-v8.1.json",
   "tams": {
     "version": "8.2",
     "repository": "https://github.com/bbc/tams",
-    "commit": "ebb18b09cc6effe70a3464fc0282e9663d0a583f",
-    "openapi_path": "api/TimeAddressableMediaStore.yaml",
-    "openapi_git_blob": "735a8468bda972b925bd73a45cbe360ad45d06e9"
+    "commit": "34fb31b80cb8afb3194f28c8b787301379caacf8"
   },
   "tamoss": {
     "repository": "https://github.com/livewyer-ops/tamoss",
-    "commit": "5ec9df15f661a5db230577074e2e55d10444d4ea",
-    "tams_submodule_commit": "ebb18b09cc6effe70a3464fc0282e9663d0a583f",
+    "commit": "c17e20fe4aa732e6c0b30f904ca25e3dd2cf2c9c",
+    "tams_submodule_commit": "34fb31b80cb8afb3194f28c8b787301379caacf8",
     "profile": "local-kind",
-    "release": "8.2-preview"
+    "release": "8.2.0-oss1-rc4"
   },
-  "authentication": [],
   "ingest_operations": [
-    {
-      "operation_id": "GET_profiles-profileId",
-      "method": "GET",
-      "path": "/service/profiles/{profileId}",
-      "cli": "ingest --tams-flow-profile",
-      "implemented_by": "internal/tams.Client.Profile",
-      "tested_by": "internal/ingest.TestProfileBackedFlowPlansExpandedReadsAndCompactWrites, internal/cli.TestCLINumericFlowProfileMatchesByJSONSemanticsBeforeMutation"
-    }
+    { "method": "GET", "path": "/service/profiles/{profileId}" }
   ],
-  "spec_review": {
-    "reviewed_at_commit": "ebb18b09cc6effe70a3464fc0282e9663d0a583f",
-    "adrs_total": 56,
-    "adrs_read": 56,
-    "appnotes_total": 24,
-    "appnotes_read": 24,
-    "note": "This target-contract delta extends the complete TAMS 8.1 review. Its rules and not_applicable entries classify every ADR and Application Note added by the pinned 8.2 preview; review-count tests take the union with tams-v8.1.json."
-  },
-  "rules": [
-    {
-      "id": "init-object-protocol",
-      "source": "adr/0045,appnote/0024",
-      "requirement": "Initialisation segments are independently allocated Objects associated with Media Objects through init_object_id; clients do not infer or manufacture them from Flow metadata.",
-      "asserted_by": "contracts.TestSegmentRequestMatchesPinnedSchema, tams.TestClientIngestOperations"
-    },
-    {
-      "id": "immutable-flow-profiles",
-      "source": "adr/0047,appnote/0020",
-      "requirement": "Flow Profiles are immutable single-essence technical contracts; profile-backed Flow PUTs carry profile_id instead of duplicate technical metadata, while Flow GETs remain expanded.",
-      "asserted_by": "ingest.TestProfileBackedFlowPlansExpandedReadsAndCompactWrites, ingest.TestAssignFlowProfilesRequiresIndexedDuplicateFormats"
-    },
-    {
-      "id": "storage-backend-authorisation-metadata",
-      "source": "adr/0055",
-      "requirement": "Storage Backend responses retain store type, provider, product, location, and read-only tags so authorisation policy can be evaluated without a lossy client model.",
-      "asserted_by": "tams.TestClientIngestOperations"
-    },
-    {
-      "id": "ordered-collection-roles",
-      "source": "adr/0056",
-      "requirement": "flow_collection order is meaningful and role is optional; Tamsin preserves deterministic input order and may supply human-readable roles without treating them as interoperable technical selectors.",
-      "asserted_by": "contracts.TestMultiEssenceFlowCollectsMonoEssenceFlows, ingest.TestCollectionItemsCarryExactMultiAudioTrackIndices"
-    }
-  ],
-  "not_applicable": [
-    {
-      "source": "adr/0054",
-      "reason": "Explicit presigned allocation mode is a low-level storage-administration choice; Tamsin uses the service-selected allocation response for ingest."
-    },
-    {
-      "source": "adr/0049",
-      "reason": "Source collected_by query filtering is a discovery operation outside the ingest write path."
-    },
-    {
-      "source": "adr/0052",
-      "reason": "Default ordering of generic listing endpoints does not alter ingest correctness; Profile paging follows opaque server cursors."
-    },
-    {
-      "source": "adr/0053,appnote/0025",
-      "reason": "Editorial purpose is operator-owned descriptive metadata; Tamsin does not infer it from codecs, filenames, or collection position."
-    },
-    {
-      "source": "appnote/0022",
-      "reason": "Transform deployment architectures are operational patterns; Tamsin exposes explicit local treatment profiles without requiring one architecture."
-    }
+  "requirements": [
+    "use compact profile_id writes after exact expanded Profile validation",
+    "preserve Profile JSON numbers without float64 precision loss",
+    "support init_object_id in the typed storage and Segment protocol",
+    "retain collection order and optional roles",
+    "follow guarded storage backend pagination and accept string or array tags",
+    "verify both presigned and non-presigned Object URLs",
+    "apply URL start deadlines only to presigned allocations"
   ],
   "open_findings": []
 }

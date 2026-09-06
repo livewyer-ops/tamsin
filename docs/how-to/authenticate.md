@@ -1,10 +1,7 @@
-# Authenticate against a TAMS store
+# Authenticate against TAMS
 
-TAMSin implements every authentication mechanism inherited by the pinned TAMS
-8.2 target from its 8.1 compatibility contract, plus both OAuth grants its
-bearer-token description recommends. Pick the one your store offers.
-
-Prefer the environment over flags: secret flags exist for interactive use, but are visible in process listings.
+Prefer environment variables to secret flags, which may appear in process
+listings. Set the mode explicitly for unattended work.
 
 ## Bearer token
 
@@ -13,21 +10,31 @@ export TAMSIN_AUTH_MODE=bearer
 export TAMSIN_AUTH_TOKEN='...'
 ```
 
-## OAuth2 client credentials
-
-For unattended jobs holding a client ID and secret:
+## OAuth client credentials
 
 ```sh
 export TAMSIN_AUTH_MODE=oauth-client
 export TAMSIN_AUTH_TOKEN_URL='https://identity.example.com/oauth/token'
 export TAMSIN_AUTH_CLIENT_ID='...'
 export TAMSIN_AUTH_CLIENT_SECRET='...'
-export TAMSIN_AUTH_SCOPES='tams.write'   # optional
+export TAMSIN_AUTH_SCOPES='tams.write' # optional
 ```
 
-If your client ID begins with `-`, set it through the environment as above; passed as a flag it would be parsed as an option, and `--client-id=-value` is needed instead.
+## Pre-obtained OAuth code
 
-## HTTP basic
+TAMSin exchanges a code obtained by another application. It does not open a
+browser or listen for an OAuth callback.
+
+```sh
+export TAMSIN_AUTH_MODE=oauth-code
+export TAMSIN_AUTH_TOKEN_URL='https://identity.example.com/oauth/token'
+export TAMSIN_AUTH_CLIENT_ID='...'
+export TAMSIN_AUTH_REDIRECT_URL='https://client.example.com/callback'
+export TAMSIN_AUTH_CODE='...'
+export TAMSIN_AUTH_PKCE_VERIFIER='...' # only when used to obtain the code
+```
+
+## HTTP Basic or URL token
 
 ```sh
 export TAMSIN_AUTH_MODE=basic
@@ -35,45 +42,21 @@ export TAMSIN_AUTH_USERNAME='...'
 export TAMSIN_AUTH_PASSWORD='...'
 ```
 
-## URL token
+For the TAMS `access_token` query mechanism, use an endpoint containing that
+parameter or set `TAMSIN_AUTH_URL_TOKEN` with mode `url-token`.
 
-TAMS defines an `access_token` query parameter. Either put it in the endpoint or supply it separately:
+## Automatic selection
 
-```sh
-export TAMSIN_AUTH_MODE=url-token
-export TAMSIN_ENDPOINT='https://tams.example.com?access_token=...'
-```
+The default `auto` mode selects URL token, bearer, OAuth code, OAuth client
+credentials, Basic, then no authentication according to the complete
+credentials present. Incomplete or ambiguous OAuth settings fail rather than
+silently choosing another mode.
 
-## OAuth2 authorization code
+## Transport policy
 
-For interactive use, TAMSin opens a localhost callback and generates PKCE automatically:
-
-```sh
-export TAMSIN_AUTH_MODE=oauth-code
-export TAMSIN_AUTH_TOKEN_URL='https://identity.example.com/oauth/token'
-export TAMSIN_AUTH_AUTHORIZATION_URL='https://identity.example.com/oauth/authorize'
-export TAMSIN_AUTH_CLIENT_ID='...'
-```
-
-The interactive command prints the complete provider authorization URL because
-its query parameters are required to complete OAuth. Treat that prompt as
-sensitive terminal output; it is the deliberate exception to TAMSin's normal
-URL-query redaction. `tamsin doctor --online` never starts this flow: give
-Doctor a pre-obtained code, or authorize with another command first.
-
-With a code obtained elsewhere, supply `TAMSIN_AUTH_CODE` and, where the provider used PKCE, `TAMSIN_AUTH_PKCE_VERIFIER`. Exchanging a pre-obtained code does not require an authorization URL; it still requires the token URL, client ID, and the redirect URL used when the code was issued.
-
-## Let TAMSin choose
-
-The default `auto` mode selects by what you have configured, in this order: URL token, static bearer, authorization code, client credentials, basic, then none. A code, PKCE verifier, or authorization URL signals the authorization-code grant; a client secret signals client credentials. Shared OAuth settings such as only a client ID, token URL, or scopes do not identify a grant, so `auto` reports an incomplete/ambiguous configuration instead of silently choosing no authentication.
-
-Set the mode explicitly for anything unattended. With both a token and OAuth credentials present, `auto` picks bearer and the OAuth path is never exercised — which is rarely what you meant.
-
-## Transport security
-
-TAMSin sends Basic credentials, bearer tokens and URL tokens only to HTTPS TAMS endpoints. OAuth token and authorization endpoints must also use HTTPS. Every credential-bearing TAMS request is pinned to the configured endpoint's canonical origin, so even a cross-origin HTTPS redirect is rejected before credentials are attached. OAuth token redirects are not followed. These checks happen before token acquisition or a TAMS request.
-
-For a development service listening directly on the same machine, plaintext authentication requires a separate, explicit opt-in:
+Credentials are sent only over HTTPS and only to the configured TAMS origin.
+OAuth token redirects are not followed. For a development service on the same
+machine, plaintext credentials require an explicit exception:
 
 ```sh
 tamsin --allow-insecure-auth-loopback \
@@ -81,33 +64,13 @@ tamsin --allow-insecure-auth-loopback \
   --auth bearer --token "$DEV_TOKEN" doctor --online
 ```
 
-The exception accepts only the exact hostname `localhost` (case-insensitive), an address in `127.0.0.0/8`, or IPv6 `::1`. It does not permit private-network addresses, localhost-like suffixes, abbreviated or integer IPv4 spellings, or remote HTTP even when the flag is set. Unauthenticated TAMS endpoints may still use HTTP.
+The exception accepts only `localhost`, `127.0.0.0/8` and `::1`. It does not
+permit private-network or remote HTTP endpoints.
 
-The default authorization-code callback is deliberately different: it is an inbound HTTP listener on loopback and never sends a credential to that URL. It remains available without the unsafe flag, including with a literal IPv6 `::1` callback. Token and authorization endpoints still require HTTPS.
+For a development TLS service with an untrusted certificate,
+`TAMSIN_HTTP_INSECURE_SKIP_VERIFY=true` disables certificate checks for API,
+storage, HTTP input and S3 requests. This is unsafe and does not permit
+plaintext authentication.
 
-## Check it works
-
-```sh
-tamsin doctor --online
-```
-
-The `auth` field reports which mechanism was used. Outside the explicit
-interactive authorization prompt described above, URLs in output and
-diagnostics have userinfo removed and every query value redacted, so tokens do
-not leak into logs.
-
-## Self-signed certificates
-
-Against a development store with an untrusted certificate:
-
-```sh
-export TAMSIN_HTTP_INSECURE_SKIP_VERIFY=true
-```
-
-This disables certificate verification for the API, storage URLs, HTTP inputs and S3 alike. It is unsafe by design and intended for local testing.
-
-It does not permit plaintext authentication. Use `--allow-insecure-auth-loopback` separately when a loopback-only development endpoint has no TLS listener.
-
-## See also
-
-- [Configuration reference](../reference/configuration.md) — every key, flag and environment name
+Run `tamsin doctor --online` to verify the resolved mode and endpoint without
+mutating TAMS.

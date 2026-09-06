@@ -7,7 +7,7 @@ import (
 	"maps"
 	"time"
 
-	"github.com/livewyer-ops/tamsin/contracts"
+	"github.com/livewyer-ops/tamsin/internal/tamsschema"
 )
 
 const (
@@ -21,7 +21,7 @@ const (
 // of technical metadata, so every lifecycle write uses the same projection as
 // initial Flow creation.
 func (p *Pipeline) setFlowStatus(ctx context.Context, flowID, status string) error {
-	if p.config.DryRun || !p.apiVersion.SupportsFlowProfiles() {
+	if p.config.DryRunMode != DryRunOff || !p.apiVersion.SupportsFlowProfiles() {
 		return nil
 	}
 	p.flowStatusMu.Lock()
@@ -43,10 +43,10 @@ func (p *Pipeline) setFlowStatus(ctx context.Context, flowID, status string) err
 	effective["status"] = status
 	profileID := stringField(existing, "profile_id")
 	request := flowPutProjection(effective, profileID)
-	if err := contracts.ValidateFlowGet(p.apiVersion, effective); err != nil {
+	if err := tamsschema.ValidateFlowGet(p.apiVersion, effective); err != nil {
 		return fmt.Errorf("flow %s status %s produces invalid expanded metadata at %w", flowID, status, err)
 	}
-	if err := contracts.ValidateFlowPut(p.apiVersion, request); err != nil {
+	if err := tamsschema.ValidateFlowPut(p.apiVersion, request); err != nil {
 		return fmt.Errorf("flow %s status %s produces invalid PUT metadata at %w", flowID, status, err)
 	}
 	if _, err := p.client.PutFlow(ctx, flowID, request); err != nil {
@@ -75,7 +75,7 @@ func (p *Pipeline) setFlowGraphStatus(ctx context.Context, graph flowGraph, stat
 // recoverFlowStatuses gets a short cancellation-independent window to leave a
 // failed or interrupted graph honest. It never masks the primary ingest error.
 func (p *Pipeline) recoverFlowStatuses(ctx context.Context, graph flowGraph) error {
-	if p.config.DryRun || !p.apiVersion.SupportsFlowProfiles() {
+	if p.config.DryRunMode != DryRunOff || !p.apiVersion.SupportsFlowProfiles() {
 		return nil
 	}
 	recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)

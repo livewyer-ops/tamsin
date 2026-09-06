@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/livewyer-ops/tamsin/main/contracts/tamsin/doctor-report-v1.json",
+  "$id": "https://tamsin.livewyer.io/contracts/doctor-report-v1.json",
   "title": "Tamsin doctor report v1",
   "type": "object",
   "additionalProperties": false,

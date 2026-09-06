@@ -22,7 +22,7 @@ func TestDescribeFailureDoesNotExposeUntrustedTAMSErrorDetails(t *testing.T) {
 		Input: "file:///input.ts", Profile: ProfileEssenceSegments, ProfileVersion: "1",
 		Status: ResultStatusFailed, Verification: VerificationNotReached, Flows: []FlowResult{}, Error: cause.Error(),
 	}
-	result.Failure = describeFailure(result, cause)
+	result.Failure = DescribeFailure(result, cause)
 	if result.Failure == nil || result.Failure.Code != FailureCodeHTTPRequestFailed ||
 		result.Failure.Message != FailureMessageHTTPRequestFailed {
 		t.Fatalf("unsafe or unstable classification: %#v", result.Failure)
@@ -70,7 +70,7 @@ func TestDescribeInputInterruptedFailure(t *testing.T) {
 
 func TestFailedResultPreservesTypedOperationTimeout(t *testing.T) {
 	t.Parallel()
-	pipeline := &Pipeline{config: Config{Profile: ProfileEssenceSegments, ProfileVersion: "1", Verify: true}}
+	pipeline := &Pipeline{config: Config{Profile: ProfileEssenceSegments, ProfileVersion: "1", VerificationMode: VerificationReadback}}
 	cause := withFailure(FailureCodePreflightFailed, FailureMessagePreflightTimedOut, true, context.DeadlineExceeded)
 	result := pipeline.failedResult(source.Item{URI: "file:///input.ts"}, cause)
 	if result.Failure == nil || result.Failure.Code != FailureCodePreflightFailed || !result.Failure.ActionRequired {

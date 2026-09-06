@@ -8,7 +8,7 @@ import (
 )
 
 // Stable failure codes and their safe operator-facing messages. These are the
-// wire contract: they appear in the result journal and the process event stream,
+// wire contract: they appear in the process event stream,
 // are pinned by contract tests, and must never carry store-supplied text.
 const (
 	FailureCodeConfigInvalid          = "config.invalid"
@@ -19,7 +19,6 @@ const (
 	FailureCodeTAMSFailed             = "tams.failed"
 	FailureCodeInterrupted            = "run.interrupted"
 	FailureCodeRunFailed              = "run.failed"
-	FailureCodeJournalWrite           = "journal.write_failed"
 	FailureCodeVerificationNotReached = "verification.not_reached"
 	FailureCodeInputFailedGeneric     = "ingest.input_failed"
 	FailureCodeFlowIndeterminate      = "flow.indeterminate"
@@ -52,7 +51,6 @@ const (
 	FailureMessageTAMSFailed               = "The TAMS operation did not complete successfully."
 	FailureMessageInterrupted              = "The ingest was interrupted while cleanup was in progress."
 	FailureMessageRunFailed                = "The ingest run did not complete successfully."
-	FailureMessageJournalWrite             = "The durable result journal could not be written completely."
 	FailureMessageInputInterrupt           = "The input did not finish before the run was interrupted."
 	FailureMessageFlowIndeterminate        = "A Flow update may have committed before its response was lost."
 	FailureMessageObjectStranded           = "A registered media object could not be retracted."
@@ -136,10 +134,6 @@ func DescribeFailure(result Result, cause error) *Failure {
 	return &Failure{Code: FailureCodeInputFailedGeneric, Message: FailureMessageInputFailedGeneric}
 }
 
-func describeFailure(result Result, cause error) *Failure {
-	return DescribeFailure(result, cause)
-}
-
 // DescribeInputInterruptedFailure returns the stable input-local interruption
 // projection for run-level interruption. Diagnostics use a different message even
 // though they share the same failure code.
@@ -180,9 +174,9 @@ func terminalStateFailure(result Result) *Failure {
 	return nil
 }
 
-// DescribeRunFailure adds terminal-run context (for example interruption) on top
+// describeRunFailure adds terminal-run context (for example interruption) on top
 // of per-input failure classification.
-func DescribeRunFailure(result Result, cause error, runCtx context.Context) *Failure {
+func describeRunFailure(result Result, cause error, runCtx context.Context) *Failure {
 	// Recovery truth is more important than why scheduling stopped. A signal
 	// must never erase an indeterminate or stranded terminal state which still
 	// requires operator action.
@@ -198,10 +192,6 @@ func DescribeRunFailure(result Result, cause error, runCtx context.Context) *Fai
 		return interruptedFailure()
 	}
 	return DescribeFailure(result, cause)
-}
-
-func describeRunFailure(result Result, cause error, runCtx context.Context) *Failure {
-	return DescribeRunFailure(result, cause, runCtx)
 }
 
 func interruptedFailure() *Failure {

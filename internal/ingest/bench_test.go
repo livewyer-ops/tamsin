@@ -138,11 +138,6 @@ func (c *countingClient) ListSegments(ctx context.Context, flowID string, option
 	return c.inner.ListSegments(ctx, flowID, options)
 }
 
-func (c *countingClient) Object(ctx context.Context, objectID string) (tams.ObjectInfo, error) {
-	defer c.record("Object")()
-	return c.inner.Object(ctx, objectID)
-}
-
 func (c *countingClient) UploadFile(ctx context.Context, destination tams.PresignedURL, filename string) (tams.UploadReceipt, error) {
 	defer c.record("UploadFile")()
 	return c.inner.UploadFile(ctx, destination, filename)
@@ -182,7 +177,9 @@ func (s countingSegmenter) Segment(_ context.Context, request media.SegmentReque
 	return nil
 }
 
-func (countingSegmenter) Version(context.Context) (string, error) { return "ffmpeg bench", nil }
+func (countingSegmenter) Version(context.Context) (string, error) {
+	return "ffmpeg version 5.1 bench", nil
+}
 
 type boundedRollingSegmenter struct {
 	inFlight atomic.Int64
@@ -196,7 +193,7 @@ func (s *boundedRollingSegmenter) Segment(ctx context.Context, request media.Seg
 }
 
 func (*boundedRollingSegmenter) Version(context.Context) (string, error) {
-	return "ffmpeg bounded-rolling-test", nil
+	return "ffmpeg version 5.1 bounded-rolling-test", nil
 }
 
 func benchFixture(tb testing.TB) source.Item {
@@ -221,7 +218,7 @@ func TestRoundTripsPerObject(t *testing.T) {
 
 	client := newCountingClient(0)
 	pipeline, err := New(Config{
-		Concurrency: 1, Verify: true, SegmentDuration: time.Second,
+		Concurrency: 1, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: objects}, discardLogger(), nil)
 	if err != nil {
@@ -277,7 +274,7 @@ func TestTransfersRunConcurrently(t *testing.T) {
 			// finish before the next one starts and peak stays at 1 legitimately.
 			client := newCountingClient(2 * time.Millisecond)
 			pipeline, err := New(Config{
-				Concurrency: 1, Transfers: transfers, Verify: true, SegmentDuration: time.Second,
+				Concurrency: 1, Transfers: transfers, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 				EssenceStorage: media.EssenceStorageMuxed,
 			}, client, fakeProber{}, countingSegmenter{objects: objects}, discardLogger(), nil)
 			if err != nil {
@@ -307,7 +304,7 @@ func TestTransferBudgetIsGlobal(t *testing.T) {
 	t.Parallel()
 	client := newCountingClient(2 * time.Millisecond)
 	pipeline, err := New(Config{
-		Concurrency: 4, Transfers: 2, Verify: true, SegmentDuration: time.Second,
+		Concurrency: 4, Transfers: 2, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: 8}, discardLogger(), nil)
 	if err != nil {
@@ -336,7 +333,7 @@ func BenchmarkIngestByLatency(b *testing.B) {
 				for b.Loop() {
 					client := newCountingClient(latency)
 					pipeline, err := New(Config{
-						Concurrency: 1, Transfers: concurrency, Verify: true, SegmentDuration: time.Second,
+						Concurrency: 1, Transfers: concurrency, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 						EssenceStorage: media.EssenceStorageMuxed,
 					}, client, fakeProber{}, countingSegmenter{objects: 16}, discardLogger(), nil)
 					if err != nil {
@@ -363,7 +360,7 @@ func BenchmarkIngestByObjectCount(b *testing.B) {
 			for b.Loop() {
 				client := newCountingClient(0)
 				pipeline, err := New(Config{
-					Concurrency: 8, Verify: true, SegmentDuration: time.Second,
+					Concurrency: 8, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 					EssenceStorage: media.EssenceStorageMuxed,
 				}, client, fakeProber{}, countingSegmenter{objects: objects}, discardLogger(), nil)
 				if err != nil {
@@ -403,7 +400,9 @@ func (p *countingProber) Probe(_ context.Context, _ string) (media.Probe, error)
 	return probe, nil
 }
 
-func (p *countingProber) Version(context.Context) (string, error) { return "ffprobe test", nil }
+func (p *countingProber) Version(context.Context) (string, error) {
+	return "ffprobe version 5.1 test", nil
+}
 
 // TestMediaProcessBudgetIsGlobalAcrossInputs covers a bound that multiplied
 // instead of holding. Media measurement was limited per Flow, while Run
@@ -416,7 +415,7 @@ func TestMediaProcessBudgetIsGlobalAcrossInputs(t *testing.T) {
 	prober := &countingProber{delay: 2 * time.Millisecond}
 	client := newFakeClient()
 	pipeline, err := New(Config{
-		Concurrency: 4, Transfers: 4, ProbeConcurrency: 8, Verify: false,
+		Concurrency: 4, Transfers: 4, ProbeConcurrency: 8, VerificationMode: VerificationNone,
 		SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed,
 	}, client, prober, countingSegmenter{objects: 8}, discardLogger(), nil)
 	if err != nil {
@@ -450,7 +449,7 @@ func TestRollingMediaProcessBudgetCannotDeadlockAcrossInputs(t *testing.T) {
 	}
 	segmenter := &boundedRollingSegmenter{}
 	pipeline, err := New(Config{
-		Concurrency: 2, Transfers: 2, ProbeConcurrency: 2, Verify: false,
+		Concurrency: 2, Transfers: 2, ProbeConcurrency: 2, VerificationMode: VerificationNone,
 		SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed,
 	}, newFakeClient(), &countingProber{}, segmenter, discardLogger(), nil)
 	if err != nil {
@@ -474,7 +473,7 @@ func TestSegmentManifestUsesOneAnchorProbePerOutput(t *testing.T) {
 	t.Parallel()
 	prober := &countingProber{}
 	pipeline, err := New(Config{
-		Concurrency: 1, Transfers: 1, ProbeConcurrency: 8, Verify: false,
+		Concurrency: 1, Transfers: 1, ProbeConcurrency: 8, VerificationMode: VerificationNone,
 		SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed,
 	}, newFakeClient(), prober, countingSegmenter{objects: 8}, discardLogger(), nil)
 	if err != nil {
@@ -490,7 +489,7 @@ func TestSegmentManifestUsesOneAnchorProbePerOutput(t *testing.T) {
 
 func TestCustomMediaProcessUsesTheCompleteLocalBudget(t *testing.T) {
 	t.Parallel()
-	pipeline, err := New(Config{Concurrency: 1, DryRun: true}, nil, &countingProber{}, nil, discardLogger(), nil)
+	pipeline, err := New(Config{Concurrency: 1, DryRunMode: DryRunExact}, nil, &countingProber{}, nil, discardLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

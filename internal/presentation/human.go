@@ -16,23 +16,18 @@ import (
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/livewyer-ops/tamsin/internal/ingest"
 	"github.com/livewyer-ops/tamsin/internal/observability"
 )
 
-const defaultHumanWidth = 80
-
-// HumanOptions controls the permanent human receipt. Width is the usable
-// terminal width in columns; values below one select a deterministic 80-column
-// default. Verbose expands provenance and per-Object details. Quiet suppresses
+// HumanOptions controls the permanent human receipt. Verbose expands
+// provenance and any retained Object recovery details. Quiet suppresses
 // only clean success and dry-run receipts: warnings and failures are never
 // hidden. Color decorates status headings only; all meaning remains in words.
 // The caller is responsible for resolving auto/always/never, NO_COLOR, and
 // terminal capability before setting Color.
 type HumanOptions struct {
-	Width   int
 	Verbose bool
 	Quiet   bool
 	Color   bool
@@ -46,11 +41,7 @@ func WriteHuman(writer io.Writer, batch ingest.BatchResult, metrics observabilit
 	if writer == nil {
 		return errors.New("human output writer is nil")
 	}
-	width := options.Width
-	if width < 1 {
-		width = defaultHumanWidth
-	}
-	output := &humanWriter{writer: writer, width: width, color: options.Color}
+	output := &humanWriter{writer: writer, color: options.Color}
 
 	type visibleResult struct {
 		result   ingest.Result
@@ -559,7 +550,6 @@ func humanDuration(duration time.Duration) string {
 
 type humanWriter struct {
 	writer io.Writer
-	width  int
 	color  bool
 	err    error
 }
@@ -572,12 +562,8 @@ func (w *humanWriter) line(indent int, text string) {
 	if w.err != nil {
 		return
 	}
-	text = sanitizeHumanText(text)
-	indent = min(max(indent, 0), max(w.width-1, 0))
-	prefix := strings.Repeat(" ", indent)
-	for _, line := range wrap(text, max(w.width-indent, 1)) {
-		w.writePhysical(prefix + line)
-	}
+	indent = min(max(indent, 0), 32)
+	w.writePhysical(strings.Repeat(" ", indent) + strings.TrimSpace(sanitizeHumanText(text)))
 }
 
 func (w *humanWriter) keyValue(indent int, key, value string) {
@@ -591,20 +577,7 @@ func (w *humanWriter) keyValue(indent int, key, value string) {
 		w.line(indent, key)
 		return
 	}
-	combined := key + " " + value
-	if visibleWidth(strings.Repeat(" ", indent)+combined) <= w.width {
-		w.line(indent, combined)
-		return
-	}
-	w.line(indent, key)
-	valueIndent := indent + 2
-	if visibleWidth(value)+valueIndent > w.width && visibleWidth(value)+indent <= w.width {
-		// Keep UUIDs intact at 40 columns: once their label has moved to its
-		// own line, extra decorative indentation must not force the value to
-		// wrap.
-		valueIndent = indent
-	}
-	w.line(valueIndent, value)
+	w.line(indent, key+" "+value)
 }
 
 func (w *humanWriter) flow(label, id, objects string) {
@@ -616,62 +589,28 @@ func (w *humanWriter) flow(label, id, objects string) {
 	if objects != "" {
 		parts = append(parts, objects)
 	}
-	combined := strings.Join(parts, "  ")
-	if visibleWidth("  "+combined) <= w.width {
-		w.line(2, combined)
-		return
-	}
-	w.line(2, label)
-	if id != "" {
-		w.line(4, id)
-	}
-	if objects != "" {
-		w.line(4, objects)
-	}
+	w.line(2, strings.Join(parts, "  "))
 }
 
 func (w *humanWriter) resultHeading(heading, input, duration string, level severity) {
 	heading, input, duration = sanitizeHumanText(heading), sanitizeHumanText(input), sanitizeHumanText(duration)
-	plain := heading
+	suffix := ""
 	if input != "" {
-		plain += "  " + input
+		suffix += "  " + input
 	}
 	if duration != "" {
-		plain += "  " + duration
+		suffix += "  " + duration
 	}
-	if visibleWidth(plain) <= w.width {
-		w.writeStatusLine(heading, strings.TrimPrefix(plain, heading), level)
-		return
-	}
-	w.writeStatusHeading(heading, level)
-	if input != "" {
-		w.keyValue(2, "input", input)
-	}
-	if duration != "" {
-		w.keyValue(2, "elapsed", duration)
-	}
+	w.writeStatusLine(heading, suffix, level)
 }
 
 func (w *humanWriter) footerHeading(heading, summary string, level severity) {
 	heading, summary = sanitizeHumanText(heading), sanitizeHumanText(summary)
-	plain := heading
+	suffix := ""
 	if summary != "" {
-		plain += "  " + summary
+		suffix = "  " + summary
 	}
-	if visibleWidth(plain) <= w.width {
-		w.writeStatusLine(heading, strings.TrimPrefix(plain, heading), level)
-		return
-	}
-	w.writeStatusHeading(heading, level)
-	if summary != "" {
-		w.line(2, summary)
-	}
-}
-
-func (w *humanWriter) writeStatusHeading(heading string, level severity) {
-	for _, line := range wrap(heading, w.width) {
-		w.writeStatusLine(line, "", level)
-	}
+	w.writeStatusLine(heading, suffix, level)
 }
 
 func (w *humanWriter) writeStatusLine(heading, suffix string, level severity) {
@@ -704,95 +643,4 @@ func (w *humanWriter) writePhysical(text string) {
 		return
 	}
 	_, w.err = fmt.Fprintln(w.writer, text)
-}
-
-func wrap(text string, width int) []string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return []string{""}
-	}
-	width = max(width, 1)
-	words := strings.Fields(text)
-	lines := make([]string, 0, 1)
-	current := ""
-	for _, word := range words {
-		for visibleWidth(word) > width {
-			if current != "" {
-				lines = append(lines, current)
-				current = ""
-			}
-			prefix, rest := splitRunes(word, width)
-			lines = append(lines, prefix)
-			word = rest
-		}
-		if word == "" {
-			continue
-		}
-		if current == "" {
-			current = word
-			continue
-		}
-		if visibleWidth(current)+1+visibleWidth(word) <= width {
-			current += " " + word
-			continue
-		}
-		lines = append(lines, current)
-		current = word
-	}
-	if current != "" {
-		lines = append(lines, current)
-	}
-	return lines
-}
-
-func splitRunes(text string, columns int) (string, string) {
-	if columns < 1 {
-		return "", text
-	}
-	used := 0
-	for index, character := range text {
-		characterWidth := runeWidth(character)
-		if used+characterWidth > columns {
-			if index == 0 {
-				_, size := utf8.DecodeRuneInString(text)
-				return text[:size], text[size:]
-			}
-			return text[:index], text[index:]
-		}
-		used += characterWidth
-	}
-	return text, ""
-}
-
-func visibleWidth(text string) int {
-	width := 0
-	for _, character := range text {
-		width += runeWidth(character)
-	}
-	return width
-}
-
-// runeWidth implements the small terminal-width subset this renderer needs
-// without adding a dependency solely for presentation. It covers combining
-// marks and the East Asian/emoji ranges which otherwise make a Unicode input
-// label overflow even when its rune count fits.
-func runeWidth(character rune) int {
-	if character == 0 || character == '\u200d' || unicode.IsControl(character) ||
-		unicode.Is(unicode.Mn, character) || unicode.Is(unicode.Me, character) {
-		return 0
-	}
-	if character >= 0x1100 && (character <= 0x115f ||
-		character == 0x2329 || character == 0x232a ||
-		(character >= 0x2e80 && character <= 0xa4cf && character != 0x303f) ||
-		(character >= 0xac00 && character <= 0xd7a3) ||
-		(character >= 0xf900 && character <= 0xfaff) ||
-		(character >= 0xfe10 && character <= 0xfe19) ||
-		(character >= 0xfe30 && character <= 0xfe6f) ||
-		(character >= 0xff00 && character <= 0xff60) ||
-		(character >= 0xffe0 && character <= 0xffe6) ||
-		(character >= 0x1f300 && character <= 0x1faff) ||
-		(character >= 0x20000 && character <= 0x3fffd)) {
-		return 2
-	}
-	return 1
 }

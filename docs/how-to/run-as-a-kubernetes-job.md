@@ -22,17 +22,19 @@ spec:
         runAsUser: 65532
       containers:
         - name: tamsin
-          image: tamsin:dev # replace with the immutable image reference promoted by your build
+          image: ghcr.io/livewyer-ops/tamsin:1.0.0-rc.3 # pre-release; pin a digest
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           args:
+            - "--profile"
+            - "essence-segments"
             - "-i"
             - "s3://incoming/day-001/"
             - "-o"
-            - "https://tams.example.com/v8.1"
+            - "https://tams.example.com"
             - "--format"
             - "json"
             - "--max-inputs"
@@ -81,10 +83,9 @@ but is not part of the result protocol. Send SIGTERM for graceful cancellation
 and leave enough time for registration/retraction cleanup; stdin is not a
 control channel because it may carry media.
 
-For durable per-input recovery across node or container loss, add a writable
-volume and `--journal` path on it. The journal is a separately synced terminal
-record, not a duplicate of the event stream. Do not put it on this example's
-ephemeral `/tmp` if it must survive Pod removal.
+Configure the log collector to retain stdout when the NDJSON event stream is
+the operational record. A hard kill can truncate that stream; absence of
+`run.finished` must therefore remain distinguishable from success.
 
 ## See also
 

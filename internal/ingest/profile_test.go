@@ -20,7 +20,7 @@ func (p profilePolicyProber) Probe(context.Context, string) (media.Probe, error)
 }
 
 func (profilePolicyProber) Version(context.Context) (string, error) {
-	return "ffprobe test", nil
+	return "ffprobe version 5.1 test", nil
 }
 
 func TestNamedProfilesAreVersionedMediaContracts(t *testing.T) {
@@ -64,7 +64,7 @@ func TestAllBuiltInProfilesCompleteExactDryRuns(t *testing.T) {
 			pipeline, err := New(Config{
 				Profile: definition.Name, ProfileVersion: definition.Version,
 				SegmentDuration: definition.SegmentDuration, SegmentFormat: definition.SegmentFormat,
-				EssenceStorage: definition.EssenceStorage, DryRun: true, DryRunMode: DryRunExact,
+				EssenceStorage: definition.EssenceStorage, DryRunMode: DryRunExact,
 				Concurrency: 1, Transfers: 1, ProbeConcurrency: 1,
 			}, nil, fakeProber{}, fakeSegmenter{}, discardLogger(), nil)
 			if err != nil {
@@ -196,7 +196,7 @@ func TestNamedProfileCannotMisreportDifferentSettings(t *testing.T) {
 	_, err := New(Config{
 		Profile: ProfileEssenceSegments, ProfileVersion: "1",
 		SegmentDuration: 2 * time.Second, SegmentFormat: media.SegmentFormatSource,
-		EssenceStorage: media.EssenceStorageIndependent, DryRun: true,
+		EssenceStorage: media.EssenceStorageIndependent, DryRunMode: DryRunExact,
 	}, nil, fakeProber{}, fakeSegmenter{}, discardLogger(), nil)
 	if err == nil || !strings.Contains(err.Error(), "custom@1") {
 		t.Fatalf("mismatched named-profile error = %v", err)
@@ -249,7 +249,7 @@ func TestMPEGTSSegmentPolicyFailsBeforeInvokingFFmpeg(t *testing.T) {
 	}}
 	pipeline, err := New(Config{
 		Profile: ProfileMPEGTSSegments, ProfileVersion: "1",
-		Concurrency: 1, DryRun: true, SegmentDuration: 2 * time.Second,
+		Concurrency: 1, DryRunMode: DryRunExact, SegmentDuration: 2 * time.Second,
 		SegmentFormat: media.SegmentFormatMPEGTS, EssenceStorage: media.EssenceStorageIndependent,
 	}, nil, prober, versionedCountingSegmenter{err: errors.New("FFmpeg must not run")}, discardLogger(), nil)
 	if err != nil {
@@ -317,7 +317,7 @@ func TestMachineResultReportsTheToolchainThatWroteMedia(t *testing.T) {
 	const report = "ffmpeg version 7.0\nconfiguration: --enable-example\nlibavformat 61.0"
 	pipeline, err := New(Config{
 		Profile: ProfileEssenceSegments, ProfileVersion: "1",
-		Concurrency: 1, Transfers: 2, DryRun: true,
+		Concurrency: 1, Transfers: 2, DryRunMode: DryRunExact,
 		SegmentDuration: 10 * time.Second, SegmentFormat: media.SegmentFormatSource,
 		EssenceStorage: media.EssenceStorageIndependent,
 	}, nil, fakeProber{}, versionedCountingSegmenter{

@@ -27,7 +27,6 @@ const (
 )
 
 const (
-	helpGroupAnnotation         = "tamsin.help_group"
 	configIndependentAnnotation = "tamsin.config_independent"
 )
 
@@ -37,41 +36,27 @@ func usageArgs(validate cobra.PositionalArgs) cobra.PositionalArgs {
 	}
 }
 
-// helpGroupCommand makes a namespace command validate stray arguments while
-// preserving the familiar successful help output when it is invoked alone.
-// The annotation keeps that help-only path independent of runtime config.
-func helpGroupCommand(use, short string) *cobra.Command {
-	command := &cobra.Command{
-		Use:         use,
-		Short:       short,
-		Args:        usageArgs(cobra.NoArgs),
-		Annotations: map[string]string{helpGroupAnnotation: "true"},
-	}
-	command.RunE = func(command *cobra.Command, _ []string) error { return command.Help() }
-	return command
-}
-
 type ExitError struct {
 	Code int
 	Err  error
 }
 
-type processFailureError struct {
-	code           string
-	message        string
-	actionRequired bool
-	err            error
+type diagnosticHintError struct {
+	err  error
+	hint string
 }
 
-func (e *processFailureError) Error() string         { return e.err.Error() }
-func (e *processFailureError) Unwrap() error         { return e.err }
-func (e *processFailureError) PublicMessage() string { return e.message }
+func (e *diagnosticHintError) Error() string { return e.err.Error() }
+func (e *diagnosticHintError) Unwrap() error { return e.err }
+func (e *diagnosticHintError) DiagnosticHint() string {
+	return e.hint
+}
 
-func safeProcessFailure(code, message string, actionRequired bool, err error) error {
-	if err == nil {
-		return nil
+func withDiagnosticHint(err error, hint string) error {
+	if err == nil || hint == "" {
+		return err
 	}
-	return &processFailureError{code: code, message: message, actionRequired: actionRequired, err: err}
+	return &diagnosticHintError{err: err, hint: hint}
 }
 
 func (e *ExitError) Error() string {
