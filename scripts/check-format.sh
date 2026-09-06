@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mapfile -t files < <(
-  go list -f '{{range .GoFiles}}{{$.Dir}}/{{.}}{{"\n"}}{{end}}{{range .TestGoFiles}}{{$.Dir}}/{{.}}{{"\n"}}{{end}}' ./...
-)
-
-if [ "${#files[@]}" -eq 0 ]; then
+source_files="$(go list -f '{{range .GoFiles}}{{$.Dir}}/{{.}}{{"\n"}}{{end}}{{range .TestGoFiles}}{{$.Dir}}/{{.}}{{"\n"}}{{end}}{{range .XTestGoFiles}}{{$.Dir}}/{{.}}{{"\n"}}{{end}}' ./...)"
+if [ -z "$source_files" ]; then
   exit 0
 fi
+mapfile -t files <<<"$source_files"
 
 unformatted="$(gofmt -l "${files[@]}")"
 if [ -n "$unformatted" ]; then

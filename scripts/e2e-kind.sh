@@ -16,9 +16,7 @@ require() {
   }
 }
 
-# The conformance matrix is the single source of truth for the live service
-# exercised here. jq is needed before the rest of the E2E toolchain is
-# bootstrapped, so check it before attempting to read any value through it.
+# Read the live service pins before bootstrapping the remaining tools.
 require jq
 contract_value() {
   local selector="$1"
@@ -26,6 +24,7 @@ contract_value() {
 }
 TAMOSS_COMMIT="$(contract_value '.tamoss.commit')"
 TAMS_COMMIT="$(contract_value '.tams.commit')"
+TAMS_VERSION="$(contract_value '.tams.version')"
 TAMOSS_RELEASE="$(contract_value '.tamoss.release')"
 PROFILE="$(contract_value '.tamoss.profile')"
 
@@ -52,25 +51,16 @@ cache="$root/.cache"
 tamoss="$cache/tamoss-$TAMOSS_COMMIT"
 kubeconfig="$cache/$PROJECT_NAME.kubeconfig"
 fixtures="$root/.tmp/e2e"
-journal_dir="$fixtures/journals"
 http_pid=""
 
-# capture_diagnostics records what the cluster thought was happening when a run
-# failed. Every CI failure so far has been diagnosed by inference, because the
-# cluster is torn down before anyone can look at it -- which cannot distinguish
-# a workload that was stuck from one that was merely slow. TAMOSS ships the
-# collector its own CI uses, and it is redacted.
+# Preserve redacted diagnostics before tearing down a failed cluster.
 capture_diagnostics() {
-  # Deliberately outside the fixtures directory, which cleanup removes on a
-  # failure that is not being preserved -- which is every CI failure.
+  # Keep diagnostics outside the disposable fixtures directory.
   local bundle="$root/.tmp/e2e-support"
   [ -f "$kubeconfig" ] || return 0
   [ -f "$tamoss/scripts/support_bundle.py" ] || return 0
   mkdir -p "$bundle"
-  # Collected first and unconditionally, because the support bundle stops when
-  # its primary namespace is absent -- and a run that fails before the instance
-  # is applied has no tams namespace at all, which is precisely the case that
-  # produced an empty bundle and taught us this.
+  # The upstream collector needs a tams namespace; also cover earlier failures.
   {
     echo "== pods =="
     kubectl --kubeconfig "$kubeconfig" get pods -A -o wide
@@ -137,16 +127,11 @@ if ! command -v aqua >/dev/null 2>&1; then
   export PATH="$cache/aqua-bin:$PATH"
 fi
 
-for command in aqua base64 curl docker jq kubectl python3 tar; do
+for command in aqua base64 curl docker git jq kubectl python3 tar; do
   require "$command"
 done
 
-# A failed run is preserved for inspection when TAMSIN_E2E_KEEP_CLUSTER is set,
-# so the next run starts by clearing it. Inheriting it is worse than useless:
-# the HTTP fixture server publishes its port to a file, and the wait loop takes
-# a non-empty file as proof the server is up. A port left behind by a previous
-# run satisfies that immediately, and the run then fails against a port nothing
-# is listening on -- five hours after the process that opened it exited.
+# Clear stale fixtures, including any previous HTTP server's readiness file.
 rm -rf "$fixtures"
 mkdir -p "$cache" "$fixtures"
 if [ ! -f "$tamoss/Taskfile.yaml" ]; then
@@ -158,6 +143,12 @@ if [ ! -f "$tamoss/src/vendor/bbc-tams/api/TimeAddressableMediaStore.yaml" ]; th
   mkdir -p "$tamoss/src/vendor/bbc-tams"
   curl -fsSL "https://github.com/bbc/tams/archive/$TAMS_COMMIT.tar.gz" \
     | tar -xz --strip-components=1 -C "$tamoss/src/vendor/bbc-tams"
+fi
+# The pinned source is an archive inside this worktree. Give it its own Git
+# boundary so TAMOSS content-derived image tags cannot resolve the parent
+# TAMSin repository by accident.
+if [ ! -d "$tamoss/.git" ]; then
+  git -C "$tamoss" init --quiet
 fi
 
 (
@@ -187,112 +178,10 @@ EOF
 ) >/dev/null 2>&1 || true
 
 
-# kind:up rebuilds the TAMOSS operator image, side-loads it into the node, and
-# then rolls the Deployment so the running pod adopts an image whose tag has not
-# changed. On a fresh cluster that restart is a no-op -- the pod was created
-# after the load and is already running exactly that image -- but it is not free.
-# The Deployment sets no strategy, so it takes the Kubernetes default, and 25%
-# maxSurge rounds up to one for a single replica: the rollout wants a second
-# 500m/256Mi pod scheduled before the first goes away.
-#
-# On a two-core runner already holding Postgres, Authentik, rustfs, Traefik,
-# cert-manager and the TAMS workloads, there is no room for it. The new pod
-# stays Pending, the old one waits for a replacement that never arrives, and the
-# rollout times out on "1 old replicas are pending termination" -- which is
-# exactly how this failed twice in CI while passing locally.
-#
-# Replacing in place removes the need for that headroom. The restart still
-# happens and still has to succeed; it just stops requiring room for two.
-python3 - "$tamoss/operator/config/manager/manager.yaml" <<'EOF'
-import sys
+# Replace the operator in place: small CI runners cannot fit a surge replica.
+python3 "$root/scripts/e2e-prepare.py" "$tamoss" "$prune_builder_cache"
 
-path = sys.argv[1]
-with open(path) as handle:
-    documents = handle.read().split("\n---\n")
-
-# Written as a text edit rather than through a YAML library, because the file is
-# TAMOSS's and round-tripping it would reformat everything around the change.
-for index, document in enumerate(documents):
-    if "\nkind: Deployment\n" not in document:
-        continue
-    if "\n  strategy:\n" in document:
-        break
-    documents[index] = document.replace(
-        "\n  replicas: 1\n",
-        "\n  replicas: 1\n"
-        "  strategy:\n"
-        "    type: RollingUpdate\n"
-        "    rollingUpdate:\n"
-        "      maxSurge: 0\n"
-        "      maxUnavailable: 1\n",
-        1,
-    )
-    break
-else:
-    raise SystemExit("no Deployment found in the operator manifest")
-
-with open(path, "w") as handle:
-    handle.write("\n---\n".join(documents))
-EOF
-
-# The local-kind task always builds and loads the UI image even when the
-# instance disables the UI. On GitHub's runner that dead image, plus the build
-# cache for all three TAMOSS images and Tamsin itself, left too little space in
-# the Kind node to unpack PostgreSQL. Patch the pinned harness narrowly: omit
-# only the two UI image commands. On CI, also release unreferenced builder cache
-# after the API/operator images have been side-loaded; local retries retain it
-# unless TAMSIN_E2E_PRUNE_BUILDER_CACHE explicitly requests pruning. Retained
-# images are never pruned; the matrix uses Tamsin from the host and TAMOSS from
-# Kind.
-python3 - "$tamoss/.tasks/kind.yaml" "$prune_builder_cache" <<'EOF'
-import sys
-
-path = sys.argv[1]
-prune_builder_cache = sys.argv[2] == "true"
-with open(path) as handle:
-    contents = handle.read()
-
-ui_commands = (
-    '        task_kind_build_image "TAMOSS UI" "{{.UI_IMAGE}}" "" "src/app/frontend"\n',
-    '        task_kind_load_image "{{.PROJECT_NAME}}" "TAMOSS UI" "{{.UI_IMAGE}}"\n',
-)
-create_end = '          OPERATOR_IMAGE: "{{.OPERATOR_IMAGE}}"\n\n  delete:'
-patched_end = (
-    '          OPERATOR_IMAGE: "{{.OPERATOR_IMAGE}}"\n'
-    '      - docker builder prune --all --force\n\n'
-    '  delete:'
-)
-command_counts = [contents.count(command) for command in ui_commands]
-if command_counts == [1, 1]:
-    for command in ui_commands:
-        contents = contents.replace(command, "", 1)
-elif command_counts != [0, 0]:
-    raise SystemExit(f"pinned TAMOSS kind task has partial UI commands: counts={command_counts}")
-
-original_end_count = contents.count(create_end)
-patched_end_count = contents.count(patched_end)
-if original_end_count + patched_end_count != 1:
-    raise SystemExit(
-        "pinned TAMOSS kind task has an unexpected create-task ending: "
-        f"original={original_end_count}, patched={patched_end_count}"
-    )
-if prune_builder_cache and original_end_count == 1:
-    contents = contents.replace(create_end, patched_end, 1)
-elif not prune_builder_cache and patched_end_count == 1:
-    contents = contents.replace(patched_end, create_end, 1)
-
-with open(path, "w") as handle:
-    handle.write(contents)
-EOF
-
-# The instance is configured before it is first applied, rather than reconciled
-# once with defaults and then patched into shape. Two reconciles is twice the
-# work for a result that was known before the cluster existed, and on a small
-# runner that is not free.
-#
-# The UI is switched off with it. Tamsin talks to the TAMS API and never to the
-# UI, so deploying it spends a Deployment, an ingress route and their share of a
-# constrained node on something no test touches.
+# Apply the test configuration once, with the unused UI disabled.
 cat >"$tamoss/deploy/environments/$PROFILE/tamsin-e2e-instance.yaml" <<EOF
 apiVersion: tamoss.livewyer.io/v1alpha1
 kind: Tamoss
@@ -441,11 +330,7 @@ if [ "$api_ready" != true ]; then
   exit 1
 fi
 
-mkdir -p "$fixtures/single" "$fixtures/directory" "$fixtures/manifest-media" "$fixtures/list" "$fixtures/http" "$fixtures/s3" "$journal_dir"
-# The image runs as its non-root TAMSin user. Give that user a dedicated test
-# directory for exclusively-created, mode-0600 journals while all media stays
-# mounted read-only.
-chmod 0777 "$journal_dir"
+mkdir -p "$fixtures/single" "$fixtures/directory" "$fixtures/manifest-media" "$fixtures/list" "$fixtures/http" "$fixtures/s3"
 cp "$tamoss/deploy/demo/tamoss-demo.ts" "$fixtures/single/demo.ts"
 cp "$tamoss/deploy/demo/tamoss-demo.ts" "$fixtures/directory/one.ts"
 printf '\0' >> "$fixtures/directory/one.ts"
@@ -477,17 +362,7 @@ docker run --rm --entrypoint ffprobe -v "$fixtures:/fixtures:ro" -u "$(id -u):$(
 printf '\3' >> "$fixtures/s3/s3.ts"
 
 port_file="$fixtures/http.port"
-python3 -u - "$fixtures/http" "$port_file" >"$fixtures/http.log" 2>&1 <<'PY' &
-import functools
-import http.server
-import pathlib
-import sys
-
-handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=sys.argv[1])
-with http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler) as server:
-    pathlib.Path(sys.argv[2]).write_text(str(server.server_port), encoding="utf-8")
-    server.serve_forever()
-PY
+python3 -u "$root/scripts/e2e-http.py" "$fixtures/http" "$port_file" >"$fixtures/http.log" 2>&1 &
 http_pid=$!
 for _ in {1..30}; do
   if [ -s "$port_file" ]; then
@@ -507,12 +382,12 @@ run_ingest() {
   local name="$1"
   local expected="$2"
   shift 2
-  rm -f "$fixtures/$name.events.jsonl" "$journal_dir/$name.jsonl" "$fixtures/$name.json"
+  rm -f "$fixtures/$name.events.jsonl" "$fixtures/$name.json"
   docker run --rm --network host "${docker_host_args[@]}" \
     -e TAMSIN_ENDPOINT -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_TOKEN \
     -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_LOG_LEVEL -e TAMSIN_FORMAT \
-    -v "$fixtures:/fixtures:ro" -v "$journal_dir:/journals" \
-    "$IMAGE" --profile essence-segments --journal "/journals/$name.jsonl" "$@" >"$fixtures/$name.events.jsonl" || {
+    -v "$fixtures:/fixtures:ro" \
+    "$IMAGE" --profile essence-segments "$@" >"$fixtures/$name.events.jsonl" || {
       status=$?
       cat "$fixtures/$name.events.jsonl" >&2
       return "$status"
@@ -520,10 +395,8 @@ run_ingest() {
   assert_ingest_artifacts "$name" "$expected"
 }
 
-# Machine ingest stdout is the live NDJSON process protocol. The independently
-# synced journal retains the complete terminal Results used by the rest of this
-# live-service conformance matrix. Validate both projections, then build a
-# finite result document from the journal for the existing graph assertions.
+# Validate the live NDJSON process protocol, then project its terminal records
+# into a compact document for the graph assertions below.
 assert_ingest_artifacts() {
   local name="$1"
   local expected="$2"
@@ -547,46 +420,47 @@ assert_ingest_artifacts() {
     printf 'e2e: %s event stream contains a carriage return or terminal escape\n' "$name" >&2
     return 1
   fi
-  docker run --rm -v "$journal_dir:/journals:ro" --entrypoint cat "$IMAGE" "/journals/$name.jsonl" \
-    | jq -s -e '
-    . as $records |
-    (first($records[] | select(.record_type == "start"))) as $start |
-    (first($records[] | select(.record_type == "summary"))) as $terminal |
+  jq -s -e '
+    . as $events |
+    (first($events[] | select(.type == "hello"))) as $hello |
+    (first($events[] | select(.type == "run.started"))) as $start |
+    (first($events[] | select(.type == "run.finished"))) as $terminal |
     {
-      schema_version: $start.schema_version,
-      tool_version: $start.tool_version,
-      tool_commit: $start.tool_commit,
-      tool_build_date: $start.tool_build_date,
-      profile_version: $start.profile_version,
-      run_id: $start.run_id,
-      total: $terminal.summary.total,
-      succeeded: $terminal.summary.succeeded,
-      failed: $terminal.summary.failed,
+      schema_version: $hello.payload.result_schema_version,
+      tool_version: $hello.payload.tool_version,
+      tool_commit: $hello.payload.tool_commit,
+      profile_version: $start.payload.profile_version,
+      run_id: $hello.run_id,
+      total: $terminal.payload.total,
+      succeeded: $terminal.payload.succeeded,
+      failed: $terminal.payload.failed,
       results: (
-        [$records[] | select(.record_type == "input")]
-        | sort_by(.index)
+        [$events[] | select(.type == "input.finished")]
+        | sort_by(.scope.input_index)
         | map(
             . as $input
-            | .result
+            | .payload
             | .flows = [
-                .flows[] as $flow
-                | $flow + {
+                $events[]
+                | select(.type == "flow.result" and .scope.input_index == $input.scope.input_index)
+                | . as $flow
+                | .payload + {
                     objects: [
-                      $records[]
+                      $events[]
                       | select(
-                          .record_type == "object" and
-                          .index == $input.index and
-                          .flow_id == $flow.flow_id
+                          .type == "object.result" and
+                          .scope.input_index == $input.scope.input_index and
+                          .scope.flow_id == $flow.payload.flow_id
                         )
-                      | .object
+                      | .payload
                     ]
                   }
               ]
           )
       )
     }
-  ' >"$fixtures/$name.json" || {
-    docker run --rm -v "$journal_dir:/journals:ro" --entrypoint cat "$IMAGE" "/journals/$name.jsonl" >&2
+  ' "$fixtures/$name.events.jsonl" >"$fixtures/$name.json" || {
+    cat "$fixtures/$name.events.jsonl" >&2
     return 1
   }
   jq -e --argjson expected "$expected" \
@@ -615,49 +489,31 @@ api_component() {
 # Live conformance assertions use the API directly. They verify what the
 # service retained without making TAMSin carry a general control-plane CLI.
 api_request() {
-  local method="$1" path="$2"
-  curl --ipv4 \
-    --resolve "api.tamoss.localtest.me:$HTTPS_PORT:127.0.0.1" \
-    --insecure --fail --silent --show-error \
-    --request "$method" \
-    --header "Authorization: Bearer $TAMSIN_AUTH_TOKEN" \
-    --header 'Accept: application/json' \
-    "${API_URL%/}/$path"
+  local method="$1" path="$2" body="${3:-}"
+  local options=(
+    --ipv4
+    --resolve "api.tamoss.localtest.me:$HTTPS_PORT:127.0.0.1"
+    --insecure --fail --silent --show-error
+    --request "$method"
+    --header "Authorization: Bearer $TAMSIN_AUTH_TOKEN"
+    --header 'Accept: application/json'
+  )
+  if [ -n "$body" ]; then
+    options+=(--header 'Content-Type: application/json' --data-binary "$body")
+  fi
+  curl "${options[@]}" "${API_URL%/}/$path"
 }
 
-# capture_api preserves the concise resource-oriented calls used throughout
-# this test while translating them to read-only HTTP requests.
-capture_api() {
-  local resource="$1" action="$2" id="$3"
-  shift 3
-  case "$resource $action" in
-    'flow get')
-      api_request GET "flows/$(api_component "$id")"
-      ;;
-    'segment list')
-      local query='limit=1000&accept_get_urls=&presigned=false' object_id=''
-      while [ "$#" -gt 0 ]; do
-        case "$1" in
-          --object-id)
-            object_id="$2"
-            shift 2
-            ;;
-          *)
-            printf 'e2e: unsupported Segment-list argument %s\n' "$1" >&2
-            return 2
-            ;;
-        esac
-      done
-      if [ -n "$object_id" ]; then
-        query="$query&object_id=$(api_component "$object_id")"
-      fi
-      api_request GET "flows/$(api_component "$id")/segments?$query"
-      ;;
-    *)
-      printf 'e2e: unsupported direct API operation %s %s\n' "$resource" "$action" >&2
-      return 2
-      ;;
-  esac
+get_flow() {
+  api_request GET "flows/$(api_component "$1")"
+}
+
+get_segments() {
+  local query='limit=1000&accept_get_urls=&presigned=false'
+  if [ -n "${2:-}" ]; then
+    query="$query&object_id=$(api_component "$2")"
+  fi
+  api_request GET "flows/$(api_component "$1")/segments?$query"
 }
 
 retract_segment() {
@@ -668,7 +524,7 @@ retract_segment() {
 
   local segments
   for _ in {1..120}; do
-    segments="$(capture_api segment list "$flow_id" --object-id "$object_id")" || return 1
+    segments="$(get_segments "$flow_id" "$object_id")" || return 1
     if jq -e --arg timerange "$timerange" --arg object_id "$object_id" \
       'all(.[]; .timerange != $timerange or .object_id != $object_id)' <<<"$segments" >/dev/null; then
       return 0
@@ -679,15 +535,11 @@ retract_segment() {
   return 1
 }
 
-# result_flow_ids yields every Flow an ingest produced. Both storage
-# arrangements use the same result shape and list each Flow once.
 result_flow_ids() {
   jq -er '.results[].flows[].flow_id' "$1"
 }
 
-# result_flow_objects pairs every reported Media Object with the Flow that owns
-# it. Pairing matters: a batch ingest produces several Flows, and an Object
-# only belongs to one of them.
+# Pair each reported Object with its owning Flow.
 result_flow_objects() {
   jq -r '.results[]
          | .flows[]
@@ -696,16 +548,11 @@ result_flow_objects() {
          | "\($flow)\t\(.object_id)"' "$1"
 }
 
-# assert_flow_conformance reads a Flow back out of the live service and checks
-# it against the pinned TAMS contract. Asserting tamsin's own output only proves
-# it is self-consistent; these read what TAMOSS actually stored.
-#
-# Each check names the specification text it enforces so a failure points at the
-# rule rather than at a bare jq expression.
+# Check persisted Flows against the named specification rules.
 assert_flow_conformance() {
   local name="$1" flow_id="$2"
   local flow
-  flow="$(capture_api flow get "$flow_id")" || {
+  flow="$(get_flow "$flow_id")" || {
     printf 'e2e: could not read back Flow %s for %s\n' "$flow_id" "$name" >&2
     return 1
   }
@@ -735,7 +582,7 @@ assert_flow_conformance() {
   # mono-essence Flow own none and must not. Assuming every Flow in a result
   # owns Segments held only until independent storage began writing a collector.
   local own_segments
-  own_segments="$(capture_api segment list "$flow_id")" || return 1
+  own_segments="$(get_segments "$flow_id")" || return 1
   if [ "$(jq -r 'length' <<<"$own_segments")" -gt 0 ]; then
     jq -e 'has("container")' <<<"$flow" >/dev/null || {
       printf 'e2e: %s Flow %s owns Segments but declares no container (AppNote 0006)\n' "$name" "$flow_id" >&2
@@ -767,7 +614,7 @@ assert_flow_conformance() {
     for ((collection_index = 0; collection_index < collection_count; collection_index++)); do
       collection_item="$(jq -c --argjson index "$collection_index" '.flow_collection[$index]' <<<"$flow")"
       collected_id="$(jq -r '.id' <<<"$collection_item")"
-      collected="$(capture_api flow get "$collected_id")" || {
+      collected="$(get_flow "$collected_id")" || {
         printf 'e2e: %s collected Flow %s is not registered\n' "$name" "$collected_id" >&2
         return 1
       }
@@ -818,6 +665,36 @@ jq -e '.results[0].status == "resumed" and .results[0].verification == "verified
 for flow_id in $(result_flow_ids "$fixtures/local-file.json"); do
   assert_flow_conformance local-file "$flow_id"
 done
+
+if [ "$TAMS_VERSION" = "8.2" ]; then
+  profile_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  source_flow_id="$(jq -er '.results[0].root_flow_id' "$fixtures/local-file.json")"
+  profile_body="$(get_flow "$source_flow_id" | jq -c --arg id "$profile_id" '
+    {
+      id: $id,
+      label: "TAMSin numeric Profile E2E",
+      flow_metadata: (
+        {format, codec, container, avg_bit_rate, segment_duration, container_mapping, essence_parameters}
+        | with_entries(select(.value != null))
+        # TAMOSS materialises the TAMS default on a normal Flow read. Profile
+        # matching remains presence-strict, so retain the generated form:
+        # fixed frame_rate with vfr omitted.
+        | if .essence_parameters.vfr == false then del(.essence_parameters.vfr) else . end
+      )
+    }
+  ')"
+  api_request POST "service/profiles/$profile_id" "$profile_body" >/dev/null
+  api_request GET "service/profiles/$profile_id" \
+    | jq -e '.flow_metadata.segment_duration as $duration |
+        ($duration.numerator | type) == "number" and ($duration.denominator | type) == "number"' >/dev/null
+
+  run_ingest profile-backed 1 --tams-flow-profile "video=$profile_id" -i /fixtures/single/demo.ts
+  profiled_flow="$(jq -er --arg id "$profile_id" '
+    .results[0].flows[] | select(.tams_flow_profile_id == $id) | .flow_id
+  ' "$fixtures/profile-backed.json")"
+  get_flow "$profiled_flow" | jq -e --arg id "$profile_id" '.profile_id == $id' >/dev/null
+fi
+
 run_ingest directory 2 -i /fixtures/directory
 for flow_id in $(result_flow_ids "$fixtures/directory.json"); do
   assert_flow_conformance directory "$flow_id"
@@ -844,7 +721,7 @@ for flow_id in $(result_flow_ids "$fixtures/mpegts-format.json"); do
   assert_flow_conformance mpegts-format "$flow_id"
 done
 # The Flow must declare the container that was written, not the input's.
-capture_api flow get "$mpegts_flow" | jq -e '.container == "video/mp2t"' >/dev/null || {
+get_flow "$mpegts_flow" | jq -e '.container == "video/mp2t"' >/dev/null || {
   printf 'e2e: --segment-format mpegts did not set container video/mp2t\n' >&2
   exit 1
 }
@@ -868,7 +745,7 @@ for flow_id in $(result_flow_ids "$fixtures/independent-essences.json"); do
   if [ "$flow_id" = "$independent_collector" ]; then
     # The collector records the association and owns no media of its own: its
     # content is reached through the essences it collects.
-    capture_api flow get "$flow_id" \
+    get_flow "$flow_id" \
       | jq -e '.format == "urn:x-nmos:format:multi" and ((.flow_collection // []) | length >= 2) and ((has("container")) | not)' >/dev/null || {
       printf 'e2e: collector %s must collect the essences and declare no container\n' "$flow_id" >&2
       exit 1
@@ -877,7 +754,7 @@ for flow_id in $(result_flow_ids "$fixtures/independent-essences.json"); do
   fi
   # An independently stored essence owns its Objects, so it declares a container
   # and has no multiplex to map into.
-  capture_api flow get "$flow_id" | jq -e 'has("container") and (has("container_mapping") | not) and (has("flow_collection") | not)' >/dev/null || {
+  get_flow "$flow_id" | jq -e 'has("container") and (has("container_mapping") | not) and (has("flow_collection") | not)' >/dev/null || {
     printf 'e2e: independently stored Flow %s must declare a container and carry no container_mapping\n' "$flow_id" >&2
     exit 1
   }
@@ -888,31 +765,29 @@ muxed_flow="$(jq -er '.results[0].root_flow_id' "$fixtures/muxed-essences.json")
 assert_flow_conformance muxed-essences "$muxed_flow"
 # The collector owns the Objects; each parent Collection Item maps one child to
 # a track inside them, while the collected Flow has no container of its own.
-capture_api flow get "$muxed_flow" | jq -e '.format == "urn:x-nmos:format:multi" and ((.flow_collection // []) | length >= 2)' >/dev/null || {
+get_flow "$muxed_flow" | jq -e '.format == "urn:x-nmos:format:multi" and ((.flow_collection // []) | length >= 2)' >/dev/null || {
   printf 'e2e: muxed storage should produce a multi-essence Flow collecting its essences\n' >&2
   exit 1
 }
 
-# Retraction is how a Segment that fails verification is withdrawn, so the
-# delete path is exercised against the live service rather than only in unit
-# tests. TAMS also removes any Media Object left unreferenced.
+# Check service-side deletion via curl. TAMSin's verification-failure cleanup
+# and 202 deletion-request handling are covered by client/ingest HTTP tests.
 retract_flow="$(jq -er '.results[0].root_flow_id' "$fixtures/whole-file.json")"
 retract_timerange="$(jq -er '.results[0] as $result | $result.flows[] | select(.flow_id == $result.root_flow_id) | .objects[0].timerange' "$fixtures/whole-file.json")"
 retract_object="$(jq -er '.results[0] as $result | $result.flows[] | select(.flow_id == $result.root_flow_id) | .objects[0].object_id' "$fixtures/whole-file.json")"
 retract_segment "$retract_flow" "$retract_timerange" "$retract_object"
 # Retraction is terminal only once the exact Object/timerange tuple is absent.
-capture_api segment list "$retract_flow" --object-id "$retract_object" | jq -e 'length == 0' >/dev/null || {
+get_segments "$retract_flow" "$retract_object" | jq -e 'length == 0' >/dev/null || {
   printf 'e2e: Segment %s is still present after terminal retraction from Flow %s\n' \
     "$retract_object" "$retract_flow" >&2
   exit 1
 }
-rm -f "$fixtures/stdin.events.jsonl" "$journal_dir/stdin.jsonl" "$fixtures/stdin.json"
+rm -f "$fixtures/stdin.events.jsonl" "$fixtures/stdin.json"
 cat "$fixtures/single/demo.ts" \
   | docker run --rm -i --network host "${docker_host_args[@]}" \
       -e TAMSIN_ENDPOINT -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_TOKEN \
       -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_LOG_LEVEL -e TAMSIN_FORMAT \
-      -v "$journal_dir:/journals" \
-      "$IMAGE" --profile essence-segments --journal /journals/stdin.jsonl -i - --stdin-name event.ts >"$fixtures/stdin.events.jsonl"
+      "$IMAGE" --profile essence-segments -i - --stdin-name event.ts >"$fixtures/stdin.events.jsonl"
 assert_ingest_artifacts stdin 1
 # This is deliberately the same media and treatment as local-file above.
 # Locator-independent identity must therefore resume the existing graph even
@@ -941,13 +816,12 @@ docker run --rm --network host "${docker_host_args[@]}" \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
   -v "$aws_dist:/aws:ro" -v "$fixtures:/fixtures:ro" --entrypoint /aws/aws "$IMAGE" \
   --endpoint-url "$S3_URL" --no-verify-ssl s3 cp /fixtures/s3/s3.ts s3://tamsin-inputs/s3.ts >/dev/null
-rm -f "$fixtures/s3.events.jsonl" "$journal_dir/s3.jsonl" "$fixtures/s3.json"
+rm -f "$fixtures/s3.events.jsonl" "$fixtures/s3.json"
 docker run --rm --network host "${docker_host_args[@]}" \
   -e TAMSIN_ENDPOINT -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_TOKEN \
   -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_LOG_LEVEL -e TAMSIN_FORMAT \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
-  -v "$journal_dir:/journals" \
-  "$IMAGE" --profile essence-segments --journal /journals/s3.jsonl -i s3://tamsin-inputs/ --s3-endpoint "$S3_URL" --s3-path-style >"$fixtures/s3.events.jsonl"
+  "$IMAGE" --profile essence-segments -i s3://tamsin-inputs/ --s3-endpoint "$S3_URL" --s3-path-style >"$fixtures/s3.events.jsonl"
 assert_ingest_artifacts s3 1
 jq -e '.failed == 0 and .succeeded == 1 and .results[0].status == "ingested"' "$fixtures/s3.json" >/dev/null
 
