@@ -7,10 +7,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/livewyer-ops/tamsin/internal/tamstime"
 )
 
 // SpecMajor and SpecMinor are the TAMS API version Tamsin is written against.
-// The pinned specification and vendored schemas in contracts/ are this version.
+// The pinned specification and vendored internal schemas are this version.
 const (
 	SpecMajor          = 8
 	SpecMinor          = 2
@@ -99,6 +101,16 @@ type ServiceLimits struct {
 	PresignedURL time.Duration
 }
 
+// ServiceLimitError identifies the service-document field that makes Object
+// scheduling unsafe. Callers can use Field without parsing a diagnostic.
+type ServiceLimitError struct {
+	Field string
+	Err   error
+}
+
+func (e *ServiceLimitError) Error() string { return e.Err.Error() }
+func (e *ServiceLimitError) Unwrap() error { return e.Err }
+
 const (
 	MinimumObjectRegistration = 5 * time.Minute
 	MinimumPresignedURL       = 30 * time.Second
@@ -131,9 +143,12 @@ func ParseServiceLimits(document map[string]any) (ServiceLimits, error) {
 		}
 	}
 	if presigned > object {
-		return ServiceLimits{}, fmt.Errorf(
-			"TAMS service /min_presigned_url_timeout (%s) exceeds /min_object_timeout (%s); TAMS 8.1 requires it to be no greater",
-			formatDurationTimestamp(presigned), formatDurationTimestamp(object))
+		return ServiceLimits{}, &ServiceLimitError{
+			Field: "min_presigned_url_timeout",
+			Err: fmt.Errorf(
+				"TAMS service /min_presigned_url_timeout (%s) exceeds /min_object_timeout (%s); TAMS 8.1 requires it to be no greater",
+				formatDurationTimestamp(presigned), formatDurationTimestamp(object)),
+		}
 	}
 	return ServiceLimits{ObjectRegistration: object, PresignedURL: presigned}, nil
 }
@@ -141,15 +156,24 @@ func ParseServiceLimits(document map[string]any) (ServiceLimits, error) {
 func requiredLifetime(document map[string]any, field string, minimum time.Duration) (time.Duration, error) {
 	value, present := document[field]
 	if !present {
-		return 0, fmt.Errorf("TAMS service /%s is required before Object ingest", field)
+		return 0, &ServiceLimitError{
+			Field: field,
+			Err:   fmt.Errorf("TAMS service /%s is required before Object ingest", field),
+		}
 	}
 	duration, err := parseTimestampDuration(value)
 	if err != nil {
-		return 0, fmt.Errorf("TAMS service /%s: %w", field, err)
+		return 0, &ServiceLimitError{
+			Field: field,
+			Err:   fmt.Errorf("TAMS service /%s: %w", field, err),
+		}
 	}
 	if duration < minimum {
-		return 0, fmt.Errorf("TAMS service /%s is %s; TAMS 8.1 requires at least %s",
-			field, formatDurationTimestamp(duration), formatDurationTimestamp(minimum))
+		return 0, &ServiceLimitError{
+			Field: field,
+			Err: fmt.Errorf("TAMS service /%s is %s; TAMS 8.1 requires at least %s",
+				field, formatDurationTimestamp(duration), formatDurationTimestamp(minimum)),
+		}
 	}
 	return duration, nil
 }
@@ -164,14 +188,9 @@ func parseTimestampDuration(value any) (time.Duration, error) {
 	if !timestampDurationPattern.MatchString(text) {
 		return 0, fmt.Errorf("value %q is not a non-negative TAMS seconds:nanoseconds timestamp", text)
 	}
-	secondsText, nanosecondsText, _ := strings.Cut(text, ":")
-	seconds, err := strconv.ParseInt(secondsText, 10, 64)
+	seconds, nanoseconds, err := tamstime.ParseParts(text)
 	if err != nil {
 		return 0, fmt.Errorf("seconds in %q exceed the supported range", text)
-	}
-	nanoseconds, err := strconv.ParseInt(nanosecondsText, 10, 64)
-	if err != nil || nanoseconds >= int64(time.Second) {
-		return 0, fmt.Errorf("nanoseconds in %q exceed the supported range", text)
 	}
 	// A value large enough to overflow is not a limit worth scheduling around.
 	if seconds > int64(math.MaxInt64/int64(time.Second))-1 {

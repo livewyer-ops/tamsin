@@ -12,7 +12,7 @@ import (
 )
 
 func TestFFmpegSegmentProducesObjects(t *testing.T) {
-	t.Parallel()
+	// Executable fixtures must not inherit writable descriptors from parallel forks.
 	directory := t.TempDir()
 	// The suffix deliberately lies. The explicit source profile must decide
 	// both muxer and output name; consulting this filename would write MP4.
@@ -75,7 +75,6 @@ printf '"%s",0.000000,1.000000\n' "$output" >&3
 }
 
 func TestFFmpegSegmentsSeveralEssencesInOneProcess(t *testing.T) {
-	t.Parallel()
 	directory := t.TempDir()
 	input := filepath.Join(directory, "input.ts")
 	if err := os.WriteFile(input, []byte("media"), 0o600); err != nil {

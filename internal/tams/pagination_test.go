@@ -54,7 +54,7 @@ func TestSegmentsFollowsPaging(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	segments, err := client.Segments(context.Background(), "flow", "")
+	segments, err := client.ListSegments(context.Background(), "flow", SegmentListOptions{IncludeDownloadURLs: true})
 	if err != nil {
 		t.Fatalf("Segments() = %v", err)
 	}
@@ -63,6 +63,55 @@ func TestSegmentsFollowsPaging(t *testing.T) {
 	}
 	if served != total {
 		t.Fatalf("server served %d segments, want %d", served, total)
+	}
+}
+
+func TestStorageBackendsFollowsPagingAndIgnoresUnusedTags(t *testing.T) {
+	t.Parallel()
+	const first = "9cb30d91-e456-41f3-9398-bf726c749e96"
+	const second = "2834cde7-b5db-47e3-9fdd-e793376565fe"
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.URL.Path != "/service/storage-backends" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("page") == "second" {
+			_, _ = io.WriteString(w, `[{"id":"`+second+`","default_storage":true,"tags":{"auth_classes":["production","review"]}}]`)
+			return
+		}
+		w.Header().Set("Link", `<?page=second>; rel="next"`)
+		_, _ = io.WriteString(w, `[{"id":"`+first+`","tags":{"location":"local"}}]`)
+	}))
+	defer server.Close()
+	client, err := New(Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backends, err := client.StorageBackends(context.Background())
+	if err != nil || len(backends) != 2 || backends[1].ID != second || !backends[1].DefaultStorage || requests.Load() != 2 {
+		t.Fatalf("StorageBackends() = %#v, %v; requests=%d", backends, err, requests.Load())
+	}
+}
+
+func TestStorageBackendsRejectsUnsafePagingWithoutPartialResults(t *testing.T) {
+	t.Parallel()
+	for _, link := range []string{`<https://other.example/backends>; rel=next`, `<?page=repeat>; rel=next`} {
+		t.Run(link, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Link", link)
+				_, _ = io.WriteString(w, `[{"id":"9cb30d91-e456-41f3-9398-bf726c749e96"}]`)
+			}))
+			defer server.Close()
+			client, err := New(Config{Endpoint: server.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if backends, err := client.StorageBackends(context.Background()); err == nil || backends != nil {
+				t.Fatalf("unsafe listing returned %#v, %v", backends, err)
+			}
+		})
 	}
 }
 
@@ -267,7 +316,7 @@ func TestSegmentsRejectsOffOriginPaging(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Segments(context.Background(), "flow", ""); err == nil ||
+	if _, err := client.ListSegments(context.Background(), "flow", SegmentListOptions{IncludeDownloadURLs: true}); err == nil ||
 		!strings.Contains(err.Error(), "not the configured endpoint") {
 		t.Fatalf("Segments() error = %v, want an off-origin cursor to be rejected", err)
 	}
@@ -405,7 +454,7 @@ func TestSegmentsEnforcesAtomicCollectionLimits(t *testing.T) {
 		{
 			name: "segment limit", body: `[{"object_id":"one","timerange":"[0:0_1:0)"},{"object_id":"two","timerange":"[1:0_2:0)"}]`,
 			pageLimit: maxSegmentPages, segmentLimit: 1, byteLimit: maxSegmentResponseBytes,
-			wantRequests: 1, wantErrorText: "exceeded 1 Segments",
+			wantRequests: 1, wantErrorText: "exceeded 1 entries",
 		},
 		{
 			name: "response byte limit", body: `[{"object_id":"one","timerange":"[0:0_1:0)"}]`,

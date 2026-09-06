@@ -148,9 +148,9 @@ func (c *countingClient) UploadFile(ctx context.Context, destination tams.Presig
 	return c.inner.UploadFile(ctx, destination, filename)
 }
 
-func (c *countingClient) DownloadDigest(ctx context.Context, source tams.PresignedURL) (int64, string, error) {
+func (c *countingClient) DownloadDigest(ctx context.Context, source tams.PresignedURL, expectedBytes int64) (int64, string, error) {
 	defer c.record("DownloadDigest")()
-	return c.inner.DownloadDigest(ctx, source)
+	return c.inner.DownloadDigest(ctx, source, expectedBytes)
 }
 
 // countingSegmenter produces a requested number of Media Objects so the harness

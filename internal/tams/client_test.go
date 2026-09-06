@@ -34,25 +34,119 @@ func TestUploadStorageSHA256RecognizesOnlyStrongEvidence(t *testing.T) {
 	tests := []struct {
 		name     string
 		response http.Header
-		request  http.Header
 		want     string
 		wantErr  bool
 	}{
 		{name: "S3 response", response: http.Header{"X-Amz-Checksum-Sha256": []string{encoded}}, want: want},
 		{name: "content digest response", response: http.Header{"Content-Digest": []string{"sha-256=:" + encoded + ":"}}, want: want},
 		{name: "legacy digest response", response: http.Header{"Digest": []string{"sha-512=ignored, sha-256=" + encoded}}, want: want},
-		{name: "signed allocation request", request: http.Header{"X-Amz-Checksum-Sha256": []string{encoded}}, want: want},
+		{name: "request header is not storage evidence"},
 		{name: "etag is not evidence", response: http.Header{"ETag": []string{"\"not-a-checksum\""}}},
 		{name: "malformed evidence", response: http.Header{"Content-Digest": []string{"sha-256=:bad:"}}, wantErr: true},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := uploadStorageSHA256(testCase.response, testCase.request)
+			got, err := uploadStorageSHA256(testCase.response)
 			if (err != nil) != testCase.wantErr || got != testCase.want {
 				t.Fatalf("uploadStorageSHA256() = %q, %v; want %q, error=%t", got, err, testCase.want, testCase.wantErr)
 			}
 		})
+	}
+}
+
+func TestUploadRequestChecksumDoesNotSuppressReadback(t *testing.T) {
+	t.Parallel()
+	digest := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x7f}, sha256.Size))
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.Copy(io.Discard, request.Body)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	filename := filepath.Join(t.TempDir(), "object")
+	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := New(Config{
+		Endpoint: "https://tams.example.test", ExternalTransport: server.Client().Transport,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := client.UploadFile(context.Background(), PresignedURL{
+		URL: server.URL, Headers: map[string]string{"X-Amz-Checksum-Sha256": digest},
+	}, filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.StorageSHA256 != "" {
+		t.Fatalf("request checksum became storage evidence: %#v", receipt)
+	}
+}
+
+type infiniteResponseBody struct {
+	bytesRead atomic.Int64
+}
+
+func (b *infiniteResponseBody) Read(buffer []byte) (int, error) {
+	for index := range buffer {
+		buffer[index] = 'x'
+	}
+	b.bytesRead.Add(int64(len(buffer)))
+	return len(buffer), nil
+}
+
+func (*infiniteResponseBody) Close() error { return nil }
+
+func TestDownloadDigestStopsOneBytePastExpectedSize(t *testing.T) {
+	t.Parallel()
+	body := &infiniteResponseBody{}
+	var attempts atomic.Int32
+	transport := roundTripError(func(*http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header),
+			ContentLength: -1, Body: body,
+		}, nil
+	})
+	client, err := New(Config{
+		Endpoint: "https://tams.example.test", ExternalTransport: transport, Retries: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = client.DownloadDigest(context.Background(), PresignedURL{
+		URL: "https://objects.example.test/object",
+	}, 16)
+	var sizeErr *ObjectSizeError
+	if !errors.As(err, &sizeErr) || !sizeErr.AtLeast || sizeErr.Actual != 17 || sizeErr.Expected != 16 {
+		t.Fatalf("DownloadDigest() error = %#v, want bounded oversize error", err)
+	}
+	if got := body.bytesRead.Load(); got != 17 {
+		t.Fatalf("stream read %d bytes, want expected+1", got)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("oversize response retried %d times", got)
+	}
+}
+
+func TestDownloadDigestRejectsShortAndInvalidExpectedSizes(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "short")
+	}))
+	defer server.Close()
+	client, err := New(Config{Endpoint: "https://tams.example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL}, 6)
+	var sizeErr *ObjectSizeError
+	if !errors.As(err, &sizeErr) || sizeErr.AtLeast || sizeErr.Actual != 5 {
+		t.Fatalf("short response error = %#v", err)
+	}
+	if _, _, err := client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL}, -1); err == nil {
+		t.Fatal("negative expected length was accepted")
 	}
 }
 
@@ -286,16 +380,13 @@ func TestClientIngestOperations(t *testing.T) {
 	if err := client.RegisterSegment(ctx, "flow", SegmentRequest{ObjectID: "object", Timerange: "[0:0_1:0)"}); err != nil {
 		t.Fatal(err)
 	}
-	listed, err := client.Segments(ctx, "flow", "object")
+	listed, err := client.ListSegments(ctx, "flow", SegmentListOptions{ObjectID: "object", IncludeDownloadURLs: true})
 	if err != nil || len(listed) != 1 {
 		t.Fatalf("Segments() = %#v, %v", listed, err)
 	}
-	size, digest, err := client.DownloadDigest(ctx, listed[0].GetURLs[0])
+	size, digest, err := client.DownloadDigest(ctx, listed[0].GetURLs[0], 11)
 	if err != nil || size != 11 || digest != "bd7aa67d0cee967e6fca8ef4917e3c70445a9cfe0f3d91ddd2eeff1bfe4b2069" {
 		t.Fatalf("DownloadDigest() = %d, %q, %v", size, digest, err)
-	}
-	if _, err := client.Object(ctx, "a/b"); err != nil {
-		t.Fatal(err)
 	}
 	// Retracting an unverified Segment removes it, and TAMS drops any Media
 	// Object the removal leaves unreferenced.
@@ -304,7 +395,7 @@ func TestClientIngestOperations(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("DeleteSegments() = %v", err)
 	}
-	if remaining, err := client.Segments(ctx, "flow", "object"); err != nil || len(remaining) != 0 {
+	if remaining, err := client.ListSegments(ctx, "flow", SegmentListOptions{ObjectID: "object", IncludeDownloadURLs: true}); err != nil || len(remaining) != 0 {
 		t.Fatalf("Segments() after delete = %#v, %v", remaining, err)
 	}
 }
@@ -361,7 +452,7 @@ func TestClientRetriesObjectDownload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	size, digest, err := client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL})
+	size, digest, err := client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL}, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +492,7 @@ func TestRetryDiagnosticDoesNotExposePresignedRequest(t *testing.T) {
 		Headers: map[string]string{
 			"Authorization": "Bearer top-secret",
 		},
-	})
+	}, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +555,7 @@ func TestPresignedTransfersDoNotRetryAfterTheirStartDeadline(t *testing.T) {
 					t.Fatal("expired upload URL was retried")
 				}
 			case "download":
-				_, _, err = client.DownloadDigest(context.Background(), presigned)
+				_, _, err = client.DownloadDigest(context.Background(), presigned, 8)
 				if err == nil {
 					t.Fatal("expired download URL was retried")
 				}
@@ -515,7 +606,7 @@ func TestPresignedTransfersStillRetryWithinTheirStartDeadline(t *testing.T) {
 				}
 				_, err = client.UploadFile(context.Background(), presigned, filename)
 			} else {
-				_, _, err = client.DownloadDigest(context.Background(), presigned)
+				_, _, err = client.DownloadDigest(context.Background(), presigned, 8)
 			}
 			if err != nil {
 				t.Fatalf("fresh presigned %s did not retry: %v", operation, err)
@@ -549,7 +640,7 @@ func TestPresignedTransferMayFinishAfterItsStartDeadline(t *testing.T) {
 	client.now = func() time.Time { return now }
 	_, _, err = client.DownloadDigest(context.Background(), PresignedURL{
 		URL: "https://storage.example.test/object", StartBefore: now.Add(30 * time.Second),
-	})
+	}, 8)
 	if err != nil {
 		t.Fatalf("transfer that began while fresh was capped by URL lifetime: %v", err)
 	}
@@ -791,7 +882,7 @@ func TestTransfersOutliveTheMetadataTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	size, _, err := client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL})
+	size, _, err := client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL}, 100)
 	if err != nil {
 		t.Fatalf("a healthy transfer outliving the metadata timeout must still complete: %v", err)
 	}
@@ -823,7 +914,7 @@ func TestTransferTimeoutIsHonouredWhenSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL}); err == nil {
+	if _, _, err := client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL}, 100); err == nil {
 		t.Fatal("an explicit transfer timeout must still bound a transfer")
 	}
 }
@@ -846,7 +937,7 @@ func TestVerificationDownloadRetriesAnIdleBodyAndNamesTheAttempts(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL + "/object"})
+	_, _, err = client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL + "/object"}, 100)
 	var idle *netio.IdleTimeoutError
 	if !errors.As(err, &idle) {
 		t.Fatalf("DownloadDigest error = %v, want idle timeout", err)
@@ -1129,6 +1220,10 @@ func TestParseServiceLimits(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), testCase.wantErr) {
 					t.Fatalf("ParseServiceLimits() error = %v, want containing %q", err, testCase.wantErr)
 				}
+				var limitErr *ServiceLimitError
+				if !errors.As(err, &limitErr) || limitErr.Field == "" {
+					t.Fatalf("ParseServiceLimits() error = %T %v, want typed ServiceLimitError", err, err)
+				}
 				return
 			}
 			if err != nil {
@@ -1141,6 +1236,29 @@ func TestParseServiceLimits(t *testing.T) {
 				t.Errorf("PresignedURL = %v, want %v", limits.PresignedURL, testCase.url)
 			}
 		})
+	}
+}
+
+func TestRequestErrorDistinguishesRequestTimeoutFromParentCancellation(t *testing.T) {
+	t.Parallel()
+
+	err := requestError(context.Background(), http.MethodGet,
+		"https://example.test/object?access_token=secret", context.DeadlineExceeded)
+	var timeoutErr *RequestTimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("requestError() = %T %v, want RequestTimeoutError", err, err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("RequestTimeoutError no longer preserves deadline identity")
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Fatalf("request timeout exposed URL credentials: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := requestError(ctx, http.MethodGet, "https://example.test", context.DeadlineExceeded); !errors.Is(got, context.Canceled) {
+		t.Fatalf("parent cancellation = %v, want context.Canceled", got)
 	}
 }
 

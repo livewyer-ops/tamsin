@@ -300,8 +300,9 @@ func TestContainerProfilePolicy(t *testing.T) {
 	}{
 		{name: "mpeg-ts audio remains file-level video", format: Format{Name: "mpegts"}, streamType: "audio", want: "video/mp2t", supported: true},
 		{name: "mxf", format: Format{Name: "mxf"}, streamType: "video", want: "application/mxf", supported: true},
-		{name: "webm wins over matroska family", format: Format{Name: "matroska,webm"}, streamType: "video", want: "video/webm", supported: true},
-		{name: "audio webm", format: Format{Name: "matroska,webm"}, streamType: "audio", want: "audio/webm", supported: true},
+		{name: "webm content in shared demuxer", format: Format{Name: "matroska,webm"}, detected: "video/webm", streamType: "video", want: "video/webm", supported: true},
+		{name: "audio webm", format: Format{Name: "matroska,webm"}, detected: "video/webm", streamType: "audio", want: "audio/webm", supported: true},
+		{name: "matroska shared demuxer", format: Format{Name: "matroska,webm"}, streamType: "video", want: "video/matroska", supported: true},
 		{name: "registered video matroska", format: Format{Name: "matroska"}, streamType: "video", want: "video/matroska", supported: true},
 		{name: "registered audio matroska", format: Format{Name: "matroska"}, streamType: "audio", want: "audio/matroska", supported: true},
 		{name: "quicktime has no invented audio type", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "qt  "}}, streamType: "audio", want: "video/quicktime", supported: true},
@@ -396,7 +397,8 @@ func TestSourceSegmentationProfileComesFromProbe(t *testing.T) {
 		want     SegmentContainer
 	}{
 		{name: "mpeg-ts", format: Format{Name: "mpegts"}, want: SegmentContainer{Muxer: "mpegts", Extension: ".ts"}},
-		{name: "webm before matroska", format: Format{Name: "matroska,webm"}, want: SegmentContainer{Muxer: "webm", Extension: ".webm"}},
+		{name: "webm content", format: Format{Name: "matroska,webm"}, detected: "video/webm", want: SegmentContainer{Muxer: "webm", Extension: ".webm"}},
+		{name: "matroska shared demuxer", format: Format{Name: "matroska,webm"}, want: SegmentContainer{Muxer: "matroska", Extension: ".mkv"}},
 		{name: "quicktime brand", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "qt  "}}, want: SegmentContainer{Muxer: "mov", Extension: ".mov"}},
 		{name: "mp4 compatible brand", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "new1", "compatible_brands": "new1isom"}}, want: SegmentContainer{Muxer: "mp4", Extension: ".mp4"}},
 		{name: "unknown", format: Format{Name: "proprietary"}},
@@ -406,6 +408,37 @@ func TestSourceSegmentationProfileComesFromProbe(t *testing.T) {
 			t.Parallel()
 			if got := SourceSegmentContainer(testCase.format, testCase.detected); got != testCase.want {
 				t.Fatalf("SourceSegmentContainer() = %#v, want %#v", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestMatroskaAndWebMUseContentEvidence(t *testing.T) {
+	for _, executable := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(executable); err != nil {
+			t.Skipf("requires %s", executable)
+		}
+	}
+	for _, fixture := range []struct{ extension, codec, muxer, mime string }{
+		{"mkv", "libx264", "matroska", "video/matroska"},
+		{"webm", "libvpx", "webm", "video/webm"},
+	} {
+		t.Run(fixture.extension, func(t *testing.T) {
+			filename := filepath.Join(t.TempDir(), "fixture."+fixture.extension)
+			buildFixture(t, "-f", "lavfi", "-i", "color=size=64x64:rate=25", "-t", "0.2", "-c:v", fixture.codec, filename)
+			probe, err := (FFprobe{}).Probe(context.Background(), filename)
+			if err != nil {
+				t.Fatal(err)
+			}
+			detected, err := DetectContentType(filename)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := describeContainer(probe.Format, "video", detected); got.mediaType != fixture.mime {
+				t.Fatalf("container = %#v; probe=%q detected=%q", got, probe.Format.Name, detected)
+			}
+			if got := SourceSegmentContainer(probe.Format, detected); got.Muxer != fixture.muxer {
+				t.Fatalf("segment container = %#v, want %s", got, fixture.muxer)
 			}
 		})
 	}
@@ -423,6 +456,33 @@ func TestDetectContentTypeDoesNotTrustExtension(t *testing.T) {
 	}
 	if got != "text/plain" {
 		t.Fatalf("DetectContentType() = %q, want content-derived text/plain", got)
+	}
+}
+
+func TestEBMLContentDetectionRequiresACompleteDocTypeElement(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name, header, want string
+	}{
+		{"webm", "\x1a\x45\xdf\xa3\x87\x42\x82\x84webm", "video/webm"},
+		{"matroska", "\x1a\x45\xdf\xa3\x8b\x42\x82\x88matroska", "video/matroska"},
+		{"two-byte size", "\x1a\x45\xdf\xa3\x88\x42\x82\x40\x04webm", "video/webm"},
+		{"void payload is not a document type", "\x1a\x45\xdf\xa3\x89\xec\x87\x42\x82\x84webm", "application/octet-stream"},
+		{"outside header", "\x1a\x45\xdf\xa3\x80\x42\x82\x84webm", "application/octet-stream"},
+		{"truncated", "\x1a\x45\xdf\xa3\x87\x42\x82\x84web", "application/octet-stream"},
+		{"invalid size", "\x1a\x45\xdf\xa3\x00", "application/octet-stream"},
+		{"unknown size", "\x1a\x45\xdf\xa3\xff\x42\x82\x84webm", "application/octet-stream"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "media.bin")
+			if err := os.WriteFile(path, []byte(test.header), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := DetectContentType(path)
+			if err != nil || got != test.want {
+				t.Fatalf("DetectContentType() = %q, %v; want %q", got, err, test.want)
+			}
+		})
 	}
 }
 

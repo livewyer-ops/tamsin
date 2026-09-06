@@ -1486,6 +1486,7 @@ type fakeClient struct {
 	deleteSegmentsErr      error
 	deleteSegmentsErrors   map[string]error
 	blockDeleteUntilDone   bool
+	deleteDeadlines        []time.Time
 	// onDownload fires as verification reads an Object back, which is the only
 	// point where a test can interrupt a run that has already registered.
 	onDownload func()
@@ -1658,6 +1659,8 @@ func (c *fakeClient) DeleteSegments(ctx context.Context, flowID string, options 
 	c.lock.Lock()
 	c.deletedTimeranges = append(c.deletedTimeranges, options.Timerange)
 	c.deletedSegments = append(c.deletedSegments, options)
+	deadline, _ := ctx.Deadline()
+	c.deleteDeadlines = append(c.deleteDeadlines, deadline)
 	block := c.blockDeleteUntilDone
 	perSegmentErr := c.deleteSegmentsErrors[options.Timerange]
 	if c.deleteSegmentsErr != nil {
@@ -1782,7 +1785,7 @@ func (c *changedUploadClient) UploadFile(ctx context.Context, destination tams.P
 	return receipt, err
 }
 
-func (c *fakeClient) DownloadDigest(_ context.Context, source tams.PresignedURL) (int64, string, error) {
+func (c *fakeClient) DownloadDigest(_ context.Context, source tams.PresignedURL, _ int64) (int64, string, error) {
 	c.record("verify")
 	c.lock.Lock()
 	hook := c.onDownload
@@ -2583,6 +2586,7 @@ func (c *expiringURLClient) ListSegments(ctx context.Context, flowID string, opt
 	}
 	for segmentIndex := range segments {
 		for urlIndex := range segments[segmentIndex].GetURLs {
+			segments[segmentIndex].GetURLs[urlIndex].Presigned = true
 			segments[segmentIndex].GetURLs[urlIndex].URL = c.stampedURL(
 				segments[segmentIndex].GetURLs[urlIndex].URL)
 		}
@@ -2590,7 +2594,7 @@ func (c *expiringURLClient) ListSegments(ctx context.Context, flowID string, opt
 	return segments, nil
 }
 
-func (c *expiringURLClient) DownloadDigest(ctx context.Context, source tams.PresignedURL) (int64, string, error) {
+func (c *expiringURLClient) DownloadDigest(ctx context.Context, source tams.PresignedURL, expectedBytes int64) (int64, string, error) {
 	if source.StartBefore.IsZero() {
 		return 0, "", errors.New("download URL has no scheduler start deadline")
 	}
@@ -2605,7 +2609,7 @@ func (c *expiringURLClient) DownloadDigest(ctx context.Context, source tams.Pres
 		return 0, "", fmt.Errorf("download URL expired %s ago", age-c.lifetime)
 	}
 	source.URL = base
-	size, digest, err := c.fakeClient.DownloadDigest(ctx, source)
+	size, digest, err := c.fakeClient.DownloadDigest(ctx, source, expectedBytes)
 	if err != nil {
 		return 0, "", err
 	}
@@ -2701,7 +2705,7 @@ func TestQueuedVerificationRefreshesURLsOnlyAfterWorkerIsReady(t *testing.T) {
 // TestOutlastsURL pins the comparison itself, including when it declines to
 // answer. A warning an operator can do nothing with is worse than silence, so
 // an unmeasured rate or an unadvertised lifetime produces none.
-func TestOutlastsURL(t *testing.T) {
+func TestOutlastsRegistration(t *testing.T) {
 	t.Parallel()
 	const megabytePerSecond = 1 << 20
 	for _, testCase := range []struct {
@@ -2735,9 +2739,9 @@ func TestOutlastsURL(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			_, oversized := outlastsURL(testCase.size, testCase.throughput, testCase.lifetime)
+			_, oversized := outlastsRegistration(testCase.size, testCase.throughput, testCase.lifetime)
 			if oversized != testCase.want {
-				t.Fatalf("outlastsURL(%d, %v, %v) = %v, want %v",
+				t.Fatalf("outlastsRegistration(%d, %v, %v) = %v, want %v",
 					testCase.size, testCase.throughput, testCase.lifetime, oversized, testCase.want)
 			}
 		})

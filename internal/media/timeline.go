@@ -6,9 +6,11 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+
+	"github.com/livewyer-ops/tamsin/internal/tamstime"
 )
 
-const nanosecondsPerSecond int64 = 1_000_000_000
+const nanosecondsPerSecond = tamstime.NanosecondsPerSecond
 
 func ParseSeconds(value string) (int64, error) {
 	value = strings.TrimSpace(value)
@@ -37,17 +39,9 @@ func ParseSeconds(value string) (int64, error) {
 	return quotient.Int64(), nil
 }
 func ParseTimestamp(value string) (int64, error) {
-	secondsText, nanosecondsText, ok := strings.Cut(strings.TrimSpace(value), ":")
-	if !ok {
-		return 0, fmt.Errorf("invalid TAMS timestamp %q", value)
-	}
-	seconds, err := strconv.ParseInt(secondsText, 10, 64)
+	seconds, nanoseconds, err := tamstime.ParseParts(strings.TrimSpace(value))
 	if err != nil {
 		return 0, fmt.Errorf("invalid TAMS timestamp %q: %w", value, err)
-	}
-	nanoseconds, err := strconv.ParseInt(nanosecondsText, 10, 64)
-	if err != nil || nanoseconds < 0 || nanoseconds >= nanosecondsPerSecond {
-		return 0, fmt.Errorf("invalid TAMS timestamp %q: nanoseconds must be between 0 and 999999999", value)
 	}
 	total := new(big.Int).Mul(big.NewInt(seconds), big.NewInt(nanosecondsPerSecond))
 	total.Add(total, big.NewInt(nanoseconds))

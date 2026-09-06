@@ -97,10 +97,18 @@ document.
   under the AppNote 0003 `_tamsin_` tag prefix.
 - TAMS Flow Profiles are distinct immutable 8.2 technical contracts. Assignment
   is explicit, participates in generated identity, requires an exact technical
-  match except for measured average bit rate, and is never inferred from the
+  match with `avg_bit_rate` inherited as the Profile's encoding target, and is never inferred from the
   local treatment profile or silently changed on an existing Flow. Numeric
   metadata is compared by exact JSON value rather than by its in-memory Go type;
   presence, non-numeric types, object fields, and array order remain strict.
+  Omitted optional fields remain omitted, so a valid service Profile that relies
+  on a schema default can still fail to match an explicitly generated field.
+- Storage-backend discovery follows guarded pagination and accepts unused
+  string or array tags. Verification accepts both presigned and non-presigned
+  media URLs. The 8.2 allocation flag controls presigned upload start deadlines;
+  URL expiry does not limit completion of an active transfer. Upload and
+  registration are scheduled against Object lifetimes, not guaranteed to finish
+  within them under all network conditions.
 - Generated Flow identity contains staged content, resolved media treatment,
   and the normalised technical graph, never an input locator, display label, or
   credential. Child Flows derive from the root. Canonical credential-free

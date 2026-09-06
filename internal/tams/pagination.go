@@ -19,19 +19,12 @@ type SegmentListOptions struct {
 	// only needs the Segments it has just written should say so: without it the
 	// service returns, and signs URLs for, everything in the Flow.
 	Timerange string
-	// IncludeDownloadURLs asks the service for presigned get_urls. Generating
+	// IncludeDownloadURLs asks the service for get_urls. Generating presigned URLs
 	// them is work proportional to the number of Segments returned, so a
 	// listing that only needs to know which Objects already exist should leave
 	// it off: deciding what to resume needs an Object identifier and a
 	// timerange, nothing more.
 	IncludeDownloadURLs bool
-}
-
-// Segments lists a Flow's Segments with download URLs. It is the convenience
-// form for callers that will immediately read the media; callers that only
-// need Segment identity should use ListSegments with the lean default options.
-func (c *Client) Segments(ctx context.Context, flowID, objectID string) ([]Segment, error) {
-	return c.ListSegments(ctx, flowID, SegmentListOptions{ObjectID: objectID, IncludeDownloadURLs: true})
 }
 
 // ListSegments lists a Flow's Segments, following the paging cursor to
@@ -51,7 +44,7 @@ func (c *Client) ListSegments(ctx context.Context, flowID string, options Segmen
 		query.Set("timerange", options.Timerange)
 	}
 	if options.IncludeDownloadURLs {
-		query.Set("presigned", "true")
+		// Omit the filter: a service may only offer non-presigned URLs.
 		query.Set("verbose_storage", "true")
 	} else {
 		// An empty accept_get_urls asks for no get_urls at all. The spec calls
@@ -64,12 +57,27 @@ func (c *Client) ListSegments(ctx context.Context, flowID string, options Segmen
 		query.Set("presigned", "false")
 	}
 	requestPath := "flows/" + escapeSegment(flowID) + "/segments?" + query.Encode()
+	segments, err := listPages[Segment](ctx, c, requestPath, "segments for flow "+flowID)
+	if err != nil {
+		return nil, err
+	}
+	if !options.IncludeDownloadURLs {
+		// Preserve the caller's disclosure choice even if a service ignores it.
+		for index := range segments {
+			segments[index].GetURLs = nil
+		}
+	}
+	return segments, nil
+}
+
+// listPages shares bounded, origin-confined pagination between ingest listings.
+func listPages[T any](ctx context.Context, c *Client, requestPath, description string) ([]T, error) {
 	requestURL, err := c.resolve(requestPath)
 	if err != nil {
 		return nil, err
 	}
 
-	var segments []Segment
+	var items []T
 	seen := make(map[string]struct{})
 	// A novel cursor stream can still be infinite, so cycle detection is backed
 	// by a hard page bound.
@@ -81,35 +89,26 @@ func (c *Client) ListSegments(ctx context.Context, flowID string, options Segmen
 		}
 		seen[pageKey] = struct{}{}
 
-		var page []Segment
+		var page []T
 		headers, pageBytes, err := c.doJSONHeaders(ctx, http.MethodGet, requestPath, nil, &page, http.StatusOK)
 		if err != nil {
 			return nil, err
 		}
 		if pageBytes > c.segmentByteLimit-responseBytes {
-			return nil, fmt.Errorf("listing segments for flow %s exceeded %d response bytes", flowID, c.segmentByteLimit)
+			return nil, fmt.Errorf("listing %s exceeded %d response bytes", description, c.segmentByteLimit)
 		}
 		responseBytes += pageBytes
-		if len(page) > c.segmentCountLimit-len(segments) {
-			return nil, fmt.Errorf("listing segments for flow %s exceeded %d Segments", flowID, c.segmentCountLimit)
+		if len(page) > c.segmentCountLimit-len(items) {
+			return nil, fmt.Errorf("listing %s exceeded %d entries", description, c.segmentCountLimit)
 		}
-		if !options.IncludeDownloadURLs {
-			// The request asks a conforming service to omit get_urls, but keep the
-			// caller's disclosure choice authoritative if a service ignores that
-			// filter. This is repeated for every page because a Link cursor may
-			// replace the original query entirely.
-			for index := range page {
-				page[index].GetURLs = nil
-			}
-		}
-		segments = append(segments, page...)
+		items = append(items, page...)
 
 		next, hasNext, err := c.pageReference(requestURL, headers.Values("Link"))
 		if err != nil {
 			return nil, err
 		}
 		if !hasNext {
-			return segments, nil
+			return items, nil
 		}
 		requestPath = next
 		requestURL, err = c.resolve(requestPath)
@@ -117,7 +116,7 @@ func (c *Client) ListSegments(ctx context.Context, flowID string, options Segmen
 			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("listing segments for flow %s exceeded %d pages", flowID, c.segmentPageLimit)
+	return nil, fmt.Errorf("listing %s exceeded %d pages", description, c.segmentPageLimit)
 }
 
 // pageReference resolves a Link cursor against the exact page that supplied
@@ -486,11 +485,3 @@ func consumeLinkQuotedString(value string) (string, string, error) {
 	}
 	return "", "", errors.New("unterminated quoted string")
 }
-
-// RegisterSegments registers several Flow Segments in one request. The endpoint
-// accepts either a single Segment or an array, so batching turns one round trip
-// per Media Object into one per Flow, which is the dominant cost on a
-// high-latency link.
-//
-// A 201 means every Segment was created. A 200 is a partial success carrying
-// the ones that were not, so it is reported as a failure naming them.

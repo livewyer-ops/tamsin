@@ -313,6 +313,51 @@ func TestHTTPSourceStripsConfiguredHeadersOnCrossOriginRedirect(t *testing.T) {
 	}
 }
 
+func TestHTTPSourcePreservesConfiguredHeadersOnSameOriginRedirect(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/redirect":
+			http.Redirect(writer, request, "/asset.mp4", http.StatusTemporaryRedirect)
+		case "/asset.mp4":
+			if request.Header.Get("X-Input-Secret") != "secret" {
+				http.Error(writer, "same-origin credential missing", http.StatusBadRequest)
+				return
+			}
+			_, _ = io.WriteString(writer, "redirected")
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	items, err := New(Config{HTTPHeaders: http.Header{"X-Input-Secret": []string{"secret"}}}).
+		Resolve(context.Background(), []string{server.URL + "/redirect"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := items[0].Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil || string(data) != "redirected" {
+		t.Fatalf("redirected data = %q, error = %v", data, err)
+	}
+}
+
+func TestResolveHTTPRejectsUserinfo(t *testing.T) {
+	t.Parallel()
+	_, err := New(Config{}).Resolve(context.Background(), []string{"https://user:secret@example.test/asset.mp4"})
+	if err == nil || !strings.Contains(err.Error(), "must not include userinfo") {
+		t.Fatalf("Resolve() error = %v, want HTTP userinfo rejection", err)
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Fatalf("Resolve() error disclosed URL credentials: %v", err)
+	}
+}
+
 func TestResolveS3Prefix(t *testing.T) {
 	t.Parallel()
 	client := &fakeS3{objects: map[string][]byte{"prefix/b.mp4": []byte("b"), "prefix/a.mp4": []byte("aa"), "other": []byte("ignored")}}

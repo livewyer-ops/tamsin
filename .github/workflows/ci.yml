@@ -19,14 +19,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The gate floats to the newest 1.26 patch so govulncheck picks up stdlib
-      # security fixes as they ship. Pinning to go.mod's exact version instead
-      # would fail the vuln target every time a Go CVE lands. Move this to 1.27
-      # before Go 1.28 ships, when the 1.26 line stops receiving patches.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.x'
+          go-version-file: go.mod
           cache: true
+      - run: sudo apt-get update && sudo apt-get install --yes ffmpeg
       - name: Verify
         run: make verify
 

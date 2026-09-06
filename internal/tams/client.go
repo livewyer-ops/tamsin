@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -54,6 +55,21 @@ type Config struct {
 	SuppressErrorBody   bool
 	Observability       *observability.Run
 }
+
+// RequestTimeoutError reports a request-level deadline without confusing it
+// with cancellation of the caller's operation. The URL is redacted when the
+// error is created.
+type RequestTimeoutError struct {
+	Method string
+	URL    string
+	Err    error
+}
+
+func (e *RequestTimeoutError) Error() string {
+	return fmt.Sprintf("%s %s: request timed out", e.Method, e.URL)
+}
+
+func (e *RequestTimeoutError) Unwrap() error { return e.Err }
 
 type Client struct {
 	timeout             time.Duration
@@ -161,11 +177,7 @@ func (c *Client) Service(ctx context.Context) (map[string]any, error) {
 }
 
 func (c *Client) StorageBackends(ctx context.Context) ([]StorageBackend, error) {
-	var result []StorageBackend
-	if err := c.doJSON(ctx, http.MethodGet, "service/storage-backends", nil, &result, http.StatusOK); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return listPages[StorageBackend](ctx, c, "service/storage-backends", "storage backends")
 }
 
 func (c *Client) Profile(ctx context.Context, profileID string) (Profile, error) {
@@ -316,7 +328,7 @@ func (c *Client) UploadFile(ctx context.Context, destination PresignedURL, filen
 			_, _ = io.Copy(io.Discard, io.LimitReader(body, maxErrorBody))
 			_ = body.Close()
 			if response.StatusCode >= 200 && response.StatusCode < 300 {
-				storageSHA256, checksumErr := uploadStorageSHA256(response.Header, request.Header)
+				storageSHA256, checksumErr := uploadStorageSHA256(response.Header)
 				if checksumErr != nil {
 					return UploadReceipt{}, fmt.Errorf("read upload checksum evidence: %w", checksumErr)
 				}
@@ -354,31 +366,29 @@ func (c *Client) UploadFile(ctx context.Context, destination PresignedURL, filen
 }
 
 // uploadStorageSHA256 extracts only checksums whose semantics are SHA-256 over
-// the uploaded representation. A provider response is preferred; a checksum
-// header included in the signed allocation request is also useful evidence
-// because a successful checksum-aware PUT means the provider accepted it.
-// ETag is deliberately excluded: it is not reliably a content digest.
-func uploadStorageSHA256(response, request http.Header) (string, error) {
-	for _, headers := range []http.Header{response, request} {
-		for _, candidate := range []struct {
-			name       string
-			structured bool
-		}{
-			{name: "X-Amz-Checksum-Sha256"},
-			{name: "Content-Digest", structured: true},
-			{name: "Digest", structured: true},
-		} {
-			for _, value := range headers.Values(candidate.name) {
-				encoded, found := sha256HeaderValue(value, candidate.structured)
-				if !found {
-					continue
-				}
-				digest, err := decodeSHA256Base64(encoded)
-				if err != nil {
-					return "", fmt.Errorf("invalid %s header: %w", candidate.name, err)
-				}
-				return digest, nil
+// the uploaded representation. Only response headers are evidence that
+// storage computed or accepted a checksum; a header TAMSin sent in the request
+// cannot prove that a backend understood it. ETag is deliberately excluded:
+// it is not reliably a content digest.
+func uploadStorageSHA256(response http.Header) (string, error) {
+	for _, candidate := range []struct {
+		name       string
+		structured bool
+	}{
+		{name: "X-Amz-Checksum-Sha256"},
+		{name: "Content-Digest", structured: true},
+		{name: "Digest", structured: true},
+	} {
+		for _, value := range response.Values(candidate.name) {
+			encoded, found := sha256HeaderValue(value, candidate.structured)
+			if !found {
+				continue
 			}
+			digest, err := decodeSHA256Base64(encoded)
+			if err != nil {
+				return "", fmt.Errorf("invalid %s header: %w", candidate.name, err)
+			}
+			return digest, nil
 		}
 	}
 	return "", nil
@@ -418,9 +428,31 @@ func decodeSHA256Base64(encoded string) (string, error) {
 	return hex.EncodeToString(digest), nil
 }
 
-// DownloadDigest streams an Object instance and returns its byte length and
-// SHA-256 without retaining media in memory.
-func (c *Client) DownloadDigest(ctx context.Context, source PresignedURL) (int64, string, error) {
+// ObjectSizeError reports that a downloaded Object did not have the exact
+// length TAMSin registered. AtLeast is set when either the response declares a
+// larger length or reading stopped one byte past the bound, so Actual need not
+// be the complete response size.
+type ObjectSizeError struct {
+	Expected int64
+	Actual   int64
+	AtLeast  bool
+}
+
+func (e *ObjectSizeError) Error() string {
+	if e.AtLeast {
+		return fmt.Sprintf("object byte length exceeds %d bytes (at least %d)", e.Expected, e.Actual)
+	}
+	return fmt.Sprintf("object byte length mismatch: expected %d, got %d", e.Expected, e.Actual)
+}
+
+// DownloadDigest streams exactly expectedBytes from an Object instance and
+// returns its byte length and SHA-256 without retaining media in memory. The
+// extra byte in the read bound detects a peer that streams indefinitely or
+// serves a larger Object without waiting for it to finish.
+func (c *Client) DownloadDigest(ctx context.Context, source PresignedURL, expectedBytes int64) (int64, string, error) {
+	if expectedBytes < 0 || expectedBytes == math.MaxInt64 {
+		return 0, "", errors.New("expected Object byte length must be between 0 and MaxInt64-1")
+	}
 	ctx, cancel := c.transferContext(ctx)
 	defer cancel()
 	parsed, err := url.Parse(source.URL)
@@ -474,10 +506,21 @@ func (c *Client) DownloadDigest(ctx context.Context, source PresignedURL) (int64
 			}
 			continue
 		}
+		if response.ContentLength > expectedBytes {
+			_ = body.Close()
+			return 0, "", &ObjectSizeError{
+				Expected: expectedBytes, Actual: response.ContentLength, AtLeast: true,
+			}
+		}
 		hash := sha256.New()
-		size, readErr := io.Copy(hash, body)
+		size, readErr := io.Copy(hash, io.LimitReader(body, expectedBytes+1))
 		_ = body.Close()
 		if readErr == nil {
+			if size != expectedBytes {
+				return 0, "", &ObjectSizeError{
+					Expected: expectedBytes, Actual: size, AtLeast: size > expectedBytes,
+				}
+			}
 			return size, hex.EncodeToString(hash.Sum(nil)), nil
 		}
 		if attempt == c.retries || ctx.Err() != nil {
@@ -812,7 +855,11 @@ func requestError(ctx context.Context, method, rawURL string, err error) error {
 		return context.Canceled
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return context.DeadlineExceeded
+		return &RequestTimeoutError{
+			Method: method,
+			URL:    auth.RedactURL(rawURL),
+			Err:    context.DeadlineExceeded,
+		}
 	}
 	return fmt.Errorf("%s %s: request failed", method, auth.RedactURL(rawURL))
 }
