@@ -60,7 +60,8 @@ jobs:
             --build-arg BUILD_DATE="$(git show -s --format=%cI "$GITHUB_SHA")" \
             --tag "$RUNTIME_IMAGE" \
             .
-          echo "digest=$(jq -r '.[\"containerimage.digest\"]' .tmp/runtime-metadata.json)" >> "$GITHUB_OUTPUT"
+          digest=$(jq -er '."containerimage.digest"' .tmp/runtime-metadata.json)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Attest runtime
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:

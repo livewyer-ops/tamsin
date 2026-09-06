@@ -106,7 +106,8 @@ jobs:
             --tag "$image:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             .
           echo "name=$image" >> "$GITHUB_OUTPUT"
-          echo "digest=$(jq -r '.[\"containerimage.digest\"]' .tmp/image-metadata.json)" >> "$GITHUB_OUTPUT"
+          digest=$(jq -er '."containerimage.digest"' .tmp/image-metadata.json)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Smoke both image architectures
         id: image-smoke
         env:
