@@ -43,10 +43,9 @@ require (
 	golang.org/x/telemetry v0.0.0-20260625142307-59b4966ccb57 // indirect
 	golang.org/x/text v0.39.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect
-	golang.org/x/tools/go/expect v0.1.1-deprecated // indirect
 	golang.org/x/tools/go/packages/packagestest v0.1.1-deprecated // indirect
 	golang.org/x/vuln v1.1.4 // indirect
-	honnef.co/go/tools v0.6.1 // indirect
+	honnef.co/go/tools v0.8.1 // indirect
 )
 
 tool (
