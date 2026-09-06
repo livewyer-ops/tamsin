@@ -1,99 +1,69 @@
 name: FFmpeg runtime
 
 on:
-  # The first reviewed branch that introduces a new revision bootstraps its
-  # immutable tag before application-image CI consumes it. Existing tags are
-  # accepted but never overwritten.
   push:
+    branches: [main]
     paths:
       - Dockerfile.ffmpeg
-      - contracts/ffmpeg-runtime.json
-      - .github/workflows/ffmpeg-runtime.yml
-      - scripts/resolve-image-reference.sh
   workflow_dispatch:
 
 permissions:
-  contents: read
-  packages: write
-  id-token: write
   attestations: write
+  contents: read
+  id-token: write
+  packages: write
 
 concurrency:
-  group: ffmpeg-runtime-5.1.9-bookworm-r1
+  group: ffmpeg-runtime
   cancel-in-progress: false
 
 jobs:
   publish:
-    if: github.repository == 'livewyer-ops/tamsin'
+    if: github.repository == 'livewyer-ops/tamsin' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      RUNTIME_IMAGE: ghcr.io/livewyer-ops/tamsin-ffmpeg-runtime:5.1.9-bookworm-r1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Read the runtime contract
-        id: contract
-        run: |
-          image="$(jq -er '.image | select(type == "string" and length > 0)' contracts/ffmpeg-runtime.json)"
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          echo "subject_name=${image%:*}" >> "$GITHUB_OUTPUT"
-      - name: Set up pinned QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
         with:
-          image: docker.io/tonistiigi/binfmt:qemu-v10.0.4@sha256:8f58e6214f4cc9dc83ce8f5acad1ece508eb6b20e696a8c1e9f274481982c541
           platforms: arm64
-      - name: Set up pinned Buildx and BuildKit
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-        with:
-          version: v0.35.0
-          driver-opts: |
-            image=moby/buildkit:v0.26.2@sha256:de10faf919fc71ba4eb1dd7bd6449566d012b0c9436b1c61bfee21d621b009aa
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Check whether the immutable revision already exists
-        id: existing
-        env:
-          RUNTIME_IMAGE: ${{ steps.contract.outputs.image }}
+      - name: Check immutable tag
+        id: immutable-tag
         run: |
-          if docker buildx imagetools inspect "$RUNTIME_IMAGE" >/dev/null 2>&1; then
-            immutable="$(./scripts/resolve-image-reference.sh "$RUNTIME_IMAGE")"
-            echo "The immutable runtime already exists: $immutable"
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "immutable=$immutable" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+          if lookup=$(docker buildx imagetools inspect "$RUNTIME_IMAGE" 2>&1); then
+            echo "Runtime tag already exists; increment its revision before rebuilding." >&2
+            exit 1
           fi
-      - name: Build and publish the two-platform runtime once
-        if: steps.existing.outputs.exists != 'true'
-        env:
-          RUNTIME_IMAGE: ${{ steps.contract.outputs.image }}
+          case "$lookup" in
+            "ERROR: $RUNTIME_IMAGE: not found") ;;
+            *) printf 'Cannot establish that the runtime tag is absent: %s\n' "$lookup" >&2; exit 1 ;;
+          esac
+      - name: Build and publish runtime
+        id: runtime
         run: |
-          build_epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
-          build_date="$(date --utc --date="@$build_epoch" +%Y-%m-%dT%H:%M:%SZ)"
+          mkdir -p .tmp
           docker buildx build \
             --file Dockerfile.ffmpeg \
             --platform linux/amd64,linux/arm64 \
-            --provenance=mode=max \
-            --sbom=true \
-            --build-arg BUILD_DATE="$build_date" \
-            --tag "$RUNTIME_IMAGE" \
             --push \
+            --sbom=true \
+            --provenance=mode=max \
+            --metadata-file .tmp/runtime-metadata.json \
+            --build-arg BUILD_DATE="$(git show -s --format=%cI "$GITHUB_SHA")" \
+            --tag "$RUNTIME_IMAGE" \
             .
-      - name: Resolve and validate the published runtime
-        if: steps.existing.outputs.exists != 'true'
-        id: published
-        env:
-          RUNTIME_IMAGE: ${{ steps.contract.outputs.image }}
-        run: |
-          immutable="$(./scripts/resolve-image-reference.sh "$RUNTIME_IMAGE")"
-          echo "immutable=$immutable" >> "$GITHUB_OUTPUT"
-          echo "digest=${immutable##*@}" >> "$GITHUB_OUTPUT"
-      - name: Add GitHub build provenance to the runtime index
-        if: steps.existing.outputs.exists != 'true'
+          echo "digest=$(jq -r '.[\"containerimage.digest\"]' .tmp/runtime-metadata.json)" >> "$GITHUB_OUTPUT"
+      - name: Attest runtime
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
-          subject-name: ${{ steps.contract.outputs.subject_name }}
-          subject-digest: ${{ steps.published.outputs.digest }}
+          subject-name: ghcr.io/livewyer-ops/tamsin-ffmpeg-runtime
+          subject-digest: ${{ steps.runtime.outputs.digest }}
           push-to-registry: true

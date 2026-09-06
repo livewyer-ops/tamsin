@@ -118,7 +118,7 @@ func TestE2EHarnessReadsTAMSSPinsFromTheContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, selector := range []string{".tamoss.commit", ".tams.commit", ".tamoss.release", ".tamoss.profile"} {
+	for _, selector := range []string{".tamoss.commit", ".tams.commit", ".tams.version", ".tamoss.release", ".tamoss.profile"} {
 		if !regexp.MustCompile(regexp.QuoteMeta(selector)).Match(script) {
 			t.Errorf("E2E harness does not read %s", selector)
 		}

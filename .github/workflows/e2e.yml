@@ -4,33 +4,9 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "17 3 * * 1"
-  # A release passes the complete immutable identity of its already-built OCI
-  # layout. Scheduled/manual runs omit every field and may build a CI image.
   workflow_call:
-    inputs:
-      release_artifact_id:
-        description: Immutable Actions artifact ID containing the release bundle.
-        required: false
-        type: string
-        default: ''
-      release_artifact_digest:
-        description: Service-side SHA-256 digest of the Actions artifact.
-        required: false
-        type: string
-        default: ''
-      release_image_ref:
-        description: Versioned OCI reference recorded in the layout.
-        required: false
-        type: string
-        default: ''
-      release_image_index_digest:
-        description: Immutable digest of the tested amd64+arm64 OCI index.
-        required: false
-        type: string
-        default: ''
 
 permissions:
-  actions: read
   contents: read
 
 concurrency:
@@ -38,104 +14,47 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make image IMAGE=tamsin:e2e VERSION=0.0.0-e2e COMMIT="$GITHUB_SHA"
+      - run: docker save tamsin:e2e | gzip > tamsin-e2e.tar.gz
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tamsin-e2e-image
+          path: tamsin-e2e.tar.gz
+          retention-days: 1
+          compression-level: 0
+
   kind:
+    needs: build
     strategy:
       fail-fast: false
       matrix:
-        contract: [tams-v8.2.json, tams-v8.1.json]
+        contract: [tams-v8.1.json, tams-v8.2.json]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # A release call supplies all four identity fields or none. Rejecting a
-      # partial identity prevents a missing index digest from becoming an
-      # implicit rebuild or host-platform fallback.
-      - name: Validate exact-index inputs
-        id: identity
-        env:
-          ARTIFACT_ID: ${{ inputs.release_artifact_id }}
-          ARTIFACT_DIGEST: ${{ inputs.release_artifact_digest }}
-          IMAGE_REF: ${{ inputs.release_image_ref }}
-          INDEX_DIGEST: ${{ inputs.release_image_index_digest }}
-        run: |
-          supplied=0
-          for value in \
-            "$ARTIFACT_ID" \
-            "$ARTIFACT_DIGEST" \
-            "$IMAGE_REF" \
-            "$INDEX_DIGEST"; do
-            if [ -n "$value" ]; then supplied=$((supplied + 1)); fi
-          done
-          if [ "$supplied" -ne 0 ] && [ "$supplied" -ne 4 ]; then
-            echo "release E2E requires all immutable artifact/index identity inputs" >&2
-            exit 2
-          fi
-          if [ "$supplied" -eq 4 ]; then
-            printf 'image=%s@%s\n' "$IMAGE_REF" "$INDEX_DIGEST" >> "$GITHUB_OUTPUT"
-          else
-            echo 'image=tamsin:dev' >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: inputs.release_artifact_id == ''
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Set up pinned Docker with the containerd image store
-        uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0
-        with:
-          version: type=archive,version=29.1.3,channel=stable
-          daemon-config: |
-            {
-              "features": {
-                "containerd-snapshotter": true
-              }
-            }
       - uses: aquaproj/aqua-installer@96a9bc20066c5bf5e275b41019cfc165b25f4e2e # v4.0.5
         with:
           aqua_version: v2.60.1
           enable_aqua_install: "false"
-
-      - name: Build the scheduled CI image
-        if: inputs.release_artifact_id == ''
-        run: |
-          build_epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
-          build_date="$(date --utc --date="@$build_epoch" +%Y-%m-%dT%H:%M:%SZ)"
-          make image \
-            IMAGE="tamsin:dev" \
-            VERSION="0.0.0-ci" \
-            COMMIT="${GITHUB_SHA}" \
-            BUILD_DATE="$build_date" \
-            SOURCE_DATE_EPOCH="$build_epoch"
-
-      - name: Check the immutable Actions artifact identity
-        if: inputs.release_artifact_id != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./scripts/verify-actions-artifact.sh '${{ inputs.release_artifact_id }}' '${{ inputs.release_artifact_digest }}'
-      - name: Download the exact release bundle by immutable ID
-        if: inputs.release_artifact_id != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          artifact-ids: ${{ inputs.release_artifact_id }}
-          path: .tmp/release-bundle
-      - name: Load the exact tested multi-platform index
-        if: inputs.release_artifact_id != ''
-        run: |
-          ./scripts/load-release-image.sh \
-            .tmp/release-bundle \
-            '${{ inputs.release_image_ref }}' \
-            '${{ inputs.release_image_index_digest }}'
-
-      # ubuntu-24.04 is amd64. Passing the platform explicitly makes every
-      # Tamsin container select the recorded amd64 member of the tested index.
-      - name: Exercise full TAMOSS matrix with the exact amd64 member
+          name: tamsin-e2e-image
+      - run: gunzip --stdout tamsin-e2e.tar.gz | docker load
+      - name: Exercise TAMOSS
         env:
-          IMAGE: ${{ steps.identity.outputs.image }}
+          IMAGE: tamsin:e2e
           TAMSIN_E2E_CONTRACT: ${{ matrix.contract }}
-        run: make e2e-existing IMAGE="$IMAGE" E2E_PLATFORM="linux/amd64"
-
+        run: make e2e-existing IMAGE="$IMAGE" E2E_PLATFORM=linux/amd64
       - name: Upload TAMOSS diagnostics
         if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

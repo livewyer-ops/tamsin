@@ -1,21 +1,10 @@
-#!/usr/bin/env bash
-#
-# Refuse to cut a release while a known specification gap is open.
-#
-# The conformance inventory records requirements that bear on ingest but are
-# not met yet. Some of those are the kind you can ship around and some are not,
-# so each says which it is. This turns that record into something enforced:
-# without it, "recorded, not implemented" is a note nobody reads at the moment
-# it matters, which is when somebody pushes a tag.
-set -Eeuo pipefail
+"""Refuse a release while a conformance finding is marked as blocking."""
 
-contract="${1:-contracts/tams-v8.2.json}"
-
-python3 - "$contract" <<'PY'
-import json, sys
+import json
+import sys
 from pathlib import Path
 
-path = Path(sys.argv[1])
+path = Path(sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else "contracts/tams-v8.2.json")
 findings = []
 seen = set()
 while path:
@@ -50,4 +39,3 @@ print(
     file=sys.stderr,
 )
 raise SystemExit(1)
-PY

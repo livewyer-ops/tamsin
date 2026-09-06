@@ -6,6 +6,10 @@ pin automation to a reviewed release and read this file before upgrading.
 
 ## Unreleased
 
+- Simplify build and release tooling around the pinned FFmpeg runtime, native
+  BuildKit attestations and checksummed binaries with dependency licences.
+  Run both live compatibility versions and smoke both candidate image
+  architectures before release tagging; reject reused version tags.
 - Breaking changes since rc.3: use YAML configuration, plain progress and
   pre-obtained OAuth authorisation codes. The separate result journal and
   public Go event-consumer package have been removed; redirect NDJSON stdout
