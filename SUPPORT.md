@@ -17,10 +17,10 @@ on a best-effort basis; no response-time or availability commitment is implied.
 
 ## Supported scope
 
-Only the latest stable TAMSin minor release is supported. Until `v1.0.0` is
-stable, support follows the latest public release candidate. Reproduce a problem
-with a published binary or immutable image digest when possible and include the
-redacted `tamsin doctor --format json` report.
+Only the latest stable TAMSin minor release is supported. Prereleases and the
+`main` branch are development snapshots. Reproduce a problem with a published
+binary or immutable image digest when possible and include the redacted
+`tamsin doctor --format json` report.
 
 The supported distribution targets are Linux and macOS on amd64 and arm64, plus
 the published linux/amd64 and linux/arm64 OCI image. Other source builds may

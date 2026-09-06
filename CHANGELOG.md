@@ -1,39 +1,55 @@
 # Changelog
 
-All notable changes are documented here. TAMSin follows semantic versioning.
-Before 1.0, minor releases may change command or structured-output contracts;
-pin automation to a reviewed release and read this file before upgrading.
+All notable changes are documented here. TAMSin follows semantic versioning;
+the published 1.x compatibility commitments are described in
+`docs/explanation/compatibility.md`.
 
-## Unreleased
+## [1.0.0] - Unreleased
 
-- Simplify build and release tooling around the pinned FFmpeg runtime, native
-  BuildKit attestations and checksummed binaries with dependency licences.
-  Run both live compatibility versions and smoke both candidate image
-  architectures before release tagging; reject reused version tags.
-- Breaking changes since rc.3: use YAML configuration, plain progress and
-  pre-obtained OAuth authorisation codes. The separate result journal and
-  public Go event-consumer package have been removed; redirect NDJSON stdout
-  for durable results. Supply explicit values for dry-run and verification
-  modes. See `docs/explanation/compatibility.md` for migration guidance.
-- Simplify per-run pipeline state, retain only ingest validation schemas,
-  preserve precise Profile metadata and keep HTTP pools aligned with the
-  requested transfer concurrency. All five treatments and FFmpeg pass-through
-  remain available.
-- Follow storage-backend pagination and accept optional array-valued tags.
-  Verify both presigned and non-presigned Object URLs, respecting the TAMS 8.2
-  allocation flag and separating URL start deadlines from Object registration
-  lifetimes.
-- Distinguish Matroska from WebM by document type before selecting media types
-  and remuxers. Restrict the media-tool environment, bound verification reads,
-  require response-side upload checksum evidence, and tolerate staging files
-  being removed during directory scans.
+Working notes for the forthcoming 1.0.0 release. Published versions are release
+candidates; set the release date before tagging the next candidate or final.
 
-## [1.0.0] - 2026-08-12
+### Release hardening
 
-This public release-candidate series establishes TAMSin's supported product,
-automation, compatibility, and supply-chain contracts.
+- Follow paginated storage-backend listings, accept optional array-valued tags,
+  and verify both presigned and non-presigned Object URLs. Apply 8.2 URL start
+  deadlines according to the allocation flag; estimate upload warnings against
+  Object registration lifetime rather than URL start lifetime.
+- Distinguish Matroska from WebM using the EBML document type, keeping Flow
+  media types and source-family remuxers consistent with the input bytes.
+- Keep only the vendored schemas needed for ingest, share configuration and
+  schema-loading code, and simplify per-invocation pipeline state. Check Python
+  helper files directly alongside shell scripts.
+- Preserve exact JSON numbers in metadata files and report Profile mismatches
+  with bounded, value-free field paths. Skip the redundant packet scan when
+  FFprobe reports B-frame reordering, with a real reordered-media regression.
+- Validate and decode YAML from one document, check every shell script, and
+  run both live TAMS versions by default through `make e2e`.
+- Include dependency licences and required corresponding source with binaries
+  and in the application image. Smoke both image architectures before assigning
+  release tags; restrict runtime publication to main and reject ambiguous
+  registry failures or attempts to reuse an existing runtime or application
+  version tag.
+- Pin the supported Go toolchain at 1.26.8 and run the OCI image as UID/GID
+  65532 from a writable neutral work directory.
+- Require FFprobe and FFmpeg 5.1 or newer before TAMS mutation. Media child
+  processes receive an explicit runtime allow-list rather than inheriting cloud,
+  proxy, TAMSin, or credential environment variables.
+- Strip configured HTTP-input headers on cross-origin redirects, reject URL
+  user information, redact URL values from structured usage hints, and warn
+  when a Unix configuration file containing secrets is group/world-readable.
+- Bound verification reads to one byte beyond the registered Object size,
+  require response-side upload checksum evidence, tolerate generated Segment
+  files disappearing during directory scans, and reject explicit Flow reuse
+  when its existing `source_id` identifies different material.
+- Pin the final BBC TAMS 8.2 schema and TAMOSS release contract, move vendored
+  TAMS validation schemas behind the internal package boundary, and publish
+  canonical TAMSin schema identifiers under `tamsin.livewyer.io`.
+- Size idle HTTP connection pools to configured transfer concurrency, publish
+  the complete stable failure-code vocabulary, and distinguish request timeout
+  from parent cancellation without parsing diagnostic prose.
 
-### Changes since v1.0.0-rc.2
+### Profile matching and command scope
 
 - Pin exact JSON-number decoding at the TAMS Profile HTTP boundary, including
   technical metadata integers larger than 2^53, and strengthen CLI credential
@@ -41,9 +57,6 @@ automation, compatibility, and supply-chain contracts.
 - Keep TAMSin documentation independent of a particular general TAMS control
   client, clarify the layered Segment-retraction test boundary, and make the
   retired `api` help path explain its migration rather than showing bare usage.
-
-### Changes since v1.0.0-rc.1
-
 - Move general TAMS discovery and administration from `tamsin api` to the
   separate lightweight `tamsctl` client. TAMSin now retains only ingest,
   treatment profiles, diagnostics, configuration and shell completion, and no
@@ -67,7 +80,7 @@ automation, compatibility, and supply-chain contracts.
 - Apply the 8.2 Flow lifecycle without extra resume churn: `ingesting` before
   Object allocation, `closed_complete` after success, and `awaiting_content`
   after a failed written graph. TAMS 8.1 requests remain unchanged.
-- Retain the 8.2 storage-allocation, richer backend-metadata, and
+- Retain the 8.2 storage-allocation, storage-backend selection, and
   `init_object_id` fields used by ingest. High-level fragmented-MP4 preparation
   remains deliberately out of scope for this release.
 - Stop inventing `generation: 0` from local stream-copy policy. Generation is
@@ -83,19 +96,29 @@ automation, compatibility, and supply-chain contracts.
   media processes, transfers, probing, retries, events, and retained results.
 - Make Flow identities depend on the canonical TAMS Flow Profile assignment,
   while keeping FFmpeg patch versions and status transitions out of identity.
+- Keep FFmpeg pass-through for specialist media options, while replacing the
+  general configuration framework with a focused YAML resolver.
+- Remove the duplicate result journal and public Go consumer package. Durable
+  automation output is ordinary redirection of the documented NDJSON stream.
+- Require explicit dry-run and verification mode values instead of inferring
+  a mode from a bare flag.
+- Use append-only plain progress in `auto` mode, remove terminal redraw and
+  rate/ETA calculations, and leave line wrapping to the terminal.
+- Accept only pre-obtained OAuth authorisation codes; TAMSin no longer opens a
+  browser or listens on a local callback port.
 
 ### Release and supply chain
 
-- Publish four CGO-free binaries and one non-root amd64/arm64 OCI index for
-  `v1.0.0-rc.2`; prereleases never move the `latest` image tag.
+- Publish four CGO-free binaries and one non-root amd64/arm64 OCI index as
+  immutable versioned artefacts; prereleases never move the `latest` image tag.
 - Build the application on the immutable
-  `tamsin-ffmpeg-runtime:5.1.9-bookworm-r1` base. Its Debian snapshot, FFmpeg
-  package, two architectures, SPDX SBOM, and provenance are revisioned once so
-  normal application builds reuse the expensive 202-package runtime layer.
-- Upload checksums, third-party licences, container identity metadata, and a
-  deterministic supply-chain archive containing each platform's SPDX SBOM and
-  SLSA provenance statement. Release metadata records both application and
-  FFmpeg-runtime index digests.
+  `tamsin-ffmpeg-runtime:5.1.9-bookworm-r1` base pinned by index digest. Its
+  Debian snapshot, FFmpeg package, two architectures, SPDX SBOM, and provenance
+  are revisioned once so normal application builds reuse the expensive runtime
+  layer.
+- Attach BuildKit SBOM and provenance attestations directly to both the FFmpeg
+  runtime and application images, and publish checksummed, attested binaries
+  through GitHub Releases.
 
 ## [0.1.0] - 2026-08-11
 
