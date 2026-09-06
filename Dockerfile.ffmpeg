@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
 ARG DEBIAN_SNAPSHOT=20260803T000000Z
 ARG FFMPEG_VERSION=7:5.1.9-0+deb12u1
@@ -8,7 +8,7 @@ ARG BUILD_DATE=1970-01-01T00:00:00Z
 
 LABEL org.opencontainers.image.title="TAMSin FFmpeg runtime" \
       org.opencontainers.image.description="Pinned FFmpeg and TLS runtime for TAMSin release images" \
-      org.opencontainers.image.version="5.1.9-bookworm-r1" \
+      org.opencontainers.image.version="5.1.9-bookworm-r2" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.source="https://github.com/livewyer-ops/tamsin" \
       org.opencontainers.image.licenses="Apache-2.0 AND GPL-2.0-or-later" \
