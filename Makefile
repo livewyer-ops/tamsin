@@ -2,11 +2,10 @@ SHELL := /bin/bash
 
 BINARY := bin/tamsin
 IMAGE ?= tamsin:dev
-FFMPEG_RUNTIME_IMAGE ?= ghcr.io/livewyer-ops/tamsin-ffmpeg-runtime:5.1.9-bookworm-r2@sha256:cc5e5965ace04ead6c1db6a5b3d121229d149a1c942bdf8d810c5a94b63fbafc
 E2E_PLATFORM ?= linux/amd64
-TAMSIN_E2E_CONTRACT ?= tams-v8.1.json tams-v8.2.json
+TAMSIN_E2E_VERSION ?= 8.1 8.2
 VERSION ?= dev
-COMMIT ?= $(shell git describe --always --dirty --abbrev=40 2>/dev/null || printf unknown)
+COMMIT ?= $(shell commit=$$(git rev-parse HEAD 2>/dev/null) || commit=unknown; test -z "$$(git status --porcelain 2>/dev/null)" || commit=$$commit-dirty; printf '%s' "$$commit")
 BUILD_DATE ?= 1970-01-01T00:00:00Z
 LDFLAGS := -s -w -X github.com/livewyer-ops/tamsin/internal/version.Version=$(VERSION) -X github.com/livewyer-ops/tamsin/internal/version.Commit=$(COMMIT) -X github.com/livewyer-ops/tamsin/internal/version.Date=$(BUILD_DATE)
 
@@ -23,7 +22,8 @@ clean:
 	rm -f *.test
 
 format-check:
-	./scripts/check-format.sh
+	@unformatted="$$(find . \( -path ./.git -o -path ./.cache -o -path ./.tmp -o -path ./bin -o -path ./dist \) -prune -o -name '*.go' -print0 | xargs -0 -r gofmt -l)" && \
+		{ test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }; }
 	@for script in scripts/*.sh; do bash -n "$$script" || exit; done
 	python3 -c 'import pathlib, sys; [compile(pathlib.Path(name).read_text(), name, "exec") for name in sys.argv[1:]]' scripts/*.py
 
@@ -62,7 +62,7 @@ dist:
 	(cd dist && sha256sum tamsin-linux-amd64 tamsin-linux-arm64 tamsin-darwin-amd64 tamsin-darwin-arm64 tamsin-third-party-licenses.tar.gz > SHA256SUMS)
 
 image:
-	docker build --pull --build-arg VERSION='$(VERSION)' --build-arg COMMIT='$(COMMIT)' --build-arg BUILD_DATE='$(BUILD_DATE)' --build-arg FFMPEG_RUNTIME_IMAGE='$(FFMPEG_RUNTIME_IMAGE)' -t $(IMAGE) .
+	docker build --pull --build-arg VERSION='$(VERSION)' --build-arg COMMIT='$(COMMIT)' --build-arg BUILD_DATE='$(BUILD_DATE)' $(if $(FFMPEG_RUNTIME_IMAGE),--build-arg FFMPEG_RUNTIME_IMAGE='$(FFMPEG_RUNTIME_IMAGE)') -t $(IMAGE) .
 
 image-smoke: image
 	docker run --rm $(IMAGE) --help >/dev/null
@@ -77,6 +77,6 @@ e2e: image
 
 e2e-existing:
 	docker image inspect --platform '$(E2E_PLATFORM)' '$(IMAGE)' >/dev/null
-	@for contract in $(TAMSIN_E2E_CONTRACT); do \
-		DOCKER_DEFAULT_PLATFORM='$(E2E_PLATFORM)' IMAGE='$(IMAGE)' TAMSIN_E2E_CONTRACT="$$contract" ./scripts/e2e-kind.sh || exit; \
+	@for version in $(TAMSIN_E2E_VERSION); do \
+		DOCKER_DEFAULT_PLATFORM='$(E2E_PLATFORM)' IMAGE='$(IMAGE)' TAMSIN_E2E_VERSION="$$version" ./scripts/e2e-kind.sh || exit; \
 	done

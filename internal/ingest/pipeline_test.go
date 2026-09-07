@@ -837,11 +837,7 @@ func TestPipelineStoresEssencesIndependently(t *testing.T) {
 	}
 }
 
-// TestTutorialIndependentDryRunShape is the executable contract behind the
-// first-ingest tutorial. It deliberately uses fakes at the media boundary: the
-// product promise is the planned Flow graph, and proving it must not depend on
-// a host FFmpeg build or a checked-in binary fixture.
-func TestTutorialIndependentDryRunShape(t *testing.T) {
+func TestIndependentDryRunPlansEssencesAndCollector(t *testing.T) {
 	t.Parallel()
 	filename := filepath.Join(t.TempDir(), "first-ingest.ts")
 	if err := os.WriteFile(filename, []byte("muxed-media"), 0o600); err != nil {
@@ -861,11 +857,11 @@ func TestTutorialIndependentDryRunShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	if batch.Succeeded != 1 || batch.Failed != 0 || len(batch.Results) != 1 {
-		t.Fatalf("tutorial dry run failed: %#v", batch)
+		t.Fatalf("dry run failed: %#v", batch)
 	}
 	result := batch.Results[0]
 	if len(result.Flows) != 3 {
-		t.Fatalf("tutorial A/V dry run planned %d Flows, want video, audio, and collector: %#v", len(result.Flows), result.Flows)
+		t.Fatalf("A/V dry run planned %d Flows, want video, audio, and collector: %#v", len(result.Flows), result.Flows)
 	}
 	roles := make(map[string]bool)
 	for _, flow := range result.Flows {
@@ -874,14 +870,14 @@ func TestTutorialIndependentDryRunShape(t *testing.T) {
 		}
 		if flow.FlowID == result.RootFlowID {
 			if flow.Role != "" || len(flow.Objects) != 0 {
-				t.Fatalf("tutorial root is not an empty collector: %#v", flow)
+				t.Fatalf("root is not an empty collector: %#v", flow)
 			}
 			continue
 		}
 		roles[flow.Role] = true
 	}
 	if !roles["video"] || !roles["audio"] || len(roles) != 2 {
-		t.Fatalf("tutorial essence roles = %v, want exactly video and audio", roles)
+		t.Fatalf("essence roles = %v, want exactly video and audio", roles)
 	}
 }
 
@@ -994,7 +990,7 @@ func TestPipelineIngestsVerifiesAndResumes(t *testing.T) {
 	if batch.Succeeded != 1 || batch.Failed != 0 || batch.Results[0].Status != ResultStatusIngested {
 		t.Fatalf("unexpected first result: %#v", batch)
 	}
-	if len(batch.Results[0].rootFlow().Objects) != 1 || batch.Results[0].rootFlow().Objects[0].Status != ObjectStatusIngested {
+	if len(batch.Results[0].rootFlow().Objects) != 1 || batch.Results[0].rootFlow().Objects[0].Disposition != ObjectDispositionIngested {
 		t.Fatalf("unexpected Object result: %#v", batch.Results[0].rootFlow().Objects)
 	}
 	client.lock.Lock()
@@ -1012,7 +1008,7 @@ func TestPipelineIngestsVerifiesAndResumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resumed.Results[0].Status != ResultStatusResumed || resumed.Results[0].rootFlow().Objects[0].Status != ObjectStatusResumed {
+	if resumed.Results[0].Status != ResultStatusResumed || resumed.Results[0].rootFlow().Objects[0].Disposition != ObjectDispositionResumed {
 		t.Fatalf("unexpected resumed result: %#v", resumed)
 	}
 	client.lock.Lock()
@@ -1465,13 +1461,8 @@ func TestFlowIsReadBeforeWritingAndNotAfter(t *testing.T) {
 	}
 }
 
-// TestFlowCarriesSegmentBitRates covers AppNote 0013, which defines
-// avg_bit_rate and max_bit_rate as Segment bit rates rather than essence ones.
-//
-// The distinction is not academic. A Segment carries container overhead the
-// essence figure excludes, so a reader sizing a buffer from the essence rate
-// sizes it too small -- and max_bit_rate, which is the property the buffer
-// calculation actually uses, was not being set at all.
+// AppNote 0013 defines avg_bit_rate and max_bit_rate over Segments, including
+// container overhead. Readers need these rates to size buffers.
 func TestFlowCarriesSegmentBitRates(t *testing.T) {
 	t.Parallel()
 	filename := filepath.Join(t.TempDir(), "fixture.mp4")
@@ -2171,14 +2162,8 @@ func TestSourceIdentityFollowsContentNotLocation(t *testing.T) {
 	})
 }
 
-// TestFlowMetadataWrittenElsewhereSurvivesAnIngest covers what a PUT does to a
-// Flow somebody else has been curating.
-//
-// A PUT replaces the Flow, and the schema is explicit that tags are replaced
-// rather than merged, so writing generated metadata unconditionally deleted
-// whatever had been added between runs. The loss is silent, and the system that
-// wrote the metadata is not the one running the ingest, so nobody present sees
-// it go.
+// A PUT replaces Flow metadata, including tags. Preserve operator metadata
+// when combining it with generated fields.
 func TestFlowMetadataWrittenElsewhereSurvivesAnIngest(t *testing.T) {
 	t.Parallel()
 	filename := filepath.Join(t.TempDir(), "fixture.mp4")
@@ -2250,11 +2235,9 @@ func TestFlowMetadataWrittenElsewhereSurvivesAnIngest(t *testing.T) {
 		t.Fatalf("a property Tamsin does not generate was discarded: %#v", stored)
 	}
 
-	// When Tamsin does have something to write, the same rules apply: its own
-	// fields are updated, a tag of its own that it no longer writes goes, and
-	// the rest is left alone.
+	// Updates replace TAMSin-owned tags and preserve operator metadata.
 	client.lock.Lock()
-	client.flows[flowID]["tags"].(map[string]any)[media.TagPrefix+"retired"] = "from an older build"
+	client.flows[flowID]["tags"].(map[string]any)[media.TagPrefix+"unused"] = "unrecognised value"
 	client.lock.Unlock()
 	enriched := config
 	enriched.FlowMetadata = tams.Flow{"label": "Relabelled by the operator"}
@@ -2276,18 +2259,16 @@ func TestFlowMetadataWrittenElsewhereSurvivesAnIngest(t *testing.T) {
 	if stored["read_only"] != true {
 		t.Fatalf("an update discarded a property Tamsin does not generate: %#v", stored)
 	}
-	if _, present := storedTags[media.TagPrefix+"retired"]; present {
-		t.Fatalf("a Tamsin tag this run no longer writes was kept: %#v", storedTags)
+	if _, present := storedTags[media.TagPrefix+"unused"]; present {
+		t.Fatalf("an unrecognised TAMSin-owned tag was kept: %#v", storedTags)
 	}
 	if storedTags[media.TagPrefix+"sha256"] == nil {
 		t.Fatalf("the run's own provenance tags are missing: %#v", storedTags)
 	}
 }
 
-// TestCuratedMetadataSurvivesAcrossTheWholeFlowGraph covers the paths that used
-// to bypass the ownership-aware writer: muxed children and the independent
-// collector. A resume must preserve enrichment on every member and avoid a PUT
-// when Tamsin's part of the graph is unchanged.
+// Resume must preserve operator metadata on every Flow and avoid a PUT when
+// TAMSin's part of the graph is unchanged.
 func TestCuratedMetadataSurvivesAcrossTheWholeFlowGraph(t *testing.T) {
 	t.Parallel()
 	for _, storage := range []media.EssenceStorage{media.EssenceStorageMuxed, media.EssenceStorageIndependent} {

@@ -22,11 +22,4 @@ body:
     id: alternatives
     attributes:
       label: Alternatives and trade-offs
-      description: Include existing workarounds and expected security, compatibility, performance, or resource impact.
-  - type: checkboxes
-    id: scope
-    attributes:
-      label: Scope check
-      options:
-        - label: I have checked the documentation and existing issues for this capability.
-          required: true
+      description: Existing workarounds and expected security, compatibility or resource impact.

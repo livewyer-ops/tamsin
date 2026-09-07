@@ -146,7 +146,7 @@ func (a *application) rootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "tamsin [flags] [input] [TAMS endpoint]",
 		Short:         "Ingest media into a Time-addressable Media Store",
-		Long:          "Tamsin resolves local, manifest, HTTP, and S3 inputs, creates TAMS Flows, and uploads verified Media Objects.",
+		Long:          "TAMSin resolves local, manifest, HTTP, and S3 inputs, creates TAMS Flows, and uploads verified Media Objects.",
 		Version:       version.String(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -204,29 +204,10 @@ func (a *application) rootCommand() *cobra.Command {
 	}
 
 	root.AddCommand(a.ingestCommand())
-	root.AddCommand(retiredAPICommand())
 	root.AddCommand(a.doctorCommand())
 	root.AddCommand(a.profilesCommand())
 	root.AddCommand(a.completionCommand(root))
 	return root
-}
-
-// retiredAPICommand prevents a pre-split invocation from being interpreted as
-// an implicit ingest of a local file named "api". It is hidden because it has
-// no functionality and is not part of TAMSin's command surface.
-func retiredAPICommand() *cobra.Command {
-	const migration = "tamsin api has moved to tamsctl; remove the api command segment (for example: tamsctl flow get ...)"
-	return &cobra.Command{
-		Use:                "api",
-		Short:              migration,
-		Long:               migration,
-		Hidden:             true,
-		DisableFlagParsing: true,
-		Annotations:        map[string]string{configIndependentAnnotation: "true"},
-		RunE: func(*cobra.Command, []string) error {
-			return withExit(ExitUsage, errors.New(migration))
-		},
-	}
 }
 
 func (a *application) ingestCommand() *cobra.Command {
@@ -422,6 +403,7 @@ func (a *application) validateGlobalConfig() error {
 
 type ingestFlagValues struct {
 	inputs            []string
+	inputMode         string
 	profile           string
 	profileVersion    string
 	concurrency       int
@@ -503,6 +485,7 @@ func addIngestFlags(command *cobra.Command) *ingestFlagValues {
 	values := &ingestFlagValues{}
 	flags := command.Flags()
 	flags.StringArrayVarP(&values.inputs, "input", "i", nil, "input path or URI (repeatable)")
+	flags.StringVar(&values.inputMode, "input-mode", "auto", "remote input access: auto, stream, or stage")
 	addTreatmentFlags(command, &values.profile, &values.segmentDuration, &values.segmentFormat,
 		&values.essenceStorage, &values.ffmpegArgs)
 	addReadinessFlags(command, &values.tempDirectory, &values.stagingByteBudget, &values.storageID)
@@ -514,7 +497,7 @@ func addIngestFlags(command *cobra.Command) *ingestFlagValues {
 	flags.IntVar(&values.transfers, "transfers", 0,
 		"maximum Media Object uploads and verifications in flight across the whole run (default: --concurrency)")
 	flags.IntVar(&values.probeConcurrency, "probe-concurrency", 0,
-		"maximum queued FFprobe measurements (local media processes are capped at two)")
+		"maximum queued FFprobe measurements (default: 2; local media processes are capped at two)")
 	flags.StringVar(&values.dryRun, "dry-run", string(ingest.DryRunOff),
 		"local-only planning mode: fast or exact")
 	flags.StringVar(&values.verify, "verify", string(ingest.VerificationAuto),
@@ -674,6 +657,7 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 		Concurrency: options.concurrency, Transfers: options.transfers, ProbeConcurrency: options.probeConcurrency, Retries: a.v.GetInt("http.retries"),
 		DryRunMode: ingest.DryRunMode(options.dryRun), VerificationMode: ingest.VerificationMode(options.verify),
 		TempDirectory: options.tempDirectory, StagingByteBudget: options.stagingBytes,
+		InputMode:       ingest.InputMode(options.inputMode),
 		SegmentDuration: options.segmentDuration, SegmentFormat: media.SegmentFormat(options.segmentFormat), EssenceStorage: media.EssenceStorage(options.essenceStorage), FFmpegArgs: options.ffmpegArgs, Start: start, StorageID: options.storageID,
 		FlowID: options.flowID, SourceID: options.sourceID, FlowMetadata: metadata, TAMSFlowProfiles: options.tamsFlowProfiles,
 	}, client, media.FFprobe{Executable: options.ffprobe}, media.FFmpeg{Executable: options.ffmpeg}, logger, reporter)
@@ -725,6 +709,7 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 func (a *application) ingestOptions(command *cobra.Command, args []string, raw *ingestFlagValues) (*ingestFlagValues, string, error) {
 	options := *raw
 	options.inputs = a.configStringArray(command, "input", "input")
+	options.inputMode = a.configString(command, "input-mode", "ingest.input_mode")
 	options.profile = a.configString(command, "profile", "ingest.profile")
 	options.concurrency = a.configInt(command, "concurrency", "ingest.concurrency")
 	options.transfers = a.configInt(command, "transfers", "ingest.transfers")
@@ -772,6 +757,12 @@ func (a *application) ingestOptions(command *cobra.Command, args []string, raw *
 	options.essenceStorage = string(profile.EssenceStorage)
 	if err := ingest.DryRunMode(options.dryRun).Validate(); err != nil {
 		return nil, "", err
+	}
+	if err := ingest.InputMode(options.inputMode).Validate(); err != nil {
+		return nil, "", err
+	}
+	if options.inputMode == string(ingest.InputStream) && len(options.ffmpegArgs) > 0 {
+		return nil, "", errors.New("--input-mode=stream cannot be combined with --ffmpeg-arg; use auto or stage")
 	}
 	if err := ingest.VerificationMode(options.verify).Validate(); err != nil {
 		return nil, "", err

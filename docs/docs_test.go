@@ -1,7 +1,6 @@
 package docs
 
 import (
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,6 +32,30 @@ func markdownFiles(t *testing.T) []string {
 	return files
 }
 
+func repositoryFile(t *testing.T, name string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(repoRoot, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+// headingSlugs mirrors GitHub's anchor generation closely enough for the
+// headings used here: lowercase, punctuation removed, spaces to hyphens.
+func headingSlugs(body string) map[string]bool {
+	slugs := make(map[string]bool)
+	strip := regexp.MustCompile(`[^a-z0-9 -]`)
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "#") {
+			continue
+		}
+		heading := strings.ToLower(strings.TrimSpace(strings.TrimLeft(line, "#")))
+		slugs[strings.ReplaceAll(strip.ReplaceAllString(heading, ""), " ", "-")] = true
+	}
+	return slugs
+}
+
 func TestDocumentationLinksResolve(t *testing.T) {
 	t.Parallel()
 	links := regexp.MustCompile(`\[[^\]]*\]\(([^)]+)\)`)
@@ -42,17 +65,34 @@ func TestDocumentationLinksResolve(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, match := range links.FindAllStringSubmatch(string(body), -1) {
-			target, _, _ := strings.Cut(match[1], "#")
-			if target == "" || strings.Contains(target, "://") || strings.HasPrefix(target, "mailto:") {
+			target, fragment, _ := strings.Cut(match[1], "#")
+			if strings.Contains(target, "://") || strings.HasPrefix(target, "mailto:") {
 				continue
 			}
-			if _, err := os.Stat(filepath.Join(filepath.Dir(file), target)); err != nil {
-				t.Errorf("%s links to missing %q", file, match[1])
+			resolved := file
+			if target != "" {
+				resolved = filepath.Join(filepath.Dir(file), target)
+				if _, err := os.Stat(resolved); err != nil {
+					t.Errorf("%s links to missing %q", file, match[1])
+					continue
+				}
+			}
+			if fragment == "" || !strings.HasSuffix(resolved, ".md") {
+				continue
+			}
+			page, err := os.ReadFile(resolved)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !headingSlugs(string(page))[fragment] {
+				t.Errorf("%s links to missing anchor %q", file, match[1])
 			}
 		}
 	}
 }
 
+// Every flag a document shows on a tamsin command line, or lists in the CLI
+// and configuration tables, must exist in the installed help.
 func TestDocumentedTAMSinFlagsExist(t *testing.T) {
 	t.Parallel()
 	binary := filepath.Join(t.TempDir(), "tamsin")
@@ -62,7 +102,7 @@ func TestDocumentedTAMSinFlagsExist(t *testing.T) {
 		t.Fatalf("build tamsin: %v\n%s", err, output)
 	}
 	var help strings.Builder
-	for _, args := range [][]string{{"--help"}, {"ingest", "--help"}, {"doctor", "--help"}, {"profiles", "--help"}} {
+	for _, args := range [][]string{{"--help"}, {"ingest", "--help"}, {"doctor", "--help"}, {"profiles", "--help"}, {"completion", "--help"}} {
 		output, err := exec.Command(binary, args...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("help %v: %v\n%s", args, err, output)
@@ -71,7 +111,7 @@ func TestDocumentedTAMSinFlagsExist(t *testing.T) {
 	}
 	foreign := map[string]bool{
 		"--entrypoint": true, "--rm": true, "--network": true, "--no-verify-ssl": true,
-		"--endpoint-url": true, "--source": true, "--exit-code": true,
+		"--endpoint-url": true, "--source": true, "--exit-code": true, "--mount": true,
 		"--update": true, "--cover": true, "--coverpkg": true,
 	}
 	flags := regexp.MustCompile(`--[a-z][a-z0-9-]+`)
@@ -80,8 +120,9 @@ func TestDocumentedTAMSinFlagsExist(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		table := strings.HasSuffix(file, "docs/cli.md") || strings.HasSuffix(file, "docs/configuration.md")
 		for _, line := range strings.Split(string(body), "\n") {
-			if !strings.Contains(line, "tamsin ") {
+			if !strings.Contains(line, "tamsin ") && !(table && strings.HasPrefix(line, "| `")) {
 				continue
 			}
 			for _, flag := range flags.FindAllString(line, -1) {
@@ -93,30 +134,45 @@ func TestDocumentedTAMSinFlagsExist(t *testing.T) {
 	}
 }
 
-func TestConformancePageUsesPinnedRevisions(t *testing.T) {
+// The failure-code list is a published interface; the events reference must
+// name every code the binary can emit.
+func TestEventsReferenceListsEveryFailureCode(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile(filepath.Join(repoRoot, "contracts", "tams-v8.2.json"))
-	if err != nil {
-		t.Fatal(err)
+	source := repositoryFile(t, filepath.Join("internal", "ingest", "failure.go"))
+	events := repositoryFile(t, filepath.Join("docs", "events.md"))
+	codes := regexp.MustCompile(`FailureCode[A-Za-z]+\s*=\s*"([a-z_.]+)"`).FindAllStringSubmatch(source, -1)
+	if len(codes) < 30 {
+		t.Fatalf("found only %d failure codes in failure.go", len(codes))
 	}
-	var contract struct {
-		TAMS struct {
-			Commit string `json:"commit"`
-		} `json:"tams"`
-		TAMOSS struct {
-			Commit string `json:"commit"`
-		} `json:"tamoss"`
+	for _, match := range codes {
+		if !strings.Contains(events, "`"+match[1]+"`") {
+			t.Errorf("docs/events.md does not list failure code %q", match[1])
+		}
 	}
-	if err := json.Unmarshal(data, &contract); err != nil {
-		t.Fatal(err)
+}
+
+// The compatibility page names the exact TAMS revisions the schemas and the
+// live test pin, so an upstream bump cannot leave the documentation behind.
+func TestCompatibilityPageNamesPinnedTAMSRevisions(t *testing.T) {
+	t.Parallel()
+	page := repositoryFile(t, filepath.Join("docs", "compatibility.md"))
+	revision := regexp.MustCompile(`[0-9a-f]{40}`)
+	pins := map[string][]string{
+		"internal/tamsschema/flow.go": revision.FindAllString(repositoryFile(t, filepath.Join("internal", "tamsschema", "flow.go")), -1),
 	}
-	page, err := os.ReadFile(filepath.Join(repoRoot, "docs", "explanation", "conformance.md"))
-	if err != nil {
-		t.Fatal(err)
+	for _, line := range strings.Split(repositoryFile(t, filepath.Join("scripts", "e2e-kind.sh")), "\n") {
+		if strings.Contains(line, "TAMS_COMMIT=") {
+			pins["scripts/e2e-kind.sh"] = append(pins["scripts/e2e-kind.sh"], revision.FindAllString(line, -1)...)
+		}
 	}
-	for label, revision := range map[string]string{"TAMS": contract.TAMS.Commit, "TAMOSS": contract.TAMOSS.Commit} {
-		if revision == "" || !strings.Contains(string(page), revision) {
-			t.Errorf("conformance page does not name pinned %s revision %q", label, revision)
+	for file, revisions := range pins {
+		if len(revisions) == 0 {
+			t.Fatalf("%s pins no TAMS revision", file)
+		}
+		for _, pinned := range revisions {
+			if !strings.Contains(page, pinned) {
+				t.Errorf("docs/compatibility.md does not name the TAMS revision %s pinned in %s", pinned, file)
+			}
 		}
 	}
 }

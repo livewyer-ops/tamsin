@@ -207,12 +207,6 @@ func namedProfile(selection string) (Profile, error) {
 	if versioned && version == "" {
 		return Profile{}, errors.New("ingest profile version cannot be empty")
 	}
-	switch name {
-	case "editorial":
-		return Profile{}, errors.New(`ingest profile "editorial" was replaced by "essence-segments"; update the profile selection`)
-	case "streaming-ts":
-		return Profile{}, errors.New(`ingest profile "streaming-ts" was replaced by "mpegts-segments"; update the profile selection`)
-	}
 	for _, definition := range builtInProfiles {
 		if definition.Name != name {
 			continue

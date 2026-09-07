@@ -1,26 +1,34 @@
 #!/usr/bin/env python3
-"""Extract curated release notes for a SemVer tag from CHANGELOG.md."""
+"""Extract curated release notes for a TAMSin release tag from CHANGELOG.md.
+
+A release tag is MAJOR.MINOR.PATCH-inN: MAJOR.MINOR.PATCH is the BBC TAMS API
+version targeted and N counts TAMSin releases for that API version. A trailing
+-rcM marks a release candidate. Notes come from the changelog section headed
+"## [MAJOR.MINOR.PATCH-inN] - YYYY-MM-DD"; a candidate shares the section of
+the release it precedes and gains a banner naming the candidate.
+"""
 
 import pathlib
 import re
 import sys
 
 
-CORE = r"(?:0|[1-9][0-9]*)"
-PRERELEASE_ID = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+NUMBER = r"[0-9]+"
 TAG = re.compile(
-    rf"^v(?P<major>{CORE})\.(?P<minor>{CORE})\.(?P<patch>{CORE})"
-    rf"(?:-(?P<prerelease>{PRERELEASE_ID}(?:\.{PRERELEASE_ID})*))?"
-    rf"$"
+    rf"^v?(?P<major>{NUMBER})\.(?P<minor>{NUMBER})\.(?P<patch>{NUMBER})"
+    rf"-in(?P<release>{NUMBER})(?:-rc(?P<candidate>{NUMBER}))?$"
 )
 
 
 def release_notes(tag: str, changelog: str) -> str:
     match = TAG.fullmatch(tag)
     if match is None:
-        raise ValueError(f"tag {tag!r} is not a supported SemVer release tag")
+        raise ValueError(
+            f"tag {tag!r} is not a TAMSin release tag: expected MAJOR.MINOR.PATCH-inN "
+            "or MAJOR.MINOR.PATCH-inN-rcM, for example 8.2.0-in1 or 8.2.0-in1-rc1"
+        )
 
-    version = f"{match.group('major')}.{match.group('minor')}.{match.group('patch')}"
+    version = f"{match['major']}.{match['minor']}.{match['patch']}-in{match['release']}"
     heading = re.compile(
         rf"(?m)^## \[{re.escape(version)}\] - [0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}\s*$"
     ).search(changelog)
@@ -33,12 +41,8 @@ def release_notes(tag: str, changelog: str) -> str:
     if not body:
         raise ValueError(f"CHANGELOG.md [{version}] release section is empty")
 
-    prerelease = match.group("prerelease")
-    if prerelease:
-        body = (
-            f"> Release candidate `{tag}` for `v{version}`.\n\n"
-            f"{body}"
-        )
+    if match["candidate"] is not None:
+        body = f"> Release candidate `{tag}` for `{version}`.\n\n{body}"
     return body + "\n"
 
 

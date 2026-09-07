@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/livewyer-ops/tamsin/internal/ingestevent"
 	"github.com/livewyer-ops/tamsin/internal/source"
 	"github.com/livewyer-ops/tamsin/internal/tams"
 )
@@ -82,12 +83,68 @@ func TestCancellationDoesNotEraseStrandedTerminalState(t *testing.T) {
 	t.Parallel()
 	result := Result{
 		Status: ResultStatusFailed, Verification: VerificationFailedStranded,
-		Flows: []FlowResult{{Objects: []ObjectResult{{Status: ObjectStatusStranded}}}},
+		Flows: []FlowResult{{Objects: []ObjectResult{{Disposition: ObjectDispositionStranded}}}},
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	failure := describeRunFailure(result, context.Canceled, canceled)
 	if failure.Code != FailureCodeObjectStranded || !failure.ActionRequired {
 		t.Fatalf("cancellation erased terminal recovery truth: %#v", failure)
+	}
+}
+
+func TestPublishedFailureCodesAreStable(t *testing.T) {
+	t.Parallel()
+	for _, code := range []struct{ got, want string }{
+		{FailureCodeConfigInvalid, "config.invalid"},
+		{FailureCodeAuthFailed, "authentication.failed"},
+		{FailureCodeInputFailed, "ingest.input_failures"},
+		{FailureCodeSourceFailed, "source.failed"},
+		{FailureCodeMediaFailed, "media.failed"},
+		{FailureCodeTAMSFailed, "tams.failed"},
+		{FailureCodeInterrupted, "run.interrupted"},
+		{FailureCodeRunFailed, "run.failed"},
+		{FailureCodeInputFailedGeneric, "ingest.input_failed"},
+		{FailureCodeVerificationNotReached, "verification.not_reached"},
+		{FailureCodeVerificationStranded, "verification.stranded"},
+		{FailureCodeVerificationRetracted, "verification.retracted"},
+		{FailureCodeFlowIndeterminate, "flow.indeterminate"},
+		{FailureCodeObjectStranded, "object.stranded"},
+		{FailureCodeObjectIndeterminate, "object.indeterminate"},
+		{FailureCodeHTTPRequestFailed, "tams.request_failed"},
+		{FailureCodeOutputFailed, "output.failed"},
+		{FailureCodePreflightFailed, "tams.preflight_failed"},
+		{FailureCodeStorageUnavailable, "tams.storage_unavailable"},
+		{FailureCodeFlowPlanFailed, "flow.plan_failed"},
+		{FailureCodeFlowWriteFailed, "flow.write_failed"},
+		{FailureCodeTAMSRegistrationFailed, "tams.registration_failed"},
+		{FailureCodeStagingCapacity, "staging.capacity"},
+		{FailureCodeSourceTransferFailed, "source.transfer_failed"},
+		{FailureCodeSourceChanged, "source.changed"},
+		{FailureCodeMediaAnalysisFailed, "media.analysis_failed"},
+		{FailureCodeMediaUnsupported, "media.unsupported"},
+		{FailureCodeMediaOptionsInvalid, "media.options_invalid"},
+		{FailureCodeMediaOptionsIgnored, "media.options_ignored"},
+		{FailureCodeStreamUnavailable, "source.stream_unavailable"},
+		{FailureCodeMediaToolUnavailable, "media.tool_unavailable"},
+		{FailureCodeMediaPrepareFailed, "media.prepare_failed"},
+	} {
+		if code.got != code.want {
+			t.Errorf("failure code changed from %q to %q", code.want, code.got)
+		}
+	}
+}
+
+func TestEventCodesMatchFailureCodes(t *testing.T) {
+	t.Parallel()
+	for _, pair := range [][2]string{
+		{ingestevent.DiagnosticCodeConfigInvalid, FailureCodeConfigInvalid},
+		{ingestevent.DiagnosticCodeObjectStranded, FailureCodeObjectStranded},
+		{ingestevent.InputErrorCodeRunInterrupted, FailureCodeInterrupted},
+		{ingestevent.InputErrorCodeIngestFailed, FailureCodeInputFailedGeneric},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("event code %q does not match failure code %q", pair[0], pair[1])
+		}
 	}
 }

@@ -95,6 +95,7 @@ type SegmentRequest struct {
 	StreamIndices   []int
 	Directory       string
 	AdditionalArgs  []string
+	BitExact        bool
 	// StagingWindow applies process-level backpressure while a streaming sink
 	// commits and removes completed outputs. It is optional because callers
 	// which retain every output cannot safely acknowledge reclaimed space.
@@ -206,10 +207,9 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 	if !strings.HasPrefix(extension, ".") {
 		extension = "." + extension
 	}
-	arguments := []string{
-		"-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-		"-i", request.Input,
-	}
+	arguments := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-y"}
+	arguments = append(arguments, inputOptions(request.Input)...)
+	arguments = append(arguments, "-i", request.Input)
 	outputs := make([]segmentOutput, 0, len(request.StreamIndices))
 	for outputIndex, streamIndex := range request.StreamIndices {
 		mapSpec := "0"
@@ -219,6 +219,9 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			prefix = "essence-" + strconv.Itoa(streamIndex)
 		}
 		arguments = append(arguments, "-map", mapSpec, "-c", "copy")
+		if request.BitExact {
+			arguments = append(arguments, "-fflags", "+bitexact")
+		}
 		arguments = append(arguments, request.AdditionalArgs...)
 		if request.Duration <= 0 {
 			path := filepath.Join(request.Directory, prefix+extension)
@@ -282,14 +285,17 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 	counts := make([]int, len(outputs))
 	var (
 		parsers  sync.WaitGroup
-		sinkMu   sync.Mutex
 		errMu    sync.Mutex
 		parseErr error
 	)
+	workCtx, cancelWork := context.WithCancel(ctx)
+	defer cancelWork()
+	records := make(chan SegmentRecord, maxPendingSegments)
 	recordError := func(err error) {
 		errMu.Lock()
 		if parseErr == nil {
 			parseErr = err
+			cancelWork()
 			_ = continueSegmentProcess(command.Process)
 			_ = command.Cancel()
 		}
@@ -336,16 +342,9 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 					}
 					record.FlushStaging = flush
 				}
-				sinkMu.Lock()
-				err = sink(record)
-				sinkMu.Unlock()
-				if backpressure != nil {
-					if controlErr := backpressure.afterSink(); err == nil {
-						err = controlErr
-					}
-				}
-				if err != nil {
-					recordError(err)
+				select {
+				case records <- record:
+				case <-workCtx.Done():
 					return
 				}
 				counts[index]++
@@ -355,7 +354,23 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 	}
 	waitResult := make(chan error, 1)
 	go func() { waitResult <- command.Wait() }()
-	parsers.Wait()
+	go func() { parsers.Wait(); close(records) }()
+	// Keep reading closure notifications during probing and uploads. Otherwise
+	// a slow sink prevents the high-watermark check while FFmpeg fills the disk.
+	for record := range records {
+		if workCtx.Err() != nil {
+			continue
+		}
+		err := sink(record)
+		if backpressure != nil {
+			if controlErr := backpressure.afterSink(); err == nil {
+				err = controlErr
+			}
+		}
+		if err != nil {
+			recordError(err)
+		}
+	}
 	if backpressure != nil {
 		if err := backpressure.finish(); err != nil {
 			recordError(err)
@@ -367,6 +382,9 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 	errMu.Unlock()
 	if manifestErr != nil {
 		return manifestErr
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if waitErr != nil {
 		return fmt.Errorf("segment %q: %w: %s", request.Input, waitErr, strings.TrimSpace(string(stderr.Bytes())))

@@ -12,9 +12,10 @@ fi
 license_tmp="$(mktemp -d)"
 trap 'rm -rf -- "$license_tmp"' EXIT
 
-# Pinned and checksum-verified through the Go module proxy. Required source
-# (not just licence names) is included for dependencies whose licences need it.
-go run github.com/google/go-licenses/v2@v2.0.1 save ./cmd/tamsin \
+# The tool is a go.mod tool dependency, so its version and checksums are
+# pinned in go.sum with everything else. Required source (not just licence
+# names) is included for dependencies whose licences need it.
+go tool go-licenses save ./cmd/tamsin \
   --save_path "$license_tmp/third-party-licenses"
 tar --sort=name --mtime="@$source_date_epoch" --owner=0 --group=0 --numeric-owner \
   -C "$license_tmp" -cf - third-party-licenses | gzip -n > "$license_tmp/licenses.tar.gz"

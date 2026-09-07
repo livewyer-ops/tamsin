@@ -12,43 +12,21 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/tams"
 )
 
-// registrationState records the fate of every Object after its bytes have
-// reached storage. The states are deliberately more precise than a successful
-// or failed batch: after a bulk POST loses its response, different Objects in
-// that one request can require different recovery actions.
-type registrationState string
-
-const (
-	registrationUploaded      registrationState = "uploaded"
-	registrationIndeterminate registrationState = "registration-indeterminate"
-	registrationRegistered    registrationState = "registered"
-	registrationRejected      registrationState = "registration-rejected"
-	registrationVerified      registrationState = "verified"
-	registrationRetracted     registrationState = "retracted"
-	registrationStranded      registrationState = "stranded"
-)
-
 type registrationRecord struct {
 	object  preparedObject
 	segment tams.Segment
-	state   registrationState
 }
 
-func registrationRecords(chunk []preparedObject, state registrationState) []*registrationRecord {
+func registrationRecords(chunk []preparedObject) []*registrationRecord {
 	records := make([]*registrationRecord, len(chunk))
 	for index, object := range chunk {
-		records[index] = &registrationRecord{object: object, state: state}
+		records[index] = &registrationRecord{object: object}
 	}
 	return records
 }
 
-func setRegistrationState(record *registrationRecord, state registrationState, results []ObjectResult) {
-	record.state = state
-	setObjectStatus(results, record.object.id, ObjectStatus(state))
-}
-
 func (p *Pipeline) acceptStorageVerification(ctx context.Context, record *registrationRecord, results []ObjectResult) {
-	setRegistrationState(record, registrationVerified, results)
+	setObjectDisposition(results, record.object.id, ObjectDispositionRegistered)
 	setObjectVerification(results, record.object.id, ObjectVerificationVerified, VerificationMethodStorage)
 	p.observability.Verification(record.object.size, observability.OutcomeVerified)
 	p.advanceProgress(ctx, progress.PhaseVerify, 1, record.object.size)
@@ -74,11 +52,11 @@ func (p *Pipeline) reconcileRegistrationError(ctx context.Context, flowID string
 		var registered, rejected []*registrationRecord
 		for _, record := range records {
 			if requestWasRegistered(partial.RegisteredSegments, record.object) {
-				setRegistrationState(record, registrationRegistered, results)
+				setObjectDisposition(results, record.object.id, ObjectDispositionRegistered)
 				registered = append(registered, record)
 				continue
 			}
-			setRegistrationState(record, registrationRejected, results)
+			setObjectDisposition(results, record.object.id, ObjectDispositionRejected)
 			rejected = append(rejected, record)
 		}
 		cleanupErr := p.retractRegistrationRecords(recoveryCtx, flowID, registered, results,
@@ -111,7 +89,7 @@ func (p *Pipeline) reconcileRegistrationError(ctx context.Context, flowID string
 			continue
 		}
 		record.segment = *segment
-		setRegistrationState(record, registrationRegistered, results)
+		setObjectDisposition(results, record.object.id, ObjectDispositionRegistered)
 		visible = append(visible, record)
 	}
 
@@ -207,13 +185,13 @@ func (p *Pipeline) verifyRegistrationRecordsWithPolicy(ctx context.Context, flow
 	for index, outcome := range outcomes {
 		switch outcome {
 		case outcomeVerified:
-			setRegistrationState(records[index], registrationVerified, results)
+			setObjectDisposition(results, records[index].object.id, ObjectDispositionRegistered)
 			setObjectVerification(results, records[index].object.id, ObjectVerificationVerified, VerificationMethodReadback)
 		case outcomeRetracted:
-			setRegistrationState(records[index], registrationRetracted, results)
+			setObjectDisposition(results, records[index].object.id, ObjectDispositionRetracted)
 			setObjectVerification(results, records[index].object.id, ObjectVerificationFailed, VerificationMethodReadback)
 		case outcomeRetractionFailed:
-			setRegistrationState(records[index], registrationStranded, results)
+			setObjectDisposition(results, records[index].object.id, ObjectDispositionStranded)
 			setObjectVerification(results, records[index].object.id, ObjectVerificationFailed, VerificationMethodReadback)
 		}
 	}
@@ -244,12 +222,12 @@ func (p *Pipeline) retractRegistrationRecords(ctx context.Context, flowID string
 				outcome, err := p.retractWithinRecovery(ctx, flowID, record.object,
 					fmt.Errorf("object %s: %s", record.object.id, cause))
 				if outcome == outcomeRetractionFailed {
-					setRegistrationState(record, registrationStranded, results)
+					setObjectDisposition(results, record.object.id, ObjectDispositionStranded)
 					failures[index] = fmt.Errorf("object %s (%s) is stranded: %w",
 						record.object.id, record.object.timerange, err)
 					continue
 				}
-				setRegistrationState(record, registrationRetracted, results)
+				setObjectDisposition(results, record.object.id, ObjectDispositionRetracted)
 			}
 		}()
 	}

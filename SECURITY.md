@@ -2,8 +2,9 @@
 
 ## Supported versions
 
-The latest stable minor release receives security fixes. The `main` branch and
-prereleases are development snapshots, not supported deployment targets.
+The latest `-inN` release for the newest supported TAMS API version receives
+security fixes. `-rcM` tags and the `main` branch are development snapshots,
+not supported deployment targets.
 
 ## Reporting a vulnerability
 
@@ -17,15 +18,12 @@ and disclosure, and credit reporters who want acknowledgement.
 
 ## Credential handling
 
-TAMSin accepts secrets through standard environment, configuration, and flag
-mechanisms but recommends workload identity, Kubernetes Secret environment
-injection, or a mode-`0600` local configuration file. Command-line secret flags
-can be visible to other processes.
+Use workload secret injection or a mode-`0600` configuration file. Command-line
+secrets can appear in process listings. See
+[authentication](docs/configuration.md#authentication) for setup.
 
-The process never logs configured credential values. Diagnostic and provenance
-URL rendering removes userinfo and redacts every query value; configured
-secrets are also redacted from diagnostics. The CLI omits TAMS response error
-bodies rather than displaying untrusted server text that could contain secrets.
+Diagnostics redact configured credentials and URL query values and remove URL
+userinfo. The CLI omits untrusted TAMS response error bodies.
 
 TAMS, OAuth, and presigned-transfer clients do not follow redirects.
 Cross-origin HTTP input redirects strip configured input headers. TAMS
@@ -33,32 +31,40 @@ credentials are sent only to the configured origin, including service-provided
 media URLs outside the API path. Pagination must stay within the API path.
 Cross-origin storage URLs receive only headers supplied by TAMS.
 
-Credential-bearing TAMS requests and OAuth token endpoints
-require HTTPS. `--allow-insecure-auth-loopback` is a narrow, explicit
-development exception for the exact `localhost` name or a literal loopback
-address. It cannot enable plaintext authentication to a private-network or
-remote host. OAuth authorisation codes must be obtained separately; TAMSin does
-not run a callback listener.
-
-`--insecure-skip-verify` is a development option. It disables certificate
-verification for TAMS, OAuth, HTTP input, S3 input, and presigned Object
-transfers and must not be used against production endpoints. It does not permit
-authenticated HTTP.
+Credentials require HTTPS. The loopback HTTP exception and
+`--insecure-skip-verify` are development options; do not use them in production.
+Disabling certificate verification does not permit authenticated HTTP.
 
 ## Media processing
 
 Media is untrusted input. FFprobe and FFmpeg 5.1 or newer execute as child
 processes without a shell. Arguments are passed as an array, input files are
 staged with owner-only permissions, tool output is bounded, and cancellation
-terminates children. Child processes receive an explicit operational
-environment allow-list covering paths, locale, temporary directories,
-certificate stores, dynamic-linker paths, font/media drivers, GPU selection,
-OpenMP, display/runtime directories, and essential Windows paths. TAMSin,
-cloud-credential, proxy, and `FFREPORT` variables are not inherited. Keep the
-independently installed FFmpeg package or TAMSin OCI image patched.
+terminates children. Child processes receive an operational environment
+allow-list that excludes TAMSin, cloud-credential, proxy and `FFREPORT`
+variables. Keep the installed FFmpeg package or TAMSin OCI image patched.
 
-The OCI image runs as UID/GID 65532. Mount inputs read-only and use a writable
-temporary volume when ingesting remote sources or segmenting large media.
+Every input runs with an FFmpeg protocol allowlist (`file` for local and
+staged input, `http,tcp` for the loopback bridge) and a format allowlist of
+self-contained demuxers. Playlist, manifest, concatenation and pattern
+demuxers such as HLS, DASH, concat and image sequences are refused, so a
+crafted input cannot make the media tools open other files or network hosts.
+Staged remote inputs are written under a fixed filename; the remote basename
+never reaches the tools.
+
+Stream mode serves remote bytes to the media tools through a private loopback
+URL passed as a child-process argument. That URL is readable from the process
+list by anything sharing the PID namespace, and the bridge does not check its
+peer. Use stream mode only where the container or process does not share a
+PID namespace with untrusted processes.
+
+The FFmpeg runtime image installs from a dated Debian snapshot archive and
+therefore disables APT `Check-Valid-Until` in `Dockerfile.ffmpeg`; the
+snapshot date and package versions are pinned there and revisioned with the
+runtime tag.
+
+See [containers](docs/operations.md#containers) for input permissions and
+temporary-volume requirements.
 
 ## Verification
 

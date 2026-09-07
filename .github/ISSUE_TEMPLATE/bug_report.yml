@@ -6,40 +6,25 @@ labels:
 body:
   - type: markdown
     attributes:
-      value: Do not report security vulnerabilities here. Use private vulnerability reporting instead.
+      value: Report vulnerabilities privately. Remove credentials, signed URLs and customer data from examples and logs.
   - type: input
     id: version
     attributes:
-      label: TAMSin version
-      description: Provide the release version and, for an image, its immutable digest.
-      placeholder: v1.0.0 / sha256:...
-    validations:
-      required: true
-  - type: dropdown
-    id: platform
-    attributes:
-      label: Platform
-      options:
-        - Linux amd64
-        - Linux arm64
-        - macOS amd64
-        - macOS arm64
-        - OCI / Kubernetes
-        - Source build
+      label: Version and platform
+      description: TAMSin version, OS/architecture and image digest if applicable.
     validations:
       required: true
   - type: textarea
     id: behaviour
     attributes:
       label: Expected and actual behaviour
-      description: Explain what you expected, what happened, and the operational impact.
     validations:
       required: true
   - type: textarea
     id: reproduce
     attributes:
       label: Minimal reproduction
-      description: Include redacted commands, configuration, and input characteristics. Do not attach customer media or credentials.
+      description: Include redacted commands, configuration and input characteristics.
     validations:
       required: true
   - type: textarea
@@ -53,7 +38,7 @@ body:
     attributes:
       label: Safety check
       options:
-        - label: I have removed credentials, signed-URL query values, customer data, and private media.
+        - label: I have removed credentials, signed-URL query values, customer data and private media.
           required: true
         - label: This report does not describe a security vulnerability.
           required: true

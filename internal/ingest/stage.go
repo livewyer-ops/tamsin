@@ -22,9 +22,18 @@ type stagedFile struct {
 	// copy of a remote input is ours alone and cannot change underneath us; a
 	// local input belongs to whoever is running Tamsin and may be rewritten at
 	// any point, so the two cannot be treated alike.
-	owned   bool
-	cleanup func()
-	lease   *stagingLease
+	owned    bool
+	cleanup  func()
+	lease    *stagingLease
+	bridge   *source.Bridge
+	revision string
+}
+
+func (s stagedFile) identityKey() string {
+	if s.revision != "" {
+		return s.revision
+	}
+	return s.sha256
 }
 
 func stage(ctx context.Context, item source.Item, tempRoot string, retries int, lease *stagingLease,
@@ -61,7 +70,9 @@ func stage(ctx context.Context, item source.Item, tempRoot string, retries int, 
 		lease.subtract(stagedBytes)
 		stagedBytes = 0
 	}
-	filename := filepath.Join(directory, safeFilename(item.Name))
+	// The remote name never reaches the media tools: an attacker-chosen
+	// extension must not select an extension-gated demuxer.
+	filename := filepath.Join(directory, "input.bin")
 	output, err := os.OpenFile(filename, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		_ = input.Close()

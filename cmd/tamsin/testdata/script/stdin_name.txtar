@@ -14,8 +14,7 @@ exec cat events.ndjson
 stdout '"type":"input.declared".*"input":"stdin:"'
 stdout '"type":"input.finished".*"input":"stdin:"'
 
-# Once stdin is implied, the traditional single positional argument is the
-# endpoint rather than being misclassified as a media input.
+# With stdin selected, a single positional argument specifies the endpoint.
 stdin payload.ts
 exec tamsin ingest --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact --stdin-name ingest.ts https://tams.example.test/v8.1
 cp stdout endpoint-events.ndjson
@@ -31,8 +30,7 @@ checkevents file-events.ndjson succeeded 1 0 planned
 exec cat file-events.ndjson
 ! stdout '"input":"stdin:"'
 
-# The former explicit spelling remains one stdin input, not an inferred plus
-# explicit duplicate.
+# Combining --stdin-name and -i - selects stdin once.
 stdin payload.ts
 exec tamsin ingest --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact --stdin-name ingest.ts -i -
 cp stdout explicit-events.ndjson

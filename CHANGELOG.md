@@ -1,13 +1,47 @@
 # Changelog
 
-All notable changes are documented here. TAMSin follows semantic versioning;
-the published 1.x compatibility commitments are described in
-`docs/explanation/compatibility.md`.
+All notable changes are documented here. The release compatibility policy is
+described in [Compatibility](docs/compatibility.md).
 
-## [1.0.0] - Unreleased
+Release versions are `MAJOR.MINOR.PATCH-inN`. `MAJOR.MINOR.PATCH` is the BBC
+TAMS API version the release targets and `-inN` is the Nth TAMSin release for
+that API version, so `8.2.0-in1` is the first TAMSin release targeting TAMS
+8.2. A trailing `-rcM` marks the Mth release candidate for that version, for
+example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
 
-Working notes for the forthcoming 1.0.0 release. Published versions are release
-candidates; set the release date before tagging the next candidate or final.
+## [8.2.0-in1] - 2026-09-07
+
+This release supersedes the `v1.0.0-rc.1` to `v1.0.0-rc.3` prereleases, which
+remain published but receive no further changes.
+
+### Remote input streaming
+
+- Stream seekable HTTP and S3 inputs for segmented treatments, pinning every
+  read to one source revision. Add `--input-mode=auto|stream|stage`; automatic
+  staging fallback happens before any TAMS mutation.
+- Validate closed segments before upload, retaining cadence evidence across
+  boundaries. Commit the first valid batch without waiting for a full download;
+  a later contradiction can leave a valid committed prefix.
+- Use revision-based identities for streamed inputs and retain per-Object
+  SHA-256 verification. Local and staged identities remain content-based.
+- Keep remote credentials in Go, bound queued segments during slow probes and
+  uploads, and generate deterministic streamed remux headers for resume.
+- Report `source.stream_unavailable` when `--input-mode=stream` is explicit and
+  the input cannot be streamed: no strong ETag or byte ranges, insufficient
+  initial segment evidence, or an explicit `--flow-id` Flow created from
+  staged input. In `auto` the same conditions fall back to staging.
+- Stage, rather than fail, an explicit `--flow-id` Flow created from local or
+  staged input when it is re-ingested from a streamable remote in `auto`. A
+  Flow created from streamed input re-ingested in `stage` mode fails with
+  guidance to re-run with `--input-mode=stream` or use a new Flow ID.
+- Stream inputs whose origin redirects each request to a per-request signed
+  URL instead of reporting a false `source.changed`.
+- Reset the loopback bridge reconnect budget after sustained progress, so one
+  long FFmpeg range over a large input survives repeated idle disconnects.
+- Commit the validated prefix and publish final totals when a streamed render
+  fails after the Flow graph is written.
+- Check a later segment without cadence evidence against the declared
+  interval instead of aborting the ingest.
 
 ### Release hardening
 
@@ -17,14 +51,7 @@ candidates; set the release date before tagging the next candidate or final.
   Object registration lifetime rather than URL start lifetime.
 - Distinguish Matroska from WebM using the EBML document type, keeping Flow
   media types and source-family remuxers consistent with the input bytes.
-- Keep only the vendored schemas needed for ingest, share configuration and
-  schema-loading code, and simplify per-invocation pipeline state. Check Python
-  helper files directly alongside shell scripts.
-- Preserve exact JSON numbers in metadata files and report Profile mismatches
-  with bounded, value-free field paths. Skip the redundant packet scan when
-  FFprobe reports B-frame reordering, with a real reordered-media regression.
-- Validate and decode YAML from one document, check every shell script, and
-  run both live TAMS versions by default through `make e2e`.
+- Skip the redundant packet scan when FFprobe reports B-frame reordering.
 - Include dependency licences and required corresponding source with binaries
   and in the application image. Smoke both image architectures before assigning
   release tags; restrict runtime publication to main and reject ambiguous
@@ -35,6 +62,14 @@ candidates; set the release date before tagging the next candidate or final.
 - Require FFprobe and FFmpeg 5.1 or newer before TAMS mutation. Media child
   processes receive an explicit runtime allow-list rather than inheriting cloud,
   proxy, TAMSin, or credential environment variables.
+- Run FFmpeg and FFprobe with a protocol allowlist (`file` for local and
+  staged input, `http,tcp` for the loopback bridge) and a format allowlist of
+  self-contained demuxers. Playlist, manifest, concatenation and pattern
+  demuxers such as HLS, DASH, concat and image sequences are refused, so a
+  crafted input cannot direct the media tools at other files or network
+  hosts. `preserve@1` refuses an input whose container is outside the list.
+- Stage remote inputs under a fixed filename so the remote basename never
+  reaches the media tools.
 - Strip configured HTTP-input headers on cross-origin redirects, reject URL
   user information, redact URL values from structured usage hints, and warn
   when a Unix configuration file containing secrets is group/world-readable.
@@ -42,30 +77,18 @@ candidates; set the release date before tagging the next candidate or final.
   require response-side upload checksum evidence, tolerate generated Segment
   files disappearing during directory scans, and reject explicit Flow reuse
   when its existing `source_id` identifies different material.
-- Pin the final BBC TAMS 8.2 schema and TAMOSS release contract, move vendored
-  TAMS validation schemas behind the internal package boundary, and publish
-  canonical TAMSin schema identifiers under `tamsin.livewyer.io`.
-- Size idle HTTP connection pools to configured transfer concurrency, publish
-  the complete stable failure-code vocabulary, and distinguish request timeout
+- Pin the final BBC TAMS 8.2 schema and TAMOSS test revisions.
+- Size idle HTTP connection pools to configured transfer concurrency, retain
+  stable failure codes, and distinguish request timeout
   from parent cancellation without parsing diagnostic prose.
 
-### Profile matching and command scope
+### Profile matching
 
-- Pin exact JSON-number decoding at the TAMS Profile HTTP boundary, including
-  technical metadata integers larger than 2^53, and strengthen CLI credential
-  redaction coverage across bearer, URL-token and Basic authentication.
-- Keep TAMSin documentation independent of a particular general TAMS control
-  client, clarify the layered Segment-retraction test boundary, and make the
-  retired `api` help path explain its migration rather than showing bare usage.
-- Move general TAMS discovery and administration from `tamsin api` to the
-  separate lightweight `tamsctl` client. TAMSin now retains only ingest,
-  treatment profiles, diagnostics, configuration and shell completion, and no
-  longer carries general Flow, Segment, Object, storage or raw-request commands.
 - Compare generated Flow metadata with TAMS 8.2 Flow Profiles using JSON value
-  semantics. Numerically equal metadata now matches across Go integer,
-  `json.Number`, and exactly equivalent finite floating-point representations
-  without losing precision for integers larger than 2^53; all non-numeric
-  structure and value checks remain strict.
+  semantics. Numerically equal values match, and integers larger than 2^53
+  retain their precision when read from Profile responses or metadata files.
+  Non-numeric values and structure remain strict. Mismatch diagnostics use
+  bounded field paths without exposing metadata values.
 
 ### TAMS compatibility
 
@@ -83,8 +106,7 @@ candidates; set the release date before tagging the next candidate or final.
 - Retain the 8.2 storage-allocation, storage-backend selection, and
   `init_object_id` fields used by ingest. High-level fragmented-MP4 preparation
   remains deliberately out of scope for this release.
-- Stop inventing `generation: 0` from local stream-copy policy. Generation is
-  upstream lineage metadata and is preserved or supplied by the operator.
+- Preserve operator-supplied generation metadata as upstream lineage.
 
 ### Product and performance
 
@@ -96,23 +118,28 @@ candidates; set the release date before tagging the next candidate or final.
   media processes, transfers, probing, retries, events, and retained results.
 - Make Flow identities depend on the canonical TAMS Flow Profile assignment,
   while keeping FFmpeg patch versions and status transitions out of identity.
-- Keep FFmpeg pass-through for specialist media options, while replacing the
-  general configuration framework with a focused YAML resolver.
-- Remove the duplicate result journal and public Go consumer package. Durable
-  automation output is ordinary redirection of the documented NDJSON stream.
-- Require explicit dry-run and verification mode values instead of inferring
-  a mode from a bare flag.
-- Use append-only plain progress in `auto` mode, remove terminal redraw and
-  rate/ETA calculations, and leave line wrapping to the terminal.
-- Accept only pre-obtained OAuth authorisation codes; TAMSin no longer opens a
-  browser or listens on a local callback port.
+- Support FFmpeg pass-through for specialist media options and YAML configuration.
+- Capture durable automation output by redirecting the NDJSON event stream.
+- Require explicit dry-run and verification mode values.
+- Use append-only plain progress in `auto` mode and leave line wrapping to the terminal.
+- Exchange pre-obtained OAuth authorisation codes.
+- Remove the hidden `tamsin api` command.
+- Spell TAMSin consistently in help text and label generated Flows
+  `TAMSin <digest>` instead of `Tamsin <digest>`.
 
 ### Release and supply chain
 
+- Adopt bare `MAJOR.MINOR.PATCH-inN` release tags. `go install` is not a
+  supported install path; the binaries and the image are the distribution.
 - Publish four CGO-free binaries and one non-root amd64/arm64 OCI index as
-  immutable versioned artefacts; prereleases never move the `latest` image tag.
+  immutable versioned artefacts; release candidates never move the `latest`,
+  major or minor image tags.
+- Build release binaries and the application image with the same Go 1.26
+  toolchain.
+- Pin the licence bundling tool in `go.mod` so its version and checksums are
+  verified with every other dependency.
 - Build the application on the immutable
-  `tamsin-ffmpeg-runtime:5.1.9-bookworm-r1` base pinned by index digest. Its
+  `tamsin-ffmpeg-runtime:5.1.9-bookworm-r2` base pinned by index digest. Its
   Debian snapshot, FFmpeg package, two architectures, SPDX SBOM, and provenance
   are revisioned once so normal application builds reuse the expensive runtime
   layer.
@@ -140,8 +167,6 @@ and distribution contracts.
   addressable Flows grouped by a collector Flow.
 - Use a human receipt at a terminal or the versioned
   `tamsin.ingest.events` NDJSON protocol from automation and user interfaces.
-- Retain a durable, redacted journal containing the resolved manifest and every
-  terminal input result.
 - Diagnose configuration, credentials, storage guarantees, staging capacity,
   and media-tool availability with the read-only `tamsin doctor` command.
 
@@ -156,7 +181,7 @@ and distribution contracts.
   explicit loopback-only development mode. Redirects cannot carry TAMS
   credentials or presigned storage headers to another origin.
 - Configuration files must be regular files and are limited to 2 MiB. Output,
-  journals, diagnostics, and persisted locators redact credentials and URL
+  diagnostics and persisted locators redact credentials and URL
   query values.
 - Input expansion, transfer concurrency, media measurement, child-process
   output, retries, temporary storage, and shutdown recovery are all bounded.
@@ -172,7 +197,7 @@ and distribution contracts.
 - Upload and verification workers share a process-wide transfer budget; media
   measurement has a separate process budget.
 - Default results and terminal progress retain bounded summaries. Detailed
-  per-Object records remain available through events or the journal.
+  per-Object records are available through events.
 
 ### Automation and distribution
 
@@ -192,15 +217,13 @@ and distribution contracts.
 
 ### Compatibility and limitations
 
-- TAMSin targets the pinned BBC TAMS 8.1 contract and the pinned TAMOSS
-  reference profile recorded in `contracts/tams-v8.1.json`.
+- TAMSin targets the pinned BBC TAMS 8.1 API and TAMOSS reference implementation.
 - Every profile requires `ffprobe`. Segmented and custom rendered treatments
   require `ffmpeg`; `demux@1` uses it when separating a multi-essence input,
   while `preserve@1` does not. The OCI image includes both tools.
 - Custom transcoding currently supports one essence and requires explicit
   output codec and essence metadata. Prepare multi-stream transcodes before
   ingest until per-essence output metadata is supported.
-- The public release supports finite file and object-collection ingest. It does
-  not expose the separately incubated live-broadcast capture work.
+- Support finite file and object-collection ingest.
 - TAMSin is not a TAMS server and does not manage the lifecycle or availability
   of the target service or object store.

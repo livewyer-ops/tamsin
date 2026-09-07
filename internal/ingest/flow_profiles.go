@@ -220,10 +220,20 @@ func (p *Pipeline) expandFlowProfile(ctx context.Context, member graphFlow) (gra
 }
 
 func profileMismatchMessage(mismatch *jsonValueMismatch) string {
+	reason := "values differ"
+	if !mismatch.generatedPresent {
+		reason = "field missing from generated metadata"
+	} else if !mismatch.profilePresent {
+		reason = "field missing from Profile"
+	}
+	return "TAMS Flow Profile mismatch at " + safeMetadataPointer(mismatch.path) + ": " + reason + "."
+}
+
+func safeMetadataPointer(pointer string) string {
 	// Only contract field names reach public diagnostics. Extension keys can
 	// contain credentials or terminal controls, just like metadata values.
 	path := ""
-	for _, part := range strings.Split(strings.TrimPrefix(mismatch.path, "/"), "/") {
+	for _, part := range strings.Split(strings.TrimPrefix(pointer, "/"), "/") {
 		switch part {
 		case "flow_metadata", "format", "codec", "container", "segment_duration", "container_mapping",
 			"essence_parameters", "numerator", "denominator", "frame_width", "frame_height", "frame_rate",
@@ -242,13 +252,7 @@ func profileMismatchMessage(mismatch *jsonValueMismatch) string {
 			break
 		}
 	}
-	reason := "values differ"
-	if !mismatch.generatedPresent {
-		reason = "field missing from generated metadata"
-	} else if !mismatch.profilePresent {
-		reason = "field missing from Profile"
-	}
-	return "TAMS Flow Profile mismatch at " + path + ": " + reason + "."
+	return path
 }
 
 func flowPutProjection(effective tams.Flow, profileID string) tams.Flow {

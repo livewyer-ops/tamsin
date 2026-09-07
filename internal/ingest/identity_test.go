@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -236,8 +237,7 @@ func TestGeneratedIdentityCoversEveryMediaTreatmentField(t *testing.T) {
 		t.Fatal("different media interpretation reused the same Flow")
 	}
 
-	// Argument boundaries are framed as data. These two vectors had the same
-	// NUL-joined byte representation in the old recipe.
+	// Argument boundaries must distinguish these vectors despite embedded NULs.
 	left, right := base, base
 	left.FFmpegArgs = []string{"a\x00b", "c"}
 	right.FFmpegArgs = []string{"a", "b\x00c"}
@@ -246,6 +246,74 @@ func TestGeneratedIdentityCoversEveryMediaTreatmentField(t *testing.T) {
 	}
 	if flowProfileForRendererEpoch("bytes-a", base, "1") == flowProfileForRendererEpoch("bytes-a", base, "2") {
 		t.Fatal("different renderer policy epochs reused the same treatment fingerprint")
+	}
+}
+
+func TestStreamIdentityUsesRevisionAndCallerResource(t *testing.T) {
+	t.Parallel()
+	fingerprint := func(resource, revision, sourceID string, size int64) string {
+		t.Helper()
+		pipeline, err := New(Config{InputMode: InputStream, SegmentDuration: time.Second, SourceID: sourceID, TempDirectory: t.TempDir()},
+			newFakeClient(), fakeProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pipeline.staging, err = newStagingManager(pipeline.config.TempDirectory, 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input, err := pipeline.prepareInput(t.Context(), source.Item{URI: resource, Snapshot: func(context.Context) (*source.Snapshot, error) {
+			return &source.Snapshot{Resource: resource, Revision: revision, Size: size,
+				OpenAt: func(context.Context, int64) (io.ReadCloser, error) { return io.NopCloser(strings.NewReader("")), nil }}, nil
+		}}, InputStream)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer input.cleanup()
+		return input.revision
+	}
+	const first = "https://media.example.test/input?signature=first"
+	const second = "https://media.example.test/input?signature=second"
+	const callerSource = "bd15ecbe-8ddd-48f1-a6cf-09462a11dba7"
+	want := fingerprint(first, "one", "", 10)
+	if fingerprint(first, "one", "", 10) != want {
+		t.Fatal("private bridge address changed revision identity")
+	}
+	for _, got := range []string{fingerprint(second, "one", "", 10), fingerprint(first, "two", "", 10), fingerprint(first, "one", "", 11)} {
+		if got == want {
+			t.Fatal("resource, revision or size change retained identity")
+		}
+	}
+	if fingerprint(first, "one", callerSource, 10) != fingerprint(second, "one", callerSource, 10) {
+		t.Fatal("explicit Source ID did not stabilise a refreshed input URL")
+	}
+	if fingerprint(first, "one", callerSource, 10) == fingerprint(first, "two", callerSource, 10) {
+		t.Fatal("explicit Source ID hid a changed revision")
+	}
+}
+
+func TestStreamFlowIdentityExcludesLaterMeasurementsButIncludesOverrides(t *testing.T) {
+	t.Parallel()
+	initial := tams.Flow{"format": "urn:x-nmos:format:video", "essence_parameters": map[string]any{"frame_width": 1920}}
+	measured := tams.Flow{"format": "urn:x-nmos:format:video", "avg_bit_rate": 1000000,
+		"essence_parameters": map[string]any{"frame_width": 1920, "frame_rate": map[string]any{"numerator": 25, "denominator": 1}}}
+	id := func(key string, flow tams.Flow, info media.FlowInfo, overrides tams.Flow) string {
+		t.Helper()
+		value, err := streamedFlowID(key, flow, info, overrides)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	want := id("treatment", initial, media.FlowInfo{}, nil)
+	if id("treatment", measured, media.FlowInfo{Duration: 123}, nil) != want {
+		t.Fatal("measured cadence, duration or bit rate changed Flow identity")
+	}
+	if id("treatment", measured, media.FlowInfo{}, measured) == want || id("other-treatment", initial, media.FlowInfo{}, nil) == want {
+		t.Fatal("explicit overrides or treatment did not change identity")
+	}
+	if _, exists := measured["essence_parameters"].(map[string]any)["frame_rate"]; !exists {
+		t.Fatal("identity calculation modified generated metadata")
 	}
 }
 
@@ -330,13 +398,12 @@ func TestExplicitRootStabilizesChildrenWithoutRotatingObjects(t *testing.T) {
 		t.Fatal("children of two explicit roots collided")
 	}
 
-	// Golden values pin the legacy encoding that Source and Object resume rely
-	// on. This Flow-only migration must not rotate either namespace.
+	// Source and Object identities must stay stable for resume.
 	if got := sourceIdentity("abc"); got != "51d68e09-61df-503d-bfbf-3c6c9840b2ba" {
-		t.Fatalf("legacy Source ID rotated to %s", got)
+		t.Fatalf("Source ID changed to %s", got)
 	}
 	if got := namedID("object", rootID, "deadbeef", "[0:0_1:0)"); got != "79f57cb9-346b-5200-b8a1-476e189f7b2a" {
-		t.Fatalf("legacy Object ID rotated to %s", got)
+		t.Fatalf("Object ID changed to %s", got)
 	}
 }
 

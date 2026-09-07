@@ -15,23 +15,14 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/tams"
 )
 
-// Ingest is latency-bound rather than bandwidth-bound: the cost is dominated by
-// how many sequential round trips each Media Object costs, not by how fast the
-// bytes move. Measuring against a real store makes that invisible, because the
-// number moves with whatever link the machine happens to have.
-//
-// countingClient therefore wraps a fake store, counts every call, and can
-// inject a fixed per-call delay standing in for network latency. That gives two
-// things a live benchmark cannot: an exact round-trip count, and a throughput
-// figure that is reproducible on any machine.
+// countingClient records API calls and injects per-call latency.
 type countingClient struct {
 	inner   *fakeClient
 	latency time.Duration
 
 	calls sync.Map // method name -> *atomic.Int64
 	total atomic.Int64
-	// peak records the greatest number of calls in flight at once, which is how
-	// a change to concurrency shows up rather than being inferred from timing.
+	// peak records the maximum concurrent calls.
 	inFlight atomic.Int64
 	peak     atomic.Int64
 	// Transfers are tracked separately: the transfer budget bounds Media Object
@@ -205,13 +196,73 @@ func benchFixture(tb testing.TB) source.Item {
 	return localSource(filename)
 }
 
-// TestRoundTripsPerObject pins the number of sequential store interactions each
-// Media Object costs. This is the metric worth defending: it is what makes a
-// high-latency ingest slow, and unlike throughput it does not vary with the
-// machine running the test.
-//
-// Update the expectation deliberately when reducing round trips, so a
-// regression has to be argued for rather than slipping through.
+// BenchmarkRemoteInput compares identical remote bytes and treatment. Supply
+// TAMSIN_BENCH_INPUT to measure a representative finite input instead of PCM.
+func BenchmarkRemoteInput(b *testing.B) {
+	filename := os.Getenv("TAMSIN_BENCH_INPUT")
+	if filename == "" {
+		filename = streamFixture(b, ".wav", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=180", "-c:a", "pcm_s16le")
+	}
+	for _, mode := range []InputMode{InputStage, InputStream} {
+		b.Run(string(mode), func(b *testing.B) {
+			item, read := serveStreamFixture(b, filename, time.Millisecond)
+			root := b.TempDir()
+			var firstTotal, wireTotal int64
+			var peak atomic.Int64
+			b.ResetTimer()
+			for range b.N {
+				before := read.Load()
+				client := newFakeClient()
+				started := time.Now()
+				var first int64
+				client.onRegisterSegments = func() {
+					if first == 0 {
+						first = time.Since(started).Nanoseconds()
+					}
+					// The in-process test store need not retain uploaded bytes when
+					// verification is disabled; do not count its storage as ingest RAM.
+					client.lock.Lock()
+					clear(client.objects)
+					client.lock.Unlock()
+				}
+				pipeline, err := New(Config{InputMode: mode, SegmentDuration: 10 * time.Second, EssenceStorage: media.EssenceStorageMuxed,
+					TempDirectory: root, StagingByteBudget: 64 << 20}, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
+				if err != nil {
+					b.Fatal(err)
+				}
+				done, stopped := make(chan struct{}), make(chan struct{})
+				go func() {
+					defer close(stopped)
+					ticker := time.NewTicker(10 * time.Millisecond)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-done:
+							return
+						case <-ticker.C:
+							if size, err := directoryBytes(root); err == nil {
+								recordPeak(&peak, size)
+							}
+						}
+					}
+				}()
+				batch, err := pipeline.Run(b.Context(), []source.Item{item})
+				close(done)
+				<-stopped
+				if err != nil || batch.Succeeded != 1 {
+					b.Fatalf("run=%v results=%+v", err, batch.Results)
+				}
+				firstTotal += first
+				wireTotal += read.Load() - before
+			}
+			b.ReportMetric(float64(firstTotal)/float64(b.N)/1e6, "first-object-ms")
+			b.ReportMetric(float64(wireTotal)/float64(b.N), "source-B/op")
+			b.ReportMetric(float64(peak.Load()), "peak-temp-B")
+		})
+	}
+}
+
+// TestRoundTripsPerObject checks the API call count independently of timing.
 func TestRoundTripsPerObject(t *testing.T) {
 	t.Parallel()
 	const objects = 8
@@ -259,10 +310,7 @@ func TestRoundTripsPerObject(t *testing.T) {
 	}
 }
 
-// TestTransfersRunConcurrently proves the transfer budget is actually used.
-// Before this existed, peak in-flight calls stayed at 1 no matter what
-// concurrency was set to, because a single input was served by a single worker
-// and its Media Objects were uploaded one at a time.
+// TestTransfersRunConcurrently checks that one input can use multiple transfer workers.
 func TestTransfersRunConcurrently(t *testing.T) {
 	t.Parallel()
 	const objects = 16

@@ -66,14 +66,16 @@ type Stream struct {
 	BitsPerSample      int    `json:"bits_per_sample"`
 	AverageFrameRate   string `json:"avg_frame_rate"`
 	RealFrameRate      string `json:"r_frame_rate"`
+	TimeBase           string `json:"time_base"`
 	// Cadence is derived by a separate presentation-timestamp scan. It is not
 	// an FFprobe JSON field and therefore cannot be confused with the rate
 	// summaries above.
-	Cadence     CadenceEvidence `json:"-"`
-	StartTime   string          `json:"start_time"`
-	Duration    string          `json:"duration"`
-	BitRate     string          `json:"bit_rate"`
-	Disposition struct {
+	Cadence      CadenceEvidence  `json:"-"`
+	Presentation PresentationSpan `json:"-"`
+	StartTime    string           `json:"start_time"`
+	Duration     string           `json:"duration"`
+	BitRate      string           `json:"bit_rate"`
+	Disposition  struct {
 		AttachedPicture int `json:"attached_pic"`
 	} `json:"disposition"`
 }
@@ -107,13 +109,9 @@ func (p FFprobe) Probe(ctx context.Context, filename string) (Probe, error) {
 	if executable == "" {
 		executable = "ffprobe"
 	}
-	stdout, stderr, err := runTool(ctx, executable,
-		"-v", "error",
-		"-show_streams",
-		"-show_format",
-		"-of", "json",
-		filename,
-	)
+	arguments := append([]string{"-v", "error"}, inputOptions(filename)...)
+	arguments = append(arguments, "-show_streams", "-show_format", "-of", "json", filename)
+	stdout, stderr, err := runTool(ctx, executable, arguments...)
 	if err != nil {
 		return Probe{}, fmt.Errorf("probe %q: %w: %s", filename, err, strings.TrimSpace(string(stderr)))
 	}

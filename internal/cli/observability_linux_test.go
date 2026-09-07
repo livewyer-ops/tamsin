@@ -41,8 +41,8 @@ func TestJSONTTYPublishesPermanentMetricsInTheEventStream(t *testing.T) {
 		stream.state.Finished.Retries != 0 {
 		t.Fatalf("terminal transfer metrics = %#v", stream.state.Finished)
 	}
-	if strings.Contains(stderr, `msg="ingest run metrics"`) || strings.Contains(stderr, "bytes_staged=7") {
-		t.Fatalf("obsolete INFO metrics footer was still emitted beside structured output: %q", stderr)
+	if strings.Contains(stderr, "bytes_staged=") {
+		t.Fatalf("transfer metrics were duplicated on stderr: %q", stderr)
 	}
 }
 

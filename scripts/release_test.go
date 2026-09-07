@@ -1,4 +1,4 @@
-package contracts
+package scripts
 
 import (
 	"os"
@@ -36,7 +36,9 @@ type workflowJob struct {
 }
 
 type workflow struct {
-	On   struct{ Push struct{ Branches []string } }
+	On struct {
+		Push struct{ Branches, Tags []string }
+	}
 	Jobs map[string]workflowJob
 }
 
@@ -100,8 +102,8 @@ func TestReleaseRunsVerificationAndE2EBeforePublishing(t *testing.T) {
 func TestE2ECoversBothSupportedTAMSVersions(t *testing.T) {
 	t.Parallel()
 	workflow := readWorkflow(t, "e2e.yml")
-	if !slices.Equal(workflow.Jobs["kind"].Strategy.Matrix["contract"], []string{"tams-v8.1.json", "tams-v8.2.json"}) {
-		t.Fatal("live matrix must cover both supported contracts")
+	if !slices.Equal(workflow.Jobs["kind"].Strategy.Matrix["tams-version"], []string{"8.1", "8.2"}) {
+		t.Fatal("live matrix must cover both supported TAMS versions")
 	}
 	requireText(t, repositoryFile(t, "scripts/e2e-kind.sh"),
 		"--tams-flow-profile", "service/profiles/$profile_id")
@@ -116,6 +118,19 @@ func TestRuntimePublicationFailsClosed(t *testing.T) {
 		t.Fatal("runtime publication must be restricted to main in the public repository")
 	}
 	_, _ = stepByID(t, job, "immutable-tag")
+}
+
+func TestReleasePublicationIsRestrictedToThePublicRepository(t *testing.T) {
+	t.Parallel()
+	workflow := readWorkflow(t, "release.yml")
+	if !slices.Equal(workflow.On.Push.Tags, []string{"*.*.*"}) {
+		t.Fatalf("release must trigger on bare release tags, got %q", workflow.On.Push.Tags)
+	}
+	for _, name := range []string{"verify", "publish"} {
+		if workflow.Jobs[name].If != "github.repository == 'livewyer-ops/tamsin'" {
+			t.Errorf("%s job is not restricted to the public repository", name)
+		}
+	}
 }
 
 func TestVersionedImageTagsAreNotOverwritten(t *testing.T) {
@@ -162,14 +177,44 @@ func TestReleaseImageSmokeAndTags(t *testing.T) {
 		}
 	}
 	_, tags := stepByID(t, job, "image-tags")
-	for _, version := range []string{"1.0.0-rc.4", "1.0.0"} {
-		output, err := runWorkflowShell(t, tags.Run, "printf '%s\\n' \"$@\"\n", "IMAGE=example/app", "DIGEST=sha256:test", "VERSION="+version)
+	for _, test := range []struct {
+		version string
+		moving  bool
+	}{{"8.2.0-in1-rc1", false}, {"8.2.0-in1", true}} {
+		output, err := runWorkflowShell(t, tags.Run, "printf '%s\\n' \"$@\"\n", "IMAGE=example/app", "DIGEST=sha256:test", "VERSION="+test.version)
 		if err != nil {
 			t.Fatal(err)
 		}
-		requireText(t, output, "imagetools\ncreate", "example/app:"+version, "example/app@sha256:test")
-		if strings.Contains(output, "example/app:latest") != (version == "1.0.0") {
-			t.Fatalf("incorrect moving tags: %s", output)
+		requireText(t, output, "imagetools\ncreate", "example/app:"+test.version+"\n", "example/app@sha256:test")
+		for _, tag := range []string{"example/app:8.2\n", "example/app:8\n", "example/app:latest\n"} {
+			if strings.Contains(output, tag) != test.moving {
+				t.Fatalf("%s: incorrect moving tags: %s", test.version, output)
+			}
+		}
+	}
+}
+
+func TestGitHubReleaseIsPrereleaseOnlyForCandidates(t *testing.T) {
+	t.Parallel()
+	_, step := stepByID(t, readWorkflow(t, "release.yml").Jobs["publish"], "github-release")
+	checker, err := filepath.Abs(filepath.Join(repositoryRoot, "scripts", "release-notes.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	setup := "gh() { printf '%s\\n' \"$@\"; }\n" +
+		"mkdir -p .tmp scripts && ln -s \"$RELEASE_NOTES\" scripts/release-notes.py\n" +
+		"printf '## [8.2.0-in1] - 2026-09-07\\n\\nNotes.\\n' > CHANGELOG.md\n"
+	for _, test := range []struct {
+		tag        string
+		prerelease bool
+	}{{"8.2.0-in1-rc1", true}, {"8.2.0-in1", false}} {
+		output, err := runWorkflowShell(t, setup+step.Run, "", "RELEASE_NOTES="+checker, "GITHUB_REF_NAME="+test.tag)
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", test.tag, err, output)
+		}
+		requireText(t, output, "release\ncreate\n"+test.tag+"\n", "--title\n"+test.tag+"\n", "--notes-file\n.tmp/release-notes.md\n")
+		if strings.Contains(output, "--prerelease") != test.prerelease {
+			t.Fatalf("%s: incorrect prerelease flag:\n%s", test.tag, output)
 		}
 	}
 }
@@ -194,7 +239,8 @@ func TestImageBuildExportsDigest(t *testing.T) {
 						"printf '%s\\n' \"$BUILD_METADATA\" > \"$METADATA_FILE\"\n",
 						"BUILD_METADATA="+test.metadata, "METADATA_FILE=.tmp/"+build.step+"-metadata.json",
 						"GITHUB_OUTPUT="+outputPath, "GITHUB_SHA=HEAD", "GITHUB_REPOSITORY=example/app",
-						"GITHUB_RUN_ID=1", "GITHUB_RUN_ATTEMPT=1", "RUNTIME_IMAGE=example/runtime:test")
+						"GITHUB_RUN_ID=1", "GITHUB_RUN_ATTEMPT=1", "RUNTIME_IMAGE=example/runtime:test",
+						"VERSION=0.0.0-test", "BUILD_DATE=1970-01-01T00:00:00Z")
 					if (err == nil) != test.valid {
 						t.Fatalf("build error=%v, valid=%v\n%s", err, test.valid, output)
 					}
@@ -238,6 +284,19 @@ func TestWorkflowShellSyntax(t *testing.T) {
 	}
 }
 
+func TestWorkflowScriptsReadExpressionsFromTheEnvironment(t *testing.T) {
+	t.Parallel()
+	for _, filename := range []string{"ci.yml", "release.yml", "e2e.yml", "ffmpeg-runtime.yml"} {
+		for name, job := range readWorkflow(t, filename).Jobs {
+			for _, step := range job.Steps {
+				if strings.Contains(step.Run, "${{") {
+					t.Errorf("%s/%s interpolates a workflow expression into a shell script; pass it through env", filename, name)
+				}
+			}
+		}
+	}
+}
+
 func TestApplicationImagePinsTheFFmpegRuntimeIndex(t *testing.T) {
 	t.Parallel()
 	dockerfile := repositoryFile(t, "Dockerfile")
@@ -245,8 +304,26 @@ func TestApplicationImagePinsTheFFmpegRuntimeIndex(t *testing.T) {
 	if reference == "" {
 		t.Fatal("Dockerfile does not pin the FFmpeg runtime by index digest")
 	}
-	if !strings.Contains(repositoryFile(t, "Makefile"), reference) {
-		t.Fatal("Makefile and Dockerfile use different FFmpeg runtime references")
+}
+
+func TestFFmpegRuntimeTagIsConsistent(t *testing.T) {
+	t.Parallel()
+	tags := map[string]string{}
+	for _, source := range []struct{ file, pattern string }{
+		{"Dockerfile", `(?m)^ARG FFMPEG_RUNTIME_IMAGE=ghcr\.io/livewyer-ops/tamsin-ffmpeg-runtime:([^@[:space:]]+)@sha256:[0-9a-f]{64}$`},
+		{"Dockerfile.ffmpeg", `org\.opencontainers\.image\.version="([^"]+)"`},
+		{".github/workflows/ffmpeg-runtime.yml", `(?m)^[[:space:]]*RUNTIME_IMAGE: ghcr\.io/livewyer-ops/tamsin-ffmpeg-runtime:([^[:space:]]+)$`},
+	} {
+		match := regexp.MustCompile(source.pattern).FindStringSubmatch(repositoryFile(t, source.file))
+		if match == nil {
+			t.Fatalf("%s does not name the FFmpeg runtime tag", source.file)
+		}
+		tags[source.file] = match[1]
+	}
+	for _, tag := range tags {
+		if tag != tags["Dockerfile"] {
+			t.Fatalf("FFmpeg runtime tags disagree: %v", tags)
+		}
 	}
 }
 
@@ -255,18 +332,27 @@ func TestReleaseNotesComeFromDatedChangelogSection(t *testing.T) {
 	checker := filepath.Join(repositoryRoot, "scripts", "release-notes.py")
 	changelog := filepath.Join(t.TempDir(), "CHANGELOG.md")
 	body := "# Changelog\n\n## Unreleased\n\nFuture.\n\n" +
-		"## [0.1.0] - 2026-08-10\n\nFirst release.\n\n" +
-		"## [0.0.1] - 2026-08-01\n\nEarlier.\n"
+		"## [0.1.0-in1] - 2026-08-10\n\nFirst release.\n\n" +
+		"## [0.1.0-in0] - 2026-08-01\n\nEarlier.\n"
 	if err := os.WriteFile(changelog, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(checker, "v0.1.0-rc.1", changelog)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("extract notes: %v\n%s", err, output)
-	}
-	if notes := string(output); !strings.Contains(notes, "Release candidate `v0.1.0-rc.1`") ||
-		!strings.Contains(notes, "First release.") || strings.Contains(notes, "Future.") {
-		t.Fatalf("unexpected release notes:\n%s", notes)
+	for _, test := range []struct {
+		tag, want string
+		accepted  bool
+	}{
+		{"0.1.0-in1-rc1", "> Release candidate `0.1.0-in1-rc1` for `0.1.0-in1`.\n\nFirst release.\n", true},
+		{"0.1.0-in1", "First release.\n", true},
+		{"0.1.0-in2", "no dated [0.1.0-in2] release section", false},
+		{"0.1.0", "not a TAMSin release tag", false},
+		{"v1.0.0", "not a TAMSin release tag", false},
+		{"v0.1.0-rc.1", "not a TAMSin release tag", false},
+	} {
+		output, err := exec.Command(checker, test.tag, changelog).CombinedOutput()
+		notes := string(output)
+		if (err == nil) != test.accepted || (test.accepted && notes != test.want) ||
+			(!test.accepted && !strings.Contains(notes, test.want)) {
+			t.Fatalf("%s: error=%v, accepted=%v\n%s", test.tag, err, test.accepted, notes)
+		}
 	}
 }

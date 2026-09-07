@@ -102,6 +102,7 @@ type Config struct {
 	DryRunMode       DryRunMode
 	VerificationMode VerificationMode
 	TempDirectory    string
+	InputMode        InputMode
 	// StagingByteBudget is the global number of temporary bytes concurrent
 	// inputs may reserve. Zero derives a safe budget from free space in
 	// TempDirectory; negative values are invalid.
@@ -179,21 +180,6 @@ type Pipeline struct {
 	staging *stagingManager
 }
 
-type ObjectStatus string
-
-const (
-	ObjectStatusPlanned                 ObjectStatus = "planned"
-	ObjectStatusUploaded                ObjectStatus = "uploaded"
-	ObjectStatusRegistered              ObjectStatus = "registered"
-	ObjectStatusVerified                ObjectStatus = "verified"
-	ObjectStatusResumed                 ObjectStatus = "resumed"
-	ObjectStatusIngested                ObjectStatus = "ingested"
-	ObjectStatusRetractionIndeterminate ObjectStatus = "registration-indeterminate"
-	ObjectStatusRejected                ObjectStatus = "registration-rejected"
-	ObjectStatusRetracted               ObjectStatus = "retracted"
-	ObjectStatusStranded                ObjectStatus = "stranded"
-)
-
 type ObjectResult struct {
 	ObjectID           string                   `json:"object_id"`
 	Timerange          string                   `json:"timerange"`
@@ -202,9 +188,7 @@ type ObjectResult struct {
 	Disposition        ObjectDisposition        `json:"disposition"`
 	Verification       ObjectVerificationStatus `json:"verification_status"`
 	VerificationMethod VerificationMethod       `json:"verification_method"`
-	// Status remains an internal state-machine projection while v2 exposes
-	// disposition and verification independently.
-	Status   ObjectStatus `json:"-"`
+
 	reported bool
 }
 
@@ -355,15 +339,6 @@ type BatchResult struct {
 	Results        []Result `json:"results"`
 	Succeeded      int      `json:"succeeded"`
 	Failed         int      `json:"failed"`
-}
-
-type ResultContract struct {
-	SchemaVersion  string
-	ToolVersion    string
-	ToolCommit     string
-	ToolBuildDate  string
-	ProfileVersion string
-	RunID          string
 }
 
 type ResultObserver func(index int, result Result) error

@@ -84,7 +84,7 @@ func TestAllBuiltInProfilesCompleteExactDryRuns(t *testing.T) {
 	}
 }
 
-func TestBuiltInProfileCatalogueIsStableAndDoesNotAliasRemovedNames(t *testing.T) {
+func TestBuiltInProfileCatalogueAndSelection(t *testing.T) {
 	t.Parallel()
 	definitions := BuiltInProfiles()
 	want := []string{ProfilePreserve, ProfileDemux, ProfileMuxedSegments, ProfileEssenceSegments, ProfileMPEGTSSegments}
@@ -96,12 +96,10 @@ func TestBuiltInProfileCatalogueIsStableAndDoesNotAliasRemovedNames(t *testing.T
 			t.Fatalf("catalogue[%d] = %#v, want %s@1", index, definition, want[index])
 		}
 	}
-	for removed, replacement := range map[string]string{
-		"editorial": "essence-segments", "streaming-ts": "mpegts-segments",
-	} {
-		_, err := ResolveProfile(removed, ProfileOverrides{})
-		if err == nil || !strings.Contains(err.Error(), replacement) {
-			t.Fatalf("removed profile %q error = %v, want replacement %q", removed, err, replacement)
+	for _, selection := range []string{"unknown", "unknown@1"} {
+		_, err := ResolveProfile(selection, ProfileOverrides{})
+		if err == nil || !strings.Contains(err.Error(), "unsupported ingest profile") || !strings.Contains(err.Error(), strings.Join(want, ", ")) {
+			t.Fatalf("ResolveProfile(%q) error = %v, want supported profile choices", selection, err)
 		}
 	}
 }
@@ -116,12 +114,9 @@ func TestNamedProfileVersionsAreValidatedIndependently(t *testing.T) {
 	}
 }
 
-// TestTutorialPreservationTreatment pins the exact-byte escape hatch described
-// by the first-ingest tutorial. A muxed two-stream input avoids FFmpeg only
-// when it is also whole-file; changing either dimension writes a new container
-// representation. The upload path separately proves that the no-write case
-// hashes and stores the input bytes verbatim.
-func TestTutorialPreservationTreatment(t *testing.T) {
+// A multiplex avoids rendering only when it is stored whole. Changing either
+// dimension writes a new container representation.
+func TestPreserveAvoidsRenderingWholeMuxedInput(t *testing.T) {
 	t.Parallel()
 	preserve, err := ResolveProfile(ProfilePreserve, ProfileOverrides{})
 	if err != nil {
@@ -286,7 +281,7 @@ func TestRendererEpochAndByteProfilesDeriveStableFlowIDs(t *testing.T) {
 		}
 	}
 	if rendererIdentityEpoch != "2" {
-		t.Fatalf("renderer identity epoch changed without an explicit migration: %q", rendererIdentityEpoch)
+		t.Fatalf("renderer identity epoch = %q, want 2", rendererIdentityEpoch)
 	}
 }
 

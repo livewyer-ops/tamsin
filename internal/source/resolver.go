@@ -57,6 +57,9 @@ type Item struct {
 	// Reopen resumes an interrupted read, and is nil for sources that cannot be
 	// resumed. Standard input is the obvious one: the bytes are gone once read.
 	Reopen ReopenFunc
+	// Snapshot pins a finite remote input for seekable, conditional range reads.
+	// It is nil for local files and standard input.
+	Snapshot func(context.Context) (*Snapshot, error)
 }
 
 type S3Config struct {
@@ -553,6 +556,9 @@ func (r *Resolver) resolveHTTP(parsed *url.URL) ([]Item, error) {
 			return body, err
 		},
 		Reopen: get,
+		Snapshot: func(ctx context.Context) (*Snapshot, error) {
+			return r.httpSnapshot(ctx, parsed)
+		},
 	}
 	return r.add(item)
 }
@@ -704,7 +710,7 @@ type observedRetryer struct {
 }
 
 // GetAttemptToken preserves the context-aware RetryerV2 path used by adaptive
-// mode. Merely embedding aws.Retryer would make the SDK fall back to the legacy
+// mode. Merely embedding aws.Retryer would make the SDK fall back to the
 // GetInitialToken adapter and silently disable adaptive send-rate limiting.
 func (r observedRetryer) GetAttemptToken(ctx context.Context) (func(error) error, error) {
 	if retryer, ok := r.Retryer.(aws.RetryerV2); ok {
@@ -880,6 +886,9 @@ func (r *Resolver) s3Item(client S3API, bucket, key string, size int64) Item {
 			return body, err
 		},
 		Reopen: get,
+		Snapshot: func(ctx context.Context) (*Snapshot, error) {
+			return r.s3Snapshot(ctx, client, bucket, key)
+		},
 	}
 }
 

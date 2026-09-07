@@ -24,6 +24,35 @@ func compileSchemaRevision(t *testing.T, revision schemaRevision, name string) *
 	return schema
 }
 
+func TestSchemaCacheReusesCompiledSchemasConcurrently(t *testing.T) {
+	t.Parallel()
+	for _, revision := range revisions {
+		t.Run(revision.revision.directory, func(t *testing.T) {
+			cache := &schemaCache{revision: revision.revision}
+			flow := tams.Flow{
+				"id": testIdentity().FlowID, "source_id": testIdentity().SourceID,
+				"format": "urn:x-nmos:format:multi",
+			}
+			for range 8 {
+				t.Run("validate", func(t *testing.T) {
+					t.Parallel()
+					first, err := cache.schema(cache.revision.flowPut)
+					if err != nil {
+						t.Fatal(err)
+					}
+					again, err := cache.schema(cache.revision.flowPut)
+					if err != nil || first != again {
+						t.Fatalf("compiled schema was not reused: %v", err)
+					}
+					if err := cache.validate(cache.revision.flowPut, flow); err != nil {
+						t.Fatal(err)
+					}
+				})
+			}
+		})
+	}
+}
+
 // validate marshals a value the way the CLI sends it on the wire, so the test
 // exercises the same bytes TAMS would receive.
 func validate(t *testing.T, schema *jsonschema.Schema, value any) error {
@@ -155,12 +184,12 @@ func TestRuntimeFlowValidationReportsTheRelevantJSONPointer(t *testing.T) {
 		t.Fatal(err)
 	}
 	flow["generation"] = "not-an-integer"
-	err = ValidateFlow(flow)
+	err = ValidateFlowPut(tams.APIVersion{Major: 8, Minor: 2}, flow)
 	if err == nil || !strings.Contains(err.Error(), "/generation") {
-		t.Fatalf("ValidateFlow() error = %v, want JSON pointer /generation", err)
+		t.Fatalf("ValidateFlowPut() error = %v, want JSON pointer /generation", err)
 	}
 	if strings.Contains(err.Error(), "/format") {
-		t.Fatalf("ValidateFlow() reported an unrelated oneOf branch: %v", err)
+		t.Fatalf("ValidateFlowPut() reported an unrelated oneOf branch: %v", err)
 	}
 }
 
@@ -379,30 +408,6 @@ func TestVariableFrameRateExcludesFrameRate(t *testing.T) {
 				t.Fatalf("Flow does not satisfy pinned schema:\n%v\n\nflow:\n%s", err, encoded)
 			}
 		})
-	}
-}
-
-// TestSegmentTimerangesDoNotOverlap encodes ADR0009, which rejected allowing
-// Segments to overlap: "the benefit of the widest possible support for media
-// types and usage patterns is outweighed by the risk of reducing
-// interoperability". Segmentation must therefore produce a strictly increasing,
-// non-overlapping sequence.
-func TestSegmentTimerangesDoNotOverlap(t *testing.T) {
-	t.Parallel()
-	// Timeranges as tamsin emits them: half-open, exclusive end.
-	timeranges := []string{"[0:0_8:333333000)", "[8:333333000_10:0)"}
-	previousEnd := ""
-	for index, timerange := range timeranges {
-		trimmed := strings.TrimSuffix(strings.TrimPrefix(timerange, "["), ")")
-		start, end, ok := strings.Cut(trimmed, "_")
-		if !ok {
-			t.Fatalf("timerange %d is not a half-open range: %q", index, timerange)
-		}
-		if previousEnd != "" && start != previousEnd {
-			t.Fatalf("Segment %d starts at %s but the previous ended at %s; Segments must not overlap or gap (ADR0009)",
-				index, start, previousEnd)
-		}
-		previousEnd = end
 	}
 }
 

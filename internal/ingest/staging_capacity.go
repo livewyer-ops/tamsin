@@ -189,6 +189,9 @@ func (m *stagingManager) reserve(ctx context.Context, item source.Item, config C
 		// deadlock or let two unbounded streams consume the same promise.
 		required = m.limit
 	}
+	if config.InputMode == InputStream {
+		required = min(required, m.limit)
+	}
 	if required == 0 && !unknown {
 		return &stagingLease{manager: m, label: label, artifacts: make(map[string]int64)}, 0, m.availableCapacity(), nil
 	}
@@ -466,6 +469,16 @@ func (w stagingWriter) Write(data []byte) (int, error) {
 }
 
 func estimatedStagingRequirement(item source.Item, config Config) (required int64, unknown bool, err error) {
+	if config.InputMode == InputStream {
+		if config.DryRunMode == DryRunFast {
+			return 0, false, nil
+		}
+		if item.Size >= rollingOutputWindowBytes {
+			return rollingOutputWindowBytes, false, nil
+		}
+		allowance, err := percentageWithFloor(item.Size, segmentAllowancePercent, segmentAllowanceFloor)
+		return min(allowance, rollingOutputWindowBytes), false, err
+	}
 	remote := item.LocalPath == ""
 	dryRunMode := config.DryRunMode
 	if dryRunMode == "" {

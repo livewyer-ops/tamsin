@@ -30,8 +30,7 @@ func (e *IdleTimeoutError) Error() string {
 // discarding the more specific idle-timeout cause.
 func (*IdleTimeoutError) Timeout() bool { return true }
 
-// Temporary reports that retrying a stalled transfer may succeed. It retains
-// compatibility with callers that still use net.Error's deprecated method.
+// Temporary reports that retrying a stalled transfer may succeed.
 func (*IdleTimeoutError) Temporary() bool { return true }
 
 // IdleWatch cancels one transfer attempt when its byte stream stops making
@@ -46,6 +45,7 @@ type IdleWatch struct {
 	timer    *time.Timer
 	deadline time.Time
 	stopped  bool
+	paused   bool
 }
 
 // NewIdleWatch derives a cancellable request context and starts its no-progress
@@ -78,6 +78,7 @@ func (w *IdleWatch) Progress() {
 	if w.stopped {
 		return
 	}
+	w.paused = false
 	w.deadline = time.Now().Add(w.duration)
 	// Reset schedules the next callback. If the previous callback has already
 	// started, it observes this new deadline under the same lock and returns
@@ -96,6 +97,24 @@ func (w *IdleWatch) Reader(reader io.Reader) io.Reader {
 // the same lifetime as the transfer without a second ownership protocol.
 func (w *IdleWatch) Body(body io.ReadCloser) io.ReadCloser {
 	return &idleBody{reader: idleReader{reader: body, watch: w}, body: body, watch: w}
+}
+
+// DemandBody times only reads, not time spent waiting for the consumer. It is
+// used by seekable inputs whose consumer can pause while uploading output.
+func (w *IdleWatch) DemandBody(body io.ReadCloser) io.ReadCloser {
+	w.Pause()
+	return &idleBody{reader: idleReader{reader: body, watch: w}, body: body, watch: w, demand: true}
+}
+
+// Pause suspends the idle clock without cancelling the request. Progress
+// resumes it with a fresh interval.
+func (w *IdleWatch) Pause() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.paused = true
+	if w.timer != nil {
+		w.timer.Stop()
+	}
 }
 
 // Error replaces the transport's context-cancellation symptom with its actual
@@ -133,7 +152,7 @@ func (w *IdleWatch) Stop() {
 
 func (w *IdleWatch) expire() {
 	w.mu.Lock()
-	if w.stopped {
+	if w.stopped || w.paused {
 		w.mu.Unlock()
 		return
 	}
@@ -167,9 +186,16 @@ type idleBody struct {
 	reader idleReader
 	body   io.ReadCloser
 	watch  *IdleWatch
+	demand bool
 }
 
-func (b *idleBody) Read(buffer []byte) (int, error) { return b.reader.Read(buffer) }
+func (b *idleBody) Read(buffer []byte) (int, error) {
+	if b.demand {
+		b.watch.Progress()
+		defer b.watch.Pause()
+	}
+	return b.reader.Read(buffer)
+}
 
 func (b *idleBody) Close() error {
 	// Cancel before delegating so a Close implementation waiting on the

@@ -8,6 +8,8 @@ import (
 	"sync"
 )
 
+const maxPendingSegments = 64
+
 type stagingProcess interface {
 	stop() error
 	resume() error
@@ -43,7 +45,7 @@ func (b *segmentBackpressure) beforeSink() (bool, error) {
 		b.pending--
 		return false, fmt.Errorf("measure rolling segment staging: %w", err)
 	}
-	if !b.paused && bytes >= b.window.HighBytes {
+	if !b.paused && (bytes >= b.window.HighBytes || b.pending >= maxPendingSegments) {
 		if err := b.process.stop(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			b.pending--
 			return false, fmt.Errorf("pause FFmpeg at staging high watermark: %w", err)

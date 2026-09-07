@@ -6,8 +6,7 @@ path = sys.argv[1] + "/operator/config/manager/manager.yaml"
 with open(path) as handle:
     documents = handle.read().split("\n---\n")
 
-# Written as a text edit rather than through a YAML library, because the file is
-# TAMOSS's and round-tripping it would reformat everything around the change.
+# Preserve the upstream YAML formatting.
 for index, document in enumerate(documents):
     if "\nkind: Deployment\n" not in document:
         continue

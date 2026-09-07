@@ -42,6 +42,7 @@ const (
 	FailureCodeMediaPrepareFailed     = "media.prepare_failed"
 	FailureCodeSourceChanged          = "source.changed"
 	FailureCodeMediaOptionsIgnored    = "media.options_ignored"
+	FailureCodeStreamUnavailable      = "source.stream_unavailable"
 
 	FailureMessageConfigInvalid            = "The command arguments or configuration are invalid."
 	FailureMessageAuthFailed               = "Authentication did not complete successfully."
@@ -71,7 +72,7 @@ const (
 	FailureMessageTAMSRegistrationFailed   = "Media Object registration did not complete successfully."
 	FailureMessageRunInterrupted           = "The run was interrupted."
 	FailureMessageStagingCapacity          = "The input could not reserve enough staging capacity."
-	FailureMessageSourceTransferFailed     = "The input could not be staged completely."
+	FailureMessageSourceTransferFailed     = "The input could not be read completely."
 	FailureMessageMediaAnalysisFailed      = "Media analysis did not complete successfully."
 	FailureMessageMediaContainerUnknown    = "The input container could not be identified."
 	FailureMessageMediaUnsupported         = "The input codecs are not supported by the MPEG-TS segment policy."
@@ -80,9 +81,10 @@ const (
 	FailureMessageMediaInvalidFlow         = "The input could not be described as a valid Flow."
 	FailureMessageMediaIdentityUnresolved  = "The media interpretation identity could not be derived."
 	FailureMessageMediaPrepareFailed       = "Media Objects could not be prepared."
-	FailureMessageSourceChanged            = "The local input changed while it was being ingested."
+	FailureMessageSourceChanged            = "The input changed while it was being ingested."
 	FailureMessageMediaStreamPrepareFailed = "An elemental media stream could not be prepared."
 	FailureMessageMediaOptionsIgnored      = "Media options cannot take effect when storing the source without segmentation."
+	FailureMessageStreamUnavailable        = "The input cannot be streamed as requested; use --input-mode=auto or stage."
 )
 
 type classifiedFailure struct {
@@ -149,12 +151,12 @@ func terminalStateFailure(result Result) *Failure {
 			}
 		}
 		for _, object := range flow.Objects {
-			switch object.Status {
-			case ObjectStatusStranded:
+			switch object.Disposition {
+			case ObjectDispositionStranded:
 				return &Failure{
 					Code: FailureCodeObjectStranded, Message: FailureMessageObjectStranded, ActionRequired: true,
 				}
-			case ObjectStatusRetractionIndeterminate:
+			case ObjectDispositionRegistrationIndeterminate:
 				return &Failure{
 					Code: FailureCodeObjectIndeterminate, Message: FailureMessageObjectIndeterminate, ActionRequired: true,
 				}

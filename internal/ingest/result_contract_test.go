@@ -11,6 +11,7 @@ import (
 
 	"github.com/livewyer-ops/tamsin/internal/media"
 	"github.com/livewyer-ops/tamsin/internal/source"
+	"github.com/livewyer-ops/tamsin/internal/version"
 )
 
 func TestRunObservedFlushesEveryIndexOnGracefulInterruption(t *testing.T) {
@@ -135,7 +136,7 @@ func TestRunObservedReportsEveryInputWhenStagingSetupFails(t *testing.T) {
 	assertBatchResultSchema(t, batch)
 }
 
-func TestResultContractCarriesTheSelectedProfileVersion(t *testing.T) {
+func TestBatchResultCarriesRunMetadata(t *testing.T) {
 	t.Parallel()
 	filename := filepath.Join(t.TempDir(), "input.mp4")
 	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
@@ -153,8 +154,10 @@ func TestResultContractCarriesTheSelectedProfileVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if batch.ProfileVersion != "1" || pipeline.ResultContract().ProfileVersion != batch.ProfileVersion {
-		t.Fatalf("selected profile version was not propagated: %#v", batch)
+	if batch.SchemaVersion != ResultSchemaVersion || batch.ToolVersion != version.Version ||
+		batch.ToolCommit != version.SourceCommit() || batch.ToolBuildDate != version.BuildDate() ||
+		batch.ProfileVersion != "1" || batch.RunID != pipeline.runID {
+		t.Fatalf("run metadata was not propagated: %#v", batch)
 	}
 	if batch.Results[0].Verification != VerificationNotReached {
 		t.Fatalf("dry-run verification = %q, want not_reached", batch.Results[0].Verification)

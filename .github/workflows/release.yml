@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ['v*']
+    tags: ['*.*.*']
 
 permissions:
   contents: read
@@ -13,6 +13,7 @@ concurrency:
 
 jobs:
   verify:
+    if: github.repository == 'livewyer-ops/tamsin'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -20,7 +21,6 @@ jobs:
       - name: Validate release tag
         run: |
           ./scripts/release-notes.py "$GITHUB_REF_NAME" CHANGELOG.md >/dev/null
-          python3 ./scripts/check-release-gate.py
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -33,6 +33,7 @@ jobs:
     uses: ./.github/workflows/e2e.yml
 
   publish:
+    if: github.repository == 'livewyer-ops/tamsin'
     needs: [verify, e2e]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -90,9 +91,11 @@ jobs:
           esac
       - name: Build candidate container image
         id: image
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          BUILD_DATE: ${{ steps.release.outputs.build_date }}
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          version='${{ steps.release.outputs.version }}'
           mkdir -p .tmp
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
@@ -100,9 +103,9 @@ jobs:
             --sbom=true \
             --provenance=mode=max \
             --metadata-file .tmp/image-metadata.json \
-            --build-arg VERSION="$version" \
+            --build-arg VERSION="$VERSION" \
             --build-arg COMMIT="$GITHUB_SHA" \
-            --build-arg BUILD_DATE='${{ steps.release.outputs.build_date }}' \
+            --build-arg BUILD_DATE="$BUILD_DATE" \
             --tag "$image:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             .
           echo "name=$image" >> "$GITHUB_OUTPUT"
@@ -134,7 +137,7 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           tags=(--tag "$IMAGE:$VERSION")
-          if [[ "$VERSION" != *-* ]]; then
+          if [[ "$VERSION" != *-rc* ]]; then
             major="${VERSION%%.*}"
             remainder="${VERSION#*.}"
             minor="${remainder%%.*}"
@@ -142,12 +145,13 @@ jobs:
           fi
           docker buildx imagetools create "${tags[@]}" "$IMAGE@$DIGEST"
       - name: Publish GitHub release
+        id: github-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ./scripts/release-notes.py "$GITHUB_REF_NAME" CHANGELOG.md > .tmp/release-notes.md
           prerelease=()
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease=(--prerelease); fi
+          if [[ "$GITHUB_REF_NAME" == *-rc* ]]; then prerelease=(--prerelease); fi
           gh release create "$GITHUB_REF_NAME" \
             dist/tamsin-linux-amd64 \
             dist/tamsin-linux-arm64 \

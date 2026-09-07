@@ -2,144 +2,170 @@
 
 [![CI](https://github.com/livewyer-ops/tamsin/actions/workflows/ci.yml/badge.svg)](https://github.com/livewyer-ops/tamsin/actions/workflows/ci.yml)
 [![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go)](go.mod)
-[![TAMS 8.2](https://img.shields.io/badge/BBC%20TAMS-8.2-5B2C6F)](contracts/tams-v8.2.json)
+[![TAMS 8.2](https://img.shields.io/badge/BBC%20TAMS-8.2-5B2C6F)](docs/compatibility.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-TAMSin is a small command-line utility for ingesting media into a
-[Time-addressable Media Store](https://github.com/bbc/tams). It resolves local,
-HTTP, S3 and standard-input sources; creates deterministic TAMS Flow graphs;
-uploads and registers Media Objects; and verifies the stored bytes.
+TAMSin is a command-line utility for ingesting media into a
+[BBC Time-addressable Media Store](https://github.com/bbc/tams). It creates
+Flow graphs, uploads and registers Media Objects, and verifies the stored bytes.
 
-TAMSin only handles ingest. Use
-[tamsctl](https://github.com/livewyer-ops/tamsctl) to inspect or administer a
-TAMS service.
+## Features
+
+- Ingest files, directories, manifests, HTTP, S3 and standard input.
+- Segment seekable HTTP and S3 inputs without downloading a complete local copy.
+- Choose from five explicit packaging treatments, with FFmpeg passthrough for specialist options.
+- Resume using deterministic identities, with SHA-256 verification by default.
+- Run interactively or from jobs and applications, with human receipts or streamed NDJSON results.
 
 ## Install
 
-The latest published version is `v1.0.0-rc.3`, a pre-release. This branch
-contains further changes for 1.0.0; the final release has not been published.
+Download a 64-bit binary from [8.2.0-in1](https://github.com/livewyer-ops/tamsin/releases/tag/8.2.0-in1):
 
-Download the appropriate binary from
-[GitHub Releases](https://github.com/livewyer-ops/tamsin/releases), check it
-against `SHA256SUMS`, and place it on `PATH`. For Linux amd64:
+- Linux: [Intel/AMD](https://github.com/livewyer-ops/tamsin/releases/download/8.2.0-in1/tamsin-linux-amd64), [ARM](https://github.com/livewyer-ops/tamsin/releases/download/8.2.0-in1/tamsin-linux-arm64)
+- macOS: [Intel](https://github.com/livewyer-ops/tamsin/releases/download/8.2.0-in1/tamsin-darwin-amd64), [Apple Silicon (ARM)](https://github.com/livewyer-ops/tamsin/releases/download/8.2.0-in1/tamsin-darwin-arm64)
+
+Requires FFprobe 5.1+; rendered treatments also need FFmpeg 5.1+.
+The [Docker image](#using-docker) includes both.
+
+Download [SHA256SUMS](https://github.com/livewyer-ops/tamsin/releases/download/8.2.0-in1/SHA256SUMS)
+into the same directory and verify the binary before installing:
+
+<details>
+<summary>Verify the download</summary>
+
+Run the command for your OS, replacing the filename with your download's name.
+Linux:
 
 ```sh
-version=v1.0.0-rc.3
-base="https://github.com/livewyer-ops/tamsin/releases/download/${version}"
-curl --fail --location --remote-name "${base}/tamsin-linux-amd64"
-curl --fail --location --remote-name "${base}/SHA256SUMS"
 grep ' tamsin-linux-amd64$' SHA256SUMS | sha256sum --check
-mkdir -p ~/.local/bin
-install -m 0755 tamsin-linux-amd64 ~/.local/bin/tamsin
 ```
 
-The container image includes FFmpeg and FFprobe, runs as a non-root user, and
-is published for linux/amd64 and linux/arm64 with SBOM and provenance
-attestations:
+macOS:
 
 ```sh
-docker pull ghcr.io/livewyer-ops/tamsin:1.0.0-rc.3
-docker run --rm ghcr.io/livewyer-ops/tamsin:1.0.0-rc.3 --version
+grep ' tamsin-darwin-arm64$' SHA256SUMS | shasum -a 256 --check
 ```
 
-Pin production images by digest.
+Continue only if the command succeeds and reports the file as `OK`.
+
+</details>
+
+Install the verified binary (Linux Intel/AMD shown; use your downloaded filename):
+
+```sh
+mkdir -p ~/.local/bin && install -m 0755 tamsin-linux-amd64 ~/.local/bin/tamsin
+```
+
+Run `tamsin --version`. If your shell cannot find it, see [PATH setup](docs/operations.md#troubleshooting).
 
 ## Quick start
 
-The standalone binary requires FFmpeg and FFprobe 5.1 or newer. Set the TAMS
-endpoint and credentials, check the environment, then ingest a file:
+You need:
+
+- A [supported media file](docs/profiles.md); replace `./programme.ts` below with its path.
+- A TAMS 8.2 service, or a compatible 8.1 service, and credentials authorised to ingest.
+
+Go and Kubernetes are not required to run the binary. If you need a store for
+evaluation, see [TAMOSS](https://github.com/livewyer-ops/tamoss#quickstart).
+
+Supply `TAMSIN_AUTH_TOKEN` through secret injection or an
+[interactive prompt](docs/configuration.md#authentication), then set your endpoint:
 
 ```sh
 export TAMSIN_ENDPOINT=https://tams.example.com
-export TAMSIN_AUTH_TOKEN='...'
+export TAMSIN_AUTH_MODE=bearer
 
-tamsin doctor --online
+tamsin doctor --online --profile essence-segments &&
+tamsin ingest --profile essence-segments --dry-run=exact --input ./programme.ts &&
+tamsin ingest --profile essence-segments --input ./programme.ts &&
 tamsin ingest --profile essence-segments --input ./programme.ts
 ```
 
-Use an exact dry run to inspect the planned Flow graph and media processing
-without changing TAMS:
+Doctor checks readiness without writing to TAMS. The exact dry run renders
+locally and reports `PLANNED - NO CHANGES MADE`. A first successful ingest reports
+`INGESTED AND VERIFIED`; repeating the same input and treatment reports
+`RESUMED AND VERIFIED`, verifying existing Objects without uploading duplicates.
+Each successful command exits `0`; the chain stops on failure.
+
+Allow temporary disk space and processing time, including for exact dry runs.
+Video analysis can scan the entire input even with `preserve`, and default
+verification may download uploaded Objects again. See
+[resource budgets and verification costs](docs/operations.md).
+
+For remote inputs, segmented treatments stream automatically when the server
+provides stable byte ranges. Closed segments use temporary disk space; the
+whole source need not fit. Use `--input-mode=stage` for complete input preflight
+before upload. See [input modes](docs/configuration.md#input-modes) for fallback
+and identity rules.
+
+### Using Docker
+
+The image includes FFmpeg and FFprobe, runs as a non-root user, and supports
+linux/amd64 and linux/arm64, with SBOM and provenance attestations.
+Using the same endpoint and credential environment as above:
 
 ```sh
-tamsin ingest --profile essence-segments --dry-run exact --input ./programme.ts
+docker run --rm \
+  --mount "type=bind,src=$PWD/programme.ts,dst=/media/programme.ts,readonly" \
+  -e TAMSIN_ENDPOINT -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_TOKEN \
+  ghcr.io/livewyer-ops/tamsin:8.2.0-in1 \
+  ingest --profile essence-segments --input /media/programme.ts
 ```
+
+The input must be readable by UID 65532 and the endpoint reachable from the
+container. Append `--dry-run=exact` to plan locally without changing TAMS.
+Pin deployed images by digest; see [container operation](docs/operations.md#containers)
+for permissions and temporary storage.
 
 ## Profiles
 
-A profile makes the byte-packaging policy explicit. All built-in profiles are
-versioned as `@1`:
+A treatment determines how bytes are packaged. An essence is an individual
+video, audio, image or data stream. Built-in treatments are versioned as `@1`:
 
-| Profile | Storage | Object size | Typical use |
+| Profile | Storage | Segment target | Use when |
 | --- | --- | --- | --- |
-| `preserve` | Original multiplex | Whole file | Archive and interchange |
-| `demux` | One Flow per essence | Whole essence | Analysis and downstream processing |
-| `muxed-segments` | Multiplexed | 10 seconds | Time-range access to a complete multiplex |
-| `essence-segments` | One Flow per essence | 10 seconds | TAMS-native production workflows |
-| `mpegts-segments` | One Flow per essence | 2 seconds, MPEG-TS | Systems that require short MPEG-TS Objects |
+| `preserve` | Original multiplex | Whole file | You need the original bytes unchanged |
+| `demux` | One Flow per essence | Whole essence | You need complete individual streams |
+| `muxed-segments` | Multiplexed | 10 seconds | You need time-range access to the complete multiplex |
+| `essence-segments` | One Flow per essence | 10 seconds | You need time-range access to individual streams |
+| `mpegts-segments` | One Flow per essence | 2 seconds, MPEG-TS | Your downstream system requires short MPEG-TS Objects |
 
-`--ffmpeg-arg` deliberately remains available for media-tool options not
-covered by TAMSin. Any profile override is reported as `custom@1`, making the
-departure visible in receipts and events.
+Durations are nominal: stream-copy boundaries follow source keyframes.
+`--ffmpeg-arg` supports explicit single-essence custom treatments with supplied
+output metadata. These treatments are distinct from service-owned TAMS 8.2 Flow
+Profiles assigned through `--tams-flow-profile`. Run `tamsin profiles` or read
+[profiles and supported media](docs/profiles.md) for the choices and limits.
 
-On TAMS 8.2, `--tams-flow-profile` assigns a service Flow Profile after TAMSin
-has checked the generated technical metadata against it:
+## Automation
 
-```sh
-tamsin ingest --profile essence-segments \
-  --tams-flow-profile video=60d9df18-6d9d-4b86-84bf-d1dcf14b3a28 \
-  --tams-flow-profile audio:0=8d5a25eb-35cb-423b-8e80-72258195ac2c \
-  --input ./programme.ts
-```
-
-See [profiles and supported media](docs/reference/profiles.md) for the complete
-policy.
-
-## Inputs and output
-
-`--input` accepts files, directories, line-oriented manifests, HTTP URLs, S3
-URIs and `-` for standard input. It may be repeated. Source expansion is
-atomic: no TAMS mutation begins unless every requested input resolves.
-
-Human output is a concise receipt. `--verbose` adds Flow identifiers, Object
-totals and retained recovery details; use NDJSON for planned Flow metadata and
-the complete per-Object record.
-`--quiet` suppresses successful receipts. `--progress` accepts
-`auto`, `plain` or `none`. Human progress writes only to stderr.
-
-For automation, `--format json` writes one NDJSON event at a time to stdout.
-Progress and diagnostics are events in that stream. The first event is `hello`;
-a complete run ends with `run.finished`. Redirect stdout when a durable record
-is needed:
+Human receipts summarise each input; `--verbose` adds Flow and recovery details.
+For a complete per-Object record, capture the ingest event stream:
 
 ```sh
 tamsin ingest --format json --profile preserve --input ./programme.ts \
   > run.events.jsonl
 ```
 
-Consumers must drain stdout and stderr concurrently and treat EOF before
-`run.finished` as incomplete. See the [event protocol](docs/reference/result-contract.md)
-and [exit codes](docs/reference/exit-codes.md).
+JSON mode writes one NDJSON event at a time to stdout, including progress and
+diagnostics; supporting logs use stderr. Flow planning records describe
+identifiers, relationships, format, container and assigned Profile, not complete
+Flow metadata. Consumers must drain both streams and require `run.finished`;
+EOF before it is incomplete. The finite `doctor` and `profiles` commands emit
+one JSON document instead. See [events and exit codes](docs/events.md).
 
-## Configuration and authentication
+## Documentation
 
-TAMSin reads `tamsin/config.yaml` beneath the platform's user configuration
-directory when present (`$XDG_CONFIG_HOME`, or `~/.config`, on Linux).
-Precedence is flags, environment, file, then defaults. Unknown keys and invalid
-types fail before ingest begins. Secrets should come from environment variables
-or the standard AWS credential chain, not command-line arguments or YAML.
+Use `tamsin --help` or `tamsin COMMAND --help` for installed flags and defaults.
 
-Bearer, basic, URL-token, OAuth client-credentials and pre-obtained OAuth
-authorisation-code modes are supported. TAMSin never opens a browser or runs a
-local OAuth callback server. See [configuration](docs/reference/configuration.md)
-and [authentication](docs/how-to/authenticate.md).
-
-## Compatibility
-
-TAMSin targets TAMS 8.2 and retains a tested TAMS 8.1 compatibility floor.
-The repository runs focused live TAMOSS tests for both versions. Read the
-[compatibility policy](docs/explanation/compatibility.md),
-[conformance notes](docs/explanation/conformance.md), and
-[changelog](CHANGELOG.md) before updating a pinned deployment.
+| Guide | Use it to |
+| --- | --- |
+| [CLI reference](docs/cli.md) | Look up commands, flags, defaults, value bounds and exit codes |
+| [Configuration and inputs](docs/configuration.md) | Set credentials, YAML, environment variables and source options |
+| [Profiles and media](docs/profiles.md) | Choose packaging and understand supported metadata and codecs |
+| [Operations and recovery](docs/operations.md) | Check readiness, budget resources and investigate failures |
+| [Events and exit codes](docs/events.md) | Integrate with the streaming process output |
+| [Compatibility](docs/compatibility.md) | Check TAMS versions, Profile matching and upgrade boundaries |
+| [Releasing](docs/releasing.md) | Build and publish verified binary and container releases |
 
 ## Development
 
@@ -149,6 +175,19 @@ make dist
 make image-smoke
 ```
 
-`make e2e` runs the live TAMOSS compatibility matrix and requires Docker,
-`kubectl`, `curl`, `jq`, Python 3, and the pinned tools installed through Aqua.
-See [CONTRIBUTING.md](CONTRIBUTING.md) and the [documentation map](docs/README.md).
+`make e2e` exercises both pinned TAMOSS versions. See
+[Contributing](CONTRIBUTING.md) for prerequisites and change guidance, and the
+[Changelog](CHANGELOG.md) for release notes.
+
+## Support and licence
+
+Use [GitHub Issues](https://github.com/livewyer-ops/tamsin/issues) for bugs and
+focused proposals, with the version, platform and redacted doctor report.
+Community support is best-effort. The latest `-inN` release for the newest
+supported TAMS API version is supported; `-rcM` tags and `main` are
+development snapshots. `go install` is not a supported install path: release
+tags carry no `v` prefix, so Go tooling cannot resolve them; use the release
+binaries or the image. Report security issues privately through
+[Security](SECURITY.md).
+
+TAMSin is licensed under the [Apache License 2.0](LICENSE).

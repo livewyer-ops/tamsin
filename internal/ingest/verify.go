@@ -56,21 +56,10 @@ func (e *VerificationError) Error() string {
 
 func (e *VerificationError) Unwrap() error { return e.Err }
 
-// verifyAllWithOutcomes checks every registered Object and guarantees each
-// reaches a terminal state, whatever happens to the others.
-//
-// The rule that shapes this: a checksum mismatch must not cancel its siblings'
-// cleanup. Cancelling on first error is the natural way to write concurrent
-// work, and it is wrong here — the siblings are already registered, so
-// abandoning them leaves the Flow referencing bytes nobody checked. Failures
-// are therefore collected rather than propagated, and every Object that did not
-// verify is retracted before returning.
-//
-// Cancellation of the parent context is handled the same way: whatever has been
-// registered is still retracted, on a detached context, because the Segments
-// outlive the run that created them.
-// The returned states let registration reconciliation and resume results report
-// whether each Object verified, was retracted, or was stranded.
+// verifyAllWithOutcomes checks every registered Object and attempts retraction
+// for each that fails verification. Failures must not cancel sibling cleanup.
+// Retraction shares a deadline detached from parent cancellation. Each returned
+// outcome reports whether the Object verified, was retracted, or was stranded.
 func (p *Pipeline) verifyAllWithOutcomes(ctx context.Context, flowID string, tasks []verificationTask) ([]verificationOutcome, error) {
 	var (
 		once        sync.Once
@@ -109,14 +98,8 @@ func (p *Pipeline) verifyAllOutcomes(ctx context.Context, flowID string, tasks [
 	outcomes := make([]verificationOutcome, len(tasks))
 	failures := make([]error, len(tasks))
 
-	// A fixed pool rather than a goroutine per Object. Each verification needs a
-	// slot from the transfer budget before it can do anything, so creating one
-	// per Object only parks them all on the same semaphore -- and a day of
-	// ten-second Segments is nearly nine thousand of them.
-	//
-	// errgroup would express this more briefly but cancels its context when a
-	// goroutine returns an error, and cancelling here is exactly wrong: a
-	// mismatch in one Object must not abandon the retraction of its siblings.
+	// Bound goroutines by the transfer budget. Wait for every outcome without
+	// cancelling siblings on error: they may still need to retract Segments.
 	workers := min(max(p.config.Transfers, 1), len(tasks))
 	pending := make(chan int)
 	var group sync.WaitGroup
