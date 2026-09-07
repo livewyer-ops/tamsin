@@ -121,6 +121,9 @@ jobs:
             docker run --rm --platform "$platform" "$IMAGE" doctor --format json >/dev/null
             user=$(docker run --rm --platform "$platform" --entrypoint /usr/bin/id "$IMAGE" -u)
             if ! [ "$user" -gt 0 ]; then echo "Unsafe image UID: $user" >&2; exit 1; fi
+            # The runner's image store keeps one platform per digest reference;
+            # drop it so the next platform can be pulled under the same digest.
+            docker image rm -f "$IMAGE" >/dev/null 2>&1 || true
           done
       - name: Attest container image
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
