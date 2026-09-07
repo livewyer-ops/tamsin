@@ -153,6 +153,11 @@ func (e *rollingExecution) validateSegment(record media.SegmentRecord, state *ro
 		for _, field := range []string{"format", "codec", "container", "essence_parameters"} {
 			actual, actualPresent := candidate[field]
 			declared, declaredPresent := declaredFlow[field]
+			if _, overridden := e.pipeline.config.FlowMetadata[field]; overridden && !actualPresent {
+				// The override supplies a value the media tools cannot derive;
+				// a segment that shows a different value still contradicts it.
+				continue
+			}
 			if mismatch := firstJSONValueMismatch("/"+field, actual, actualPresent, declared, declaredPresent); mismatch != nil {
 				return nil, false, fmt.Errorf("segment contradicts Flow %s at %s", member.id, safeMetadataPointer(mismatch.path))
 			}

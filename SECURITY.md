@@ -49,8 +49,8 @@ staged input, `http,tcp` for the loopback bridge) and a format allowlist of
 self-contained demuxers. Playlist, manifest, concatenation and pattern
 demuxers such as HLS, DASH, concat and image sequences are refused, so a
 crafted input cannot make the media tools open other files or network hosts.
-Staged remote inputs are written under a fixed filename; the remote basename
-never reaches the tools.
+Staged remote and stdin inputs are written as `input` plus a short
+alphanumeric extension; the remote basename never reaches the tools.
 
 Stream mode serves remote bytes to the media tools through a private loopback
 URL passed as a child-process argument. That URL is readable from the process

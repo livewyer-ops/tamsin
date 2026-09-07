@@ -434,17 +434,13 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 				returnErr = staged.bridge.Redact(returnErr)
 				return
 			}
-			var unavailable *source.StreamUnavailableError
-			if errors.As(returnErr, &unavailable) {
-				// A concurrent upstream failure forbids staging fallback even
-				// when the initial media evidence also proves insufficient.
-				returnErr = errors.New(returnErr.Error())
-			}
 			code, message := FailureCodeSourceTransferFailed, FailureMessageSourceTransferFailed
 			if errors.Is(upstream, source.ErrSnapshotChanged) {
 				code, message = FailureCodeSourceChanged, FailureMessageSourceChanged
 			}
-			returnErr = errors.Join(withFailure(code, message, true, upstream), staged.bridge.Redact(returnErr))
+			// A concurrent upstream failure forbids staging fallback even when
+			// the initial media evidence also proves insufficient.
+			returnErr = &fallbackForbiddenError{errors.Join(withFailure(code, message, true, upstream), staged.bridge.Redact(returnErr))}
 		}()
 	}
 
@@ -1694,6 +1690,9 @@ func namedID(parts ...string) string {
 
 func generatedLabel(digest string) string {
 	const prefix = "TAMSin "
+	// A streamed identity key is a labelled fingerprint; the label shows the
+	// same twelve digest characters for every input kind.
+	digest = strings.TrimPrefix(digest, "sha256:")
 	if len(digest) > 12 {
 		digest = digest[:12]
 	}

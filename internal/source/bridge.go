@@ -73,15 +73,6 @@ func NewBridge(ctx context.Context, snapshot *Snapshot, retries int, run *observ
 
 func (b *Bridge) Context() context.Context { return b.ctx }
 
-// Error prefers a failed upstream read to FFmpeg's secondary HTTP error, and
-// removes the local capability from tool diagnostics.
-func (b *Bridge) Error(err error) error {
-	if upstream := b.Upstream(); upstream != nil {
-		err = errors.Join(upstream, err)
-	}
-	return b.Redact(err)
-}
-
 // Upstream reports the first failed upstream read, if any.
 func (b *Bridge) Upstream() error {
 	b.mu.Lock()

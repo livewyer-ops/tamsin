@@ -73,8 +73,8 @@ remain published but receive no further changes.
   demuxers such as HLS, DASH, concat and image sequences are refused, so a
   crafted input cannot direct the media tools at other files or network
   hosts. `preserve@1` refuses an input whose container is outside the list.
-- Stage remote inputs under a fixed filename so the remote basename never
-  reaches the media tools.
+- Stage remote and stdin inputs as `input` plus a short alphanumeric
+  extension so the remote basename never reaches the media tools.
 - Strip configured HTTP-input headers on cross-origin redirects, reject URL
   user information, redact URL values from structured usage hints, and warn
   when a Unix configuration file containing secrets is group/world-readable.
@@ -128,7 +128,8 @@ remain published but receive no further changes.
 - Require explicit dry-run and verification mode values.
 - Use append-only plain progress in `auto` mode and leave line wrapping to the terminal.
 - Exchange pre-obtained OAuth authorisation codes.
-- Remove the hidden `tamsin api` command.
+- Keep a hidden `tamsin api` stub that reports the command's removal instead
+  of ingesting a file named `api`.
 - Spell TAMSin consistently in help text and label generated Flows
   `TAMSin <digest>` instead of `Tamsin <digest>`.
 

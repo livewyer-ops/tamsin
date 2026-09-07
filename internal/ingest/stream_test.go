@@ -451,3 +451,53 @@ func TestStagedFlowStreamRefusalAndAutomaticFallback(t *testing.T) {
 		}
 	}
 }
+
+// unsupportedCodecProber reports a codec TAMSin cannot map, so the operator
+// override is the only source of the Flow's codec.
+type unsupportedCodecProber struct{ fakeProber }
+
+func (p unsupportedCodecProber) Probe(ctx context.Context, filename string) (media.Probe, error) {
+	probe, err := p.fakeProber.Probe(ctx, filename)
+	if err == nil {
+		probe.Streams[0].CodecName = "dnxhd"
+		if strings.HasPrefix(filepath.Base(filename), "segment-") {
+			probe.Streams[0].TimeBase = "1/25"
+			probe.Streams[0].Presentation = media.PresentationSpan{Frames: 25, First: 0, Last: 24, LastDuration: 1, MinimumStep: 1, MaximumStep: 1}
+		}
+	}
+	return probe, nil
+}
+
+// An operator override that supplies what the media tools cannot derive is
+// not contradicted by segments that also cannot derive it.
+func TestStreamedSegmentsAcceptOperatorSuppliedCodec(t *testing.T) {
+	t.Parallel()
+	item := source.Item{URI: "https://media.example.test/input", Size: 10,
+		Snapshot: func(context.Context) (*source.Snapshot, error) {
+			return &source.Snapshot{Resource: "input", Revision: "one", Size: 10,
+				OpenAt: func(_ context.Context, offset int64) (io.ReadCloser, error) {
+					return io.NopCloser(strings.NewReader("0123456789"[offset:])), nil
+				}}, nil
+		},
+	}
+	client := newFakeClient()
+	pipeline, err := New(Config{InputMode: InputStream, SegmentDuration: time.Second, TempDirectory: t.TempDir(),
+		FlowMetadata: map[string]any{"codec": "video/x-dnxhd"}},
+		client, unsupportedCodecProber{}, countingSegmenter{objects: 2}, discardLogger(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := pipeline.Run(t.Context(), []source.Item{item})
+	if err != nil || batch.Failed != 0 || client.uploads != 2 {
+		t.Fatalf("run=%v uploads=%d results=%+v", err, client.uploads, batch.Results)
+	}
+}
+
+func TestGeneratedLabelUsesTheSameDigestFormForEveryInputKind(t *testing.T) {
+	t.Parallel()
+	staged := generatedLabel("1a2b3c4d5e6f7a8b9c0d")
+	streamed := generatedLabel("sha256:1a2b3c4d5e6f7a8b9c0d")
+	if staged != "TAMSin 1a2b3c4d5e6f" || streamed != staged {
+		t.Fatalf("labels: staged=%q streamed=%q", staged, streamed)
+	}
+}

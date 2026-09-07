@@ -31,12 +31,26 @@ func (m InputMode) Validate() error {
 func (p *Pipeline) ingestOne(ctx context.Context, item source.Item, storageID string) (Result, error) {
 	result, err := p.ingestInput(ctx, item, storageID, p.config.InputMode)
 	var unavailable *source.StreamUnavailableError
-	if p.config.InputMode == InputAuto && errors.As(err, &unavailable) {
-		p.logger.Warn("staging remote input", "input", safeURI(item.URI), "reason", unavailable.Reason)
+	var forbidden *fallbackForbiddenError
+	if p.config.InputMode == InputAuto && errors.As(err, &unavailable) && !errors.As(err, &forbidden) {
+		// A treatment that never streams is the documented path, not a warning.
+		level := p.logger.Warn
+		if p.config.SegmentDuration <= 0 || len(p.config.FFmpegArgs) > 0 {
+			level = p.logger.Debug
+		}
+		level("staging remote input", "input", safeURI(item.URI), "reason", unavailable.Reason)
 		return p.ingestInput(ctx, item, storageID, InputStage)
 	}
 	return result, err
 }
+
+// fallbackForbiddenError marks a streaming failure that must not be retried by
+// staging: the source itself failed or changed, so different bytes would be
+// ingested silently.
+type fallbackForbiddenError struct{ err error }
+
+func (e *fallbackForbiddenError) Error() string { return e.err.Error() }
+func (e *fallbackForbiddenError) Unwrap() error { return e.err }
 
 func (p *Pipeline) prepareInput(ctx context.Context, item source.Item, mode InputMode) (stagedFile, error) {
 	remote := strings.HasPrefix(item.URI, "http://") || strings.HasPrefix(item.URI, "https://") || strings.HasPrefix(item.URI, "s3://")

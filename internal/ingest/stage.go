@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/livewyer-ops/tamsin/internal/observability"
 	"github.com/livewyer-ops/tamsin/internal/source"
@@ -70,9 +72,7 @@ func stage(ctx context.Context, item source.Item, tempRoot string, retries int, 
 		lease.subtract(stagedBytes)
 		stagedBytes = 0
 	}
-	// The remote name never reaches the media tools: an attacker-chosen
-	// extension must not select an extension-gated demuxer.
-	filename := filepath.Join(directory, "input.bin")
+	filename := filepath.Join(directory, stagedFilename(item.Name))
 	output, err := os.OpenFile(filename, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		_ = input.Close()
@@ -148,4 +148,18 @@ func stage(ctx context.Context, item source.Item, tempRoot string, retries int, 
 		path: filename, size: size, sha256: hex.EncodeToString(hash.Sum(nil)),
 		owned: true, cleanup: cleanup, lease: lease,
 	}, nil
+}
+
+var stagedExtension = regexp.MustCompile(`^\.[a-z0-9]{1,8}$`)
+
+// stagedFilename keeps only a short alphanumeric extension from the remote or
+// stdin name, because FFmpeg selects a few raw formats by extension alone. The
+// basename itself never reaches the media tools, and the demuxer allowlist
+// decides what an extension may select.
+func stagedFilename(name string) string {
+	extension := strings.ToLower(filepath.Ext(strings.TrimSpace(name)))
+	if !stagedExtension.MatchString(extension) {
+		extension = ".bin"
+	}
+	return "input" + extension
 }

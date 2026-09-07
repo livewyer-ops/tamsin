@@ -76,7 +76,7 @@ func TestHTTPSnapshotAndPrivateBridge(t *testing.T) {
 	if _, err := snapshot.OpenAt(t.Context(), 4); !errors.Is(err, ErrSnapshotChanged) {
 		t.Fatalf("changed input: %v", err)
 	}
-	if err := bridge.Error(fmt.Errorf("probe %s failed", bridge.URL)); strings.Contains(err.Error(), bridge.URL) {
+	if err := bridge.Redact(fmt.Errorf("probe %s failed", bridge.URL)); strings.Contains(err.Error(), bridge.URL) {
 		t.Fatalf("capability leaked: %v", err)
 	}
 	bridge.Close()
@@ -243,7 +243,7 @@ func TestBridgeRetriesTruncatedRangesWithoutChangingRevision(t *testing.T) {
 				}
 			}
 			if change {
-				if err == nil || !errors.Is(bridge.Error(err), ErrSnapshotChanged) {
+				if err == nil || !errors.Is(bridge.Upstream(), ErrSnapshotChanged) {
 					t.Fatalf("changed resumed input: %v", err)
 				}
 			} else if err != nil {
@@ -329,7 +329,7 @@ func TestBridgeRejectsInvalidRangeTerminator(t *testing.T) {
 				_, _ = io.Copy(io.Discard, response.Body)
 				_ = response.Body.Close()
 			}
-			if bridge.Error(nil) == nil {
+			if bridge.Upstream() == nil {
 				t.Fatal("range serving hid an invalid body terminator")
 			}
 		})

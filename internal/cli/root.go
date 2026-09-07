@@ -204,10 +204,28 @@ func (a *application) rootCommand() *cobra.Command {
 	}
 
 	root.AddCommand(a.ingestCommand())
+	root.AddCommand(retiredAPICommand())
 	root.AddCommand(a.doctorCommand())
 	root.AddCommand(a.profilesCommand())
 	root.AddCommand(a.completionCommand(root))
 	return root
+}
+
+// retiredAPICommand stops a pre-split invocation from being read as an implicit
+// ingest of a local file named "api". It is hidden because it has no function.
+func retiredAPICommand() *cobra.Command {
+	const removed = "tamsin api was removed: TAMSin only ingests; use a general TAMS client for Flow, Segment and Object administration"
+	return &cobra.Command{
+		Use:                "api",
+		Short:              removed,
+		Long:               removed,
+		Hidden:             true,
+		DisableFlagParsing: true,
+		Annotations:        map[string]string{configIndependentAnnotation: "true"},
+		RunE: func(*cobra.Command, []string) error {
+			return withExit(ExitUsage, errors.New(removed))
+		},
+	}
 }
 
 func (a *application) ingestCommand() *cobra.Command {

@@ -367,7 +367,13 @@ func TestStageUsesAFixedFilenameForRemoteInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer staged.cleanup()
-	if filepath.Base(staged.path) != "input.bin" {
-		t.Fatalf("remote name reached the staged file: %s", staged.path)
+	if filepath.Base(staged.path) != "input.m3u8" {
+		t.Fatalf("remote basename reached the staged file: %s", staged.path)
+	}
+	for name, want := range map[string]string{"": "input.bin", "clip": "input.bin", "../x/clip.APTX": "input.aptx",
+		"a.b.verylongextension": "input.bin", "clip.m4v?sig=1": "input.bin", "stdin.bin": "input.bin"} {
+		if got := stagedFilename(name); got != want {
+			t.Errorf("stagedFilename(%q) = %q, want %q", name, got, want)
+		}
 	}
 }
