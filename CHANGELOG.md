@@ -62,8 +62,9 @@ remain published but receive no further changes.
   registry failures or attempts to reuse an existing runtime or application
   version tag.
 - Check each image architecture's running UID without requiring platform-aware
-  image inspection, keeping live tests and release smoke checks compatible with
-  the hosted Docker runner.
+  image inspection, and release the runner's local image between architectures,
+  keeping live tests and release smoke checks compatible with the hosted Docker
+  runner.
 - Pin the supported Go toolchain at 1.26.8 and run the OCI image as UID/GID
   65532 from a writable neutral work directory.
 - Require FFprobe and FFmpeg 5.1 or newer before TAMS mutation. Media child
