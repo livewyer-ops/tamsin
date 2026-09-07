@@ -40,6 +40,8 @@ remain published but receive no further changes.
   remain valid for subsequent range requests.
 - Reset the loopback bridge reconnect budget after sustained progress, so one
   long FFmpeg range over a large input survives repeated idle disconnects.
+- Stage instead of failing in `auto` when an origin rejects the byte-range
+  probe or no loopback address can be bound for the private media input.
 - Commit the validated prefix and publish final totals when a streamed render
   fails after the Flow graph is written.
 - Retain declared cadence when a later segment lacks timestamp evidence,

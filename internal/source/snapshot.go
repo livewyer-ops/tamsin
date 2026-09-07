@@ -83,8 +83,15 @@ func (r *Resolver) httpSnapshot(ctx context.Context, target *url.URL) (*Snapshot
 	if response.StatusCode == http.StatusOK || response.StatusCode == http.StatusRequestedRangeNotSatisfiable {
 		return nil, &StreamUnavailableError{Reason: "HTTP input does not provide finite byte ranges"}
 	}
-	if response.StatusCode != http.StatusPartialContent {
+	switch {
+	case response.StatusCode == http.StatusPartialContent:
+	case response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden ||
+		response.StatusCode == http.StatusProxyAuthRequired || response.StatusCode >= 500:
 		return nil, fmt.Errorf("inspect remote input: HTTP %d", response.StatusCode)
+	default:
+		// Nothing has been read yet, so an origin that rejects the range probe
+		// can still serve the whole representation to staging.
+		return nil, &StreamUnavailableError{Reason: fmt.Sprintf("HTTP input rejected the byte-range probe (HTTP %d)", response.StatusCode)}
 	}
 	etag := response.Header.Get("ETag")
 	if !validStrongETag(etag) {

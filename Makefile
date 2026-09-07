@@ -5,7 +5,7 @@ IMAGE ?= tamsin:dev
 E2E_PLATFORM ?= linux/amd64
 TAMSIN_E2E_VERSION ?= 8.1 8.2
 VERSION ?= dev
-COMMIT ?= $(shell commit=$$(git rev-parse HEAD 2>/dev/null) || commit=unknown; test -z "$$(git status --porcelain 2>/dev/null)" || commit=$$commit-dirty; printf '%s' "$$commit")
+COMMIT ?= $(shell commit=$$(git rev-parse HEAD 2>/dev/null) || commit=unknown; test -z "$$(git status --porcelain --untracked-files=no 2>/dev/null)" || commit=$$commit-dirty; printf '%s' "$$commit")
 BUILD_DATE ?= 1970-01-01T00:00:00Z
 LDFLAGS := -s -w -X github.com/livewyer-ops/tamsin/internal/version.Version=$(VERSION) -X github.com/livewyer-ops/tamsin/internal/version.Commit=$(COMMIT) -X github.com/livewyer-ops/tamsin/internal/version.Date=$(BUILD_DATE)
 

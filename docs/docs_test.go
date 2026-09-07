@@ -42,10 +42,11 @@ func repositoryFile(t *testing.T, name string) string {
 }
 
 // headingSlugs mirrors GitHub's anchor generation closely enough for the
-// headings used here: lowercase, punctuation removed, spaces to hyphens.
+// headings used here: lowercase, punctuation other than underscores removed,
+// spaces to hyphens.
 func headingSlugs(body string) map[string]bool {
 	slugs := make(map[string]bool)
-	strip := regexp.MustCompile(`[^a-z0-9 -]`)
+	strip := regexp.MustCompile(`[^a-z0-9 _-]`)
 	for _, line := range strings.Split(body, "\n") {
 		if !strings.HasPrefix(line, "#") {
 			continue

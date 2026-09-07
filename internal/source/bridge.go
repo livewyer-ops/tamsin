@@ -36,7 +36,11 @@ func NewBridge(ctx context.Context, snapshot *Snapshot, retries int, run *observ
 	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		return nil, errors.New("listen for private media input")
+		listener, err = net.Listen("tcp6", "[::1]:0")
+	}
+	if err != nil {
+		// Staging needs no listener, so auto mode may still ingest the input.
+		return nil, &StreamUnavailableError{Reason: "no loopback address is available for the private media input"}
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	path := "/" + rand.Text()

@@ -97,6 +97,9 @@ func TestHTTPSnapshotRejectsUnsafeInitialResponses(t *testing.T) {
 		{"missing ETag", "", "bytes 0-0/10", 206, true},
 		{"wrong span", `"one"`, "bytes 1-1/10", 206, false},
 		{"auth failure", "", "", 403, false},
+		{"range probe rejected", "", "", 405, true},
+		{"range probe not understood", "", "", 400, true},
+		{"origin failure", "", "", 503, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
