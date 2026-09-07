@@ -150,12 +150,15 @@ interval cannot silently change a fixed-rate Flow. A variable-rate declaration
 does permit fixed-rate stretches. Boundary checks restore the input timeline
 from segment manifests and presentation evidence, allowing one container tick
 and the manifest's microsecond rounding.
+After cadence is established, a segment without usable timestamp evidence
+retains the declaration. Other metadata is still checked, and boundary
+comparisons resume between adjacent observed segments, not across the gap.
 
-If frames have missing or non-monotonic presentation timestamps, TAMSin makes
-neither claim. TAMS has no representation for an unknown video rate, so the
-final Flow fails schema preflight. Local/staged workflows can supply complete
-`essence_parameters` through `--flow-metadata`; streaming does not bypass its
-timestamp checks for an override.
+If initial evidence cannot establish cadence, TAMSin makes neither claim.
+TAMS has no representation for an unknown video rate, so the final Flow fails
+schema preflight. Non-monotonic timestamps fail streamed validation.
+Local/staged workflows can supply complete `essence_parameters` through
+`--flow-metadata`; streaming does not bypass its timestamp checks for an override.
 
 ### Video presentation
 

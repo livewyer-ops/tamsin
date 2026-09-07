@@ -414,12 +414,40 @@ func TestStreamedSegmentWithoutCadenceEvidenceKeepsTheDeclaredPlan(t *testing.T)
 	}
 	client := newFakeClient()
 	pipeline, err := New(Config{InputMode: InputStream, SegmentDuration: time.Second, TempDirectory: t.TempDir()},
-		client, cadenceGapProber{gap: "segment-00000002.mp4"}, countingSegmenter{objects: 3}, discardLogger(), nil)
+		client, cadenceGapProber{gap: "segment-00000002.mp4"}, countingSegmenter{objects: 4}, discardLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	batch, err := pipeline.Run(t.Context(), []source.Item{item})
-	if err != nil || batch.Failed != 0 || client.uploads != 3 {
+	if err != nil || batch.Failed != 0 || client.uploads != 4 {
 		t.Fatalf("run=%v uploads=%d results=%+v", err, client.uploads, batch.Results)
+	}
+}
+
+func TestStagedFlowStreamRefusalAndAutomaticFallback(t *testing.T) {
+	filename := streamFixture(t, ".wav", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=3", "-c:a", "pcm_s16le")
+	item, _ := serveStreamFixture(t, filename, 0)
+	client := newFakeClient()
+	for _, mode := range []InputMode{InputStage, InputStream, InputAuto} {
+		pipeline, err := New(Config{FlowID: "2233e4e2-796e-4c40-990a-2b23bb7dce32", InputMode: mode,
+			SegmentDuration: time.Second, TempDirectory: t.TempDir()},
+			client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writes, uploads := client.putFlowCalls, client.uploads
+		batch, err := pipeline.Run(t.Context(), []source.Item{item})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := batch.Results[0]
+		if mode == InputStream {
+			if batch.Failed != 1 || result.Failure == nil || result.Failure.Code != FailureCodeStreamUnavailable ||
+				client.putFlowCalls != writes || client.uploads != uploads {
+				t.Fatalf("stream refusal: failure=%+v result=%+v", result.Failure, result)
+			}
+		} else if batch.Failed != 0 || (mode == InputAuto && (result.Status != ResultStatusResumed || client.uploads != uploads)) {
+			t.Fatalf("mode=%s result=%+v", mode, result)
+		}
 	}
 }

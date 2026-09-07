@@ -119,8 +119,8 @@ jobs:
           for platform in linux/amd64 linux/arm64; do
             docker run --rm --platform "$platform" "$IMAGE" --help >/dev/null
             docker run --rm --platform "$platform" "$IMAGE" doctor --format json >/dev/null
-            user=$(docker image inspect --platform "$platform" "$IMAGE" --format '{{.Config.User}}')
-            case "$user" in ''|0|0:*|root|root:*) echo "Unsafe image user: $user" >&2; exit 1 ;; esac
+            user=$(docker run --rm --platform "$platform" --entrypoint /usr/bin/id "$IMAGE" -u)
+            if ! [ "$user" -gt 0 ]; then echo "Unsafe image UID: $user" >&2; exit 1; fi
           done
       - name: Attest container image
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2

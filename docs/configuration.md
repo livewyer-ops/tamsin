@@ -200,6 +200,10 @@ Streaming requires stream-copy segmentation, a known source length and working
 byte ranges. HTTP needs a strong ETag; S3 uses a Version ID or ETag. Every read
 is pinned to that revision. Changed sources, authentication errors and invalid
 range responses fail; they do not trigger a restart onto different bytes.
+HTTP ranges reuse the exact URL discovered after initial redirects. A signed
+URL must remain valid for subsequent range requests; TAMSin does not refresh it
+by following the original redirect again. A redirect from that pinned URL to a
+different resource fails even if its ETag and length match.
 
 `preserve`, whole-file `demux` and any `--ffmpeg-arg` use staging in `auto`.
 Explicit `stream` rejects those remote workflows and cannot be combined with

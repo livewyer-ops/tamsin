@@ -76,7 +76,7 @@ e2e: image
 	$(MAKE) e2e-existing
 
 e2e-existing:
-	docker image inspect --platform '$(E2E_PLATFORM)' '$(IMAGE)' >/dev/null
+	docker image inspect '$(IMAGE)' >/dev/null
 	@for version in $(TAMSIN_E2E_VERSION); do \
 		DOCKER_DEFAULT_PLATFORM='$(E2E_PLATFORM)' IMAGE='$(IMAGE)' TAMSIN_E2E_VERSION="$$version" ./scripts/e2e-kind.sh || exit; \
 	done

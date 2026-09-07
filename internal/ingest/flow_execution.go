@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/livewyer-ops/tamsin/internal/source"
 )
 
 type flowRegistrationTarget struct {
@@ -52,6 +54,10 @@ func (p *Pipeline) executeFlowPlan(ctx context.Context, inputURI string, graph f
 func (p *Pipeline) planFlowWrites(ctx context.Context, graph flowGraph, results []FlowResult) ([]plannedFlowWrite, error) {
 	planned, err := p.planFlowGraph(ctx, graph)
 	if err != nil {
+		var unavailable *source.StreamUnavailableError
+		if errors.As(err, &unavailable) {
+			return nil, classifyPrepareFailure(err)
+		}
 		return nil, withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true, err)
 	}
 	return planned, p.observeFlowPlans(ctx, graph, planned, results)

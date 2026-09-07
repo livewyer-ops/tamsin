@@ -41,14 +41,14 @@ func snapshotURL(value *url.URL) string {
 	return copyURL.String()
 }
 
-func (r *Resolver) httpRange(ctx context.Context, target *url.URL, byteRange, etag string) (*http.Response, error) {
+func (r *Resolver) httpRange(ctx context.Context, target *url.URL, headers http.Header, byteRange, etag string) (*http.Response, error) {
 	watch := netio.NewIdleWatch(ctx, r.transferIdleTimeout)
 	request, err := http.NewRequestWithContext(watch.Context(), http.MethodGet, target.String(), nil)
 	if err != nil {
 		watch.Stop()
 		return nil, errors.New("create remote input request")
 	}
-	request.Header = r.httpHeaders.Clone()
+	request.Header = headers.Clone()
 	if request.Header == nil {
 		request.Header = make(http.Header)
 	}
@@ -75,7 +75,7 @@ func (r *Resolver) httpRange(ctx context.Context, target *url.URL, byteRange, et
 }
 
 func (r *Resolver) httpSnapshot(ctx context.Context, target *url.URL) (*Snapshot, error) {
-	response, err := r.httpRange(ctx, target, "bytes=0-0", "")
+	response, err := r.httpRange(ctx, target, r.httpHeaders, "bytes=0-0", "")
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +103,11 @@ func (r *Resolver) httpSnapshot(ctx context.Context, target *url.URL) (*Snapshot
 	if _, err := io.Copy(io.Discard, exactRangeBody(response.Body, 1)); err != nil {
 		return nil, errors.New("remote input returned an incomplete initial byte range")
 	}
-	resource := snapshotURL(response.Request.URL)
+	// Reuse the discovered resource, including its signing query. Preserve
+	// headers after redirect policy has stripped cross-origin credentials.
+	target = response.Request.URL
+	headers := response.Request.Header.Clone()
+	resource := snapshotURL(target)
 	snapshot := &Snapshot{Resource: resource, Revision: etag, Size: span.total}
 	snapshot.OpenAt = func(ctx context.Context, offset int64) (io.ReadCloser, error) {
 		if offset < 0 || offset > snapshot.Size {
@@ -112,7 +116,7 @@ func (r *Resolver) httpSnapshot(ctx context.Context, target *url.URL) (*Snapshot
 		if offset == snapshot.Size {
 			return http.NoBody, nil
 		}
-		response, err := r.httpRange(ctx, target, "bytes="+strconv.FormatInt(offset, 10)+"-", etag)
+		response, err := r.httpRange(ctx, target, headers, "bytes="+strconv.FormatInt(offset, 10)+"-", etag)
 		if err != nil {
 			return nil, err
 		}
@@ -120,10 +124,9 @@ func (r *Resolver) httpSnapshot(ctx context.Context, target *url.URL) (*Snapshot
 			_ = response.Body.Close()
 			return nil, err
 		}
-		// If-Match and the returned validator pin the revision. The effective
-		// URL is not compared: an origin may redirect every request to a
-		// freshly signed location for the same bytes.
-		if response.StatusCode == http.StatusPreconditionFailed || response.Header.Get("ETag") != etag {
+		// An ETag is scoped to one resource; matching validators on different
+		// redirect targets do not prove that their bytes are equivalent.
+		if snapshotURL(response.Request.URL) != resource || response.StatusCode == http.StatusPreconditionFailed || response.Header.Get("ETag") != etag {
 			return fail(ErrSnapshotChanged)
 		}
 		if response.StatusCode != http.StatusPartialContent {

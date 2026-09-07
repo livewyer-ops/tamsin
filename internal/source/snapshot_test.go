@@ -409,15 +409,17 @@ func TestHTTPSnapshotDoesNotTimeOutConsumerPause(t *testing.T) {
 	}
 }
 
-// An origin may answer every request with a redirect to a freshly signed
-// location. The validator pins the revision; the effective URL does not.
-func TestHTTPSnapshotFollowsPerRequestSignedRedirects(t *testing.T) {
+// Resolve a signed redirect once, then reuse that exact resource for ranges.
+func TestHTTPSnapshotPinsSignedRedirect(t *testing.T) {
 	t.Parallel()
 	var issued atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/media" {
 			http.Redirect(w, r, fmt.Sprintf("/signed?token=%d", issued.Add(1)), http.StatusFound)
 			return
+		}
+		if r.URL.RawQuery != "token=1" {
+			t.Errorf("read used a different signed resource: %q", r.URL.RawQuery)
 		}
 		w.Header().Set("ETag", `"one"`)
 		http.ServeContent(w, r, "media", time.Time{}, strings.NewReader("0123456789"))
@@ -433,12 +435,65 @@ func TestHTTPSnapshotFollowsPerRequestSignedRedirects(t *testing.T) {
 	}
 	body, err := snapshot.OpenAt(t.Context(), 4)
 	if err != nil {
-		t.Fatalf("second signed location rejected: %v", err)
+		t.Fatalf("pinned signed location rejected: %v", err)
 	}
 	data, err := io.ReadAll(body)
 	_ = body.Close()
-	if err != nil || string(data) != "456789" || issued.Load() < 2 {
+	if err != nil || string(data) != "456789" || issued.Load() != 1 {
 		t.Fatalf("data=%q err=%v redirects=%d", data, err, issued.Load())
+	}
+}
+
+func TestHTTPSnapshotDoesNotSwitchResourcesWithMatchingETags(t *testing.T) {
+	t.Parallel()
+	for _, redirectPinned := range []bool{false, true} {
+		t.Run(fmt.Sprintf("redirect_pinned=%t", redirectPinned), func(t *testing.T) {
+			var changed atomic.Bool
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/input" {
+					target := "/a"
+					if changed.Load() {
+						target = "/b"
+					}
+					http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+					return
+				}
+				if r.URL.Path == "/a" && changed.Load() && redirectPinned {
+					http.Redirect(w, r, "/b", http.StatusTemporaryRedirect)
+					return
+				}
+				data := "AAAAAAAAAA"
+				if r.URL.Path == "/b" {
+					data = "BBBBBBBBBB"
+				}
+				// Validators need not differ between distinct resources.
+				w.Header().Set("ETag", `"revision-1"`)
+				http.ServeContent(w, r, "media", time.Time{}, strings.NewReader(data))
+			}))
+			defer server.Close()
+			target, _ := url.Parse(server.URL + "/input")
+			snapshot, err := New(Config{}).httpSnapshot(t.Context(), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed.Store(true)
+			body, err := snapshot.OpenAt(t.Context(), 5)
+			if body != nil {
+				defer body.Close()
+			}
+			if redirectPinned {
+				if !errors.Is(err, ErrSnapshotChanged) {
+					t.Fatalf("changed resource accepted: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if data, err := io.ReadAll(body); err != nil || string(data) != "AAAAA" {
+				t.Fatalf("pinned range = %q, %v", data, err)
+			}
+		})
 	}
 }
 

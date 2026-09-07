@@ -34,14 +34,16 @@ remain published but receive no further changes.
   staged input when it is re-ingested from a streamable remote in `auto`. A
   Flow created from streamed input re-ingested in `stage` mode fails with
   guidance to re-run with `--input-mode=stream` or use a new Flow ID.
-- Stream inputs whose origin redirects each request to a per-request signed
-  URL instead of reporting a false `source.changed`.
+- Resolve HTTP redirects once and pin subsequent reads to that exact URL and
+  its strong ETag. Keep cross-origin credentials stripped, and reject changes
+  to the pinned resource even when its ETag and length match. Signed URLs must
+  remain valid for subsequent range requests.
 - Reset the loopback bridge reconnect budget after sustained progress, so one
   long FFmpeg range over a large input survives repeated idle disconnects.
 - Commit the validated prefix and publish final totals when a streamed render
   fails after the Flow graph is written.
-- Check a later segment without cadence evidence against the declared
-  interval instead of aborting the ingest.
+- Retain declared cadence when a later segment lacks timestamp evidence,
+  without treating the gap as a single frame interval when evidence returns.
 
 ### Release hardening
 
@@ -57,6 +59,9 @@ remain published but receive no further changes.
   release tags; restrict runtime publication to main and reject ambiguous
   registry failures or attempts to reuse an existing runtime or application
   version tag.
+- Check each image architecture's running UID without requiring platform-aware
+  image inspection, keeping live tests and release smoke checks compatible with
+  the hosted Docker runner.
 - Pin the supported Go toolchain at 1.26.8 and run the OCI image as UID/GID
   65532 from a writable neutral work directory.
 - Require FFprobe and FFmpeg 5.1 or newer before TAMS mutation. Media child

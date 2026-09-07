@@ -291,6 +291,9 @@ func (c *CadenceTimeline) Observe(stream, reference Stream, segmentEnd int64) (C
 	tick, ok := new(big.Rat).SetString(stream.TimeBase)
 	refTick, refOK := new(big.Rat).SetString(reference.TimeBase)
 	if !ok || !refOK || tick.Sign() <= 0 || refTick.Sign() <= 0 || span.Frames == 0 || ref.Frames == 0 || ref.LastDuration <= 0 {
+		// The next observed frame is not adjacent to the last one. Keep the
+		// measured interval bounds, but do not measure across missing evidence.
+		c.previous = nil
 		return CadenceUnknown, nil
 	}
 	seconds := func(ticks int64, base *big.Rat) *big.Rat {

@@ -169,11 +169,16 @@ func TestReleaseImageSmokeAndTags(t *testing.T) {
 	t.Parallel()
 	job := readWorkflow(t, "release.yml").Jobs["publish"]
 	_, smoke := stepByID(t, job, "image-smoke")
-	for _, failure := range []string{"", "linux/amd64", "linux/arm64"} {
-		_, err := runWorkflowShell(t, smoke.Run, "case \"$*\" in *\"$FAIL_PLATFORM\"*) [ -z \"$FAIL_PLATFORM\" ] || exit 1;; esac\ncase \"$*\" in *inspect*) echo 65532:65532;; esac\n",
-			"IMAGE=example/app@sha256:test", "FAIL_PLATFORM="+failure)
-		if (err == nil) != (failure == "") {
-			t.Fatalf("smoke failure=%q, error=%v", failure, err)
+	for _, test := range []struct{ failure, uid string }{
+		{"", "65532"}, {"linux/amd64", "65532"}, {"linux/arm64", "65532"}, {"", "0"}, {"", ""}, {"", "invalid"},
+	} {
+		_, err := runWorkflowShell(t, smoke.Run, `
+case "$*" in *inspect*--platform*) exit 125;; esac
+case "$*" in *"$FAIL_PLATFORM"*) [ -z "$FAIL_PLATFORM" ] || exit 1;; esac
+case "$*" in *"--entrypoint /usr/bin/id"*) printf '%s\n' "$IMAGE_UID";; esac
+`, "IMAGE=example/app@sha256:test", "FAIL_PLATFORM="+test.failure, "IMAGE_UID="+test.uid)
+		if (err == nil) != (test.failure == "" && test.uid == "65532") {
+			t.Fatalf("smoke failure=%q UID=%q, error=%v", test.failure, test.uid, err)
 		}
 	}
 	_, tags := stepByID(t, job, "image-tags")
