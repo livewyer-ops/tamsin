@@ -29,18 +29,8 @@ func strandedSegments(client *fakeClient) int {
 	return total
 }
 
-// TestNoCorruptSegmentSurvivesVerification is the regression test for the fault
-// bulk registration introduced.
-//
-// Registering every Segment before verifying any creates a window where a
-// mismatch in one leaves the rest registered and unchecked. Cancelling the
-// remaining checks on first failure — the natural way to write concurrent work
-// — makes that permanent: those Objects are in the store, referenced by the
-// Flow, and nothing ever looks at them.
-//
-// URL-lifetime scheduling now registers no more than the ready upload group.
-// A failure therefore stops later Objects before allocation; everything in the
-// one group that did register must still reach a terminal state.
+// A verification failure stops later allocation. Every Segment already
+// registered in the upload group must still be verified or retracted.
 func TestNoCorruptSegmentSurvivesVerification(t *testing.T) {
 	t.Parallel()
 	for _, transfers := range []int{1, 4, 16} {
@@ -104,7 +94,7 @@ func TestRollingResultRetainsActionRequiredObjectWithoutOptIn(t *testing.T) {
 	}
 	root := batch.Results[0].rootFlow()
 	if root == nil || root.ObjectSummary.Stranded != 1 || len(root.Objects) != 1 ||
-		root.Objects[0].Status != ObjectStatusStranded || root.Objects[0].ObjectID == "" {
+		root.Objects[0].Disposition != ObjectDispositionStranded || root.Objects[0].ObjectID == "" {
 		t.Fatalf("rolling action-required result = %#v; recovery Object must remain copyable", root)
 	}
 }
@@ -220,8 +210,8 @@ func TestResumeVerificationUsesTransferBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if batch.Results[0].rootFlow().Objects[0].Status != ObjectStatusResumed {
-		t.Fatalf("expected a resume, got %q", batch.Results[0].rootFlow().Objects[0].Status)
+	if batch.Results[0].rootFlow().Objects[0].Disposition != ObjectDispositionResumed {
+		t.Fatalf("expected a resume, got %q", batch.Results[0].rootFlow().Objects[0].Disposition)
 	}
 	assertBatchResultSchema(t, batch)
 
@@ -270,7 +260,7 @@ func TestFailedResumeVerificationUpdatesObjectTerminalState(t *testing.T) {
 		t.Fatalf("corrupt resumed Object was not classified as a verification failure: %#v", result)
 	}
 	root := result.rootFlow()
-	if root == nil || len(root.Objects) != 1 || root.Objects[0].Status != ObjectStatusRetracted {
+	if root == nil || len(root.Objects) != 1 || root.Objects[0].Disposition != ObjectDispositionRetracted {
 		t.Fatalf("resumed Object retained a stale status after retraction: %#v", root)
 	}
 	assertBatchResultSchema(t, batch)
@@ -309,15 +299,8 @@ func TestFailedRetractionIsReportedDistinctly(t *testing.T) {
 	}
 }
 
-// TestPartialBulkRegistrationLeavesNothingUnchecked covers the transition the
-// verification work missed.
-//
-// TAMS answers a partial bulk registration with a success status and a list of
-// the Segments that failed, which the client reports as an error. The Segments
-// that did register are in the store and referenced by the Flow, so returning
-// on the first one that is absent leaves the rest neither verified nor
-// retracted -- the same invariant, one step earlier than the failure it was
-// built to handle.
+// A partial bulk response names failed Segments despite its success status.
+// Every committed Segment still needs verification or retraction.
 func TestPartialBulkRegistrationLeavesNothingUnchecked(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {
@@ -437,25 +420,13 @@ func TestFullBulkCommitWithALostResponseIsNotTreatedAsFailure(t *testing.T) {
 	}
 }
 
-// TestVerificationGoroutinesFollowTheBudgetNotTheWork covers how many
-// goroutines exist, which is a different question from how many are doing
-// something.
-//
-// Every verification needs a slot from the transfer budget before it can read
-// anything, so creating one goroutine per Media Object only parks them all on
-// the same semaphore. A day of ten-second Segments is nearly nine thousand
-// Objects per essence, and the concurrency tests would pass throughout: the
-// peak in flight is correct either way.
-//
-// Not parallel, because it counts goroutines in the whole test binary and other
-// tests running alongside would add their own. The margin is wide enough to
-// absorb a few dozen regardless.
+// Count all goroutines, including those waiting for a transfer slot. Do not run
+// in parallel: the count includes other tests in this process.
 func TestVerificationGoroutinesFollowTheBudgetNotTheWork(t *testing.T) {
 	const (
 		objects   = 2000
 		transfers = 4
-		// Bounded, this settles a handful above the baseline. Unbounded it is
-		// two thousand above it. Nothing lands in between.
+		// Allow scheduling noise while rejecting one goroutine per Object.
 		headroom = 250
 	)
 	filename := filepath.Join(t.TempDir(), "fixture.mp4")

@@ -36,7 +36,7 @@ func TestPresentationTimestampClassification(t *testing.T) {
 				compact.WriteString(timestamp)
 				compact.WriteString("|side_data_type=ignored\n")
 			}
-			if err := scanPresentation(strings.NewReader(compact.String()), map[int]*cadenceState{7: state}); err != nil {
+			if err := scanPresentationTimestamps(strings.NewReader(compact.String()), map[int]*cadenceState{7: state}, "best_effort_timestamp"); err != nil {
 				t.Fatal(err)
 			}
 			state.finish()
@@ -59,6 +59,48 @@ func TestPacketTimestampClassificationUsesTheSameStrictRules(t *testing.T) {
 	state.finish()
 	if stream.Cadence != CadenceUnknown {
 		t.Fatalf("non-monotonic packet timestamps produced cadence %v, want unknown and decoded-frame fallback", stream.Cadence)
+	}
+}
+
+func TestCadenceTimelineRetainsBoundaryEvidence(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name          string
+		step, nextEnd int64
+		want          CadenceEvidence
+	}{
+		{"fixed", 40, 2_000_000_000, CadenceFixed},
+		{"gap at boundary", 40, 2_040_000_000, CadenceVariable},
+		{"later different constant rate", 50, 2_250_000_000, CadenceVariable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := Stream{CodecType: "video", TimeBase: "1/1000", AverageFrameRate: "25/1",
+				Presentation: PresentationSpan{First: 1480, Last: 2440, LastDuration: 40, Frames: 25, MinimumStep: 40, MaximumStep: 40}}
+			var timeline CadenceTimeline
+			if cadence, err := timeline.Observe(stream, stream, 1_000_000_000); err != nil || cadence != CadenceFixed {
+				t.Fatalf("initial cadence=%v, %v", cadence, err)
+			}
+			stream.Presentation = PresentationSpan{First: 0, Last: tc.step * 24, LastDuration: tc.step, Frames: 25, MinimumStep: tc.step, MaximumStep: tc.step}
+			cadence, err := timeline.Observe(stream, stream, tc.nextEnd)
+			if err != nil || cadence != tc.want {
+				t.Fatalf("second cadence=%v, want %v, err=%v", cadence, tc.want, err)
+			}
+		})
+	}
+}
+
+func TestCadenceTimelineAllowsQuantisedRationalRateAndRejectsOverlap(t *testing.T) {
+	t.Parallel()
+	stream := Stream{CodecType: "video", TimeBase: "1/1000", AverageFrameRate: "30000/1001",
+		Presentation: PresentationSpan{First: 0, Last: 967, LastDuration: 34, Frames: 30, MinimumStep: 33, MaximumStep: 34}}
+	var timeline CadenceTimeline
+	for _, end := range []int64{1_001_000_000, 2_002_000_000} {
+		if cadence, err := timeline.Observe(stream, stream, end); err != nil || cadence != CadenceFixed {
+			t.Fatalf("quantised cadence=%v, %v", cadence, err)
+		}
+	}
+	if _, err := timeline.Observe(stream, stream, 2_002_000_000); err == nil {
+		t.Fatal("repeated interval was accepted")
 	}
 }
 

@@ -15,12 +15,8 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-// The runtime validators use the same immutable documents as the conformance
-// tests. TAMS 8.1 remains the compatibility floor while 8.2 is the target, so
-// both revisions are embedded rather than silently validating an older service
-// against a newer request contract.
-// Only Flow/Profile and Segment/Storage-request schemas and their references
-// are vendored; the files remain unchanged from the pinned upstream revisions.
+// Runtime validation and tests share unchanged schemas from the pinned
+// TAMS 8.1 and 8.2 revisions. Only ingest schemas and their references are embedded.
 //
 //go:embed schemas/v8.1/*.json schemas/v8.2/*.json
 var runtimeSchemaFS embed.FS
@@ -48,17 +44,10 @@ type schemaCache struct {
 	compiler *jsonschema.Compiler
 	err      error
 	mu       sync.Mutex
-	compiled map[string]*jsonschema.Schema
-}
-
-// ValidateFlow is retained for callers that want the target write contract.
-// Version-aware ingest should call ValidateFlowPut explicitly.
-func ValidateFlow(flow tams.Flow) error {
-	return ValidateFlowPut(tams.APIVersion{Major: tams.SpecMajor, Minor: tams.SpecMinor}, flow)
 }
 
 // ValidateFlowPut checks the exact request representation accepted by a TAMS
-// service. TAMS 8.2 deliberately separates the compact Profile-backed write
+// service. TAMS 8.2 separates the compact Profile-backed write
 // form from the expanded read form.
 func ValidateFlowPut(version tams.APIVersion, flow tams.Flow) error {
 	revision, err := revisionFor(version)
@@ -119,7 +108,6 @@ func (cache *schemaCache) load() {
 			}
 		}
 		cache.compiler = compiler
-		cache.compiled = make(map[string]*jsonschema.Schema)
 	})
 }
 
@@ -130,15 +118,7 @@ func (cache *schemaCache) schema(name string) (*jsonschema.Schema, error) {
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	if schema := cache.compiled[name]; schema != nil {
-		return schema, nil
-	}
-	schema, err := cache.compiler.Compile(cache.revision.base + name)
-	if err != nil {
-		return nil, err
-	}
-	cache.compiled[name] = schema
-	return schema, nil
+	return cache.compiler.Compile(cache.revision.base + name)
 }
 
 func (cache *schemaCache) validate(name string, value any) error {

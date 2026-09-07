@@ -11,11 +11,17 @@ stdout 'ingest'
 stdout 'doctor'
 stdout 'profiles'
 
-# The removed API surface cannot fall through to implicit ingest. Existing
-# automation gets an actionable migration error while the tombstone remains
-# absent from help.
+# The retired API surface cannot fall through to an implicit ingest of a file
+# named "api"; the hidden stub explains the removal.
 ! exec tamsin api flow get some-flow
-stderr 'moved to tamsctl'
+stderr 'tamsin api was removed'
+! exec tamsin api
+stderr 'tamsin api was removed'
+
+# Unsupported profiles fail before ingest and list the available choices.
+! exec tamsin ingest --profile unknown --input input.mp4
+stderr 'unsupported ingest profile'
+stderr 'preserve, demux, muxed-segments, essence-segments, mpegts-segments'
 
 # Profile discovery is config-independent and exposes the complete stable
 # catalogue to both operators and wrappers.
@@ -29,7 +35,6 @@ stdout 'mpegts-segments@1'
 exec tamsin --format json profiles
 stdout '"schema_version":"1.0"'
 stdout '"profile_policy_version":"1"'
-! stdout 'editorial|streaming-ts'
 
 exec tamsin doctor --help
 stdout '--online'

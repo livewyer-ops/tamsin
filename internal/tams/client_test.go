@@ -39,7 +39,7 @@ func TestUploadStorageSHA256RecognizesOnlyStrongEvidence(t *testing.T) {
 	}{
 		{name: "S3 response", response: http.Header{"X-Amz-Checksum-Sha256": []string{encoded}}, want: want},
 		{name: "content digest response", response: http.Header{"Content-Digest": []string{"sha-256=:" + encoded + ":"}}, want: want},
-		{name: "legacy digest response", response: http.Header{"Digest": []string{"sha-512=ignored, sha-256=" + encoded}}, want: want},
+		{name: "Digest response", response: http.Header{"Digest": []string{"sha-512=ignored, sha-256=" + encoded}}, want: want},
 		{name: "request header is not storage evidence"},
 		{name: "etag is not evidence", response: http.Header{"ETag": []string{"\"not-a-checksum\""}}},
 		{name: "malformed evidence", response: http.Header{"Content-Digest": []string{"sha-256=:bad:"}}, wantErr: true},
@@ -664,11 +664,11 @@ func TestPresignedURLAcceptsBothHeaderShapes(t *testing.T) {
 		}
 	}
 	var preferred PresignedURL
-	if err := json.Unmarshal([]byte(`{"url":"https://example.test","content-type":"legacy/type","headers":{"content-type":"headers/type"}}`), &preferred); err != nil {
+	if err := json.Unmarshal([]byte(`{"url":"https://example.test","content-type":"top-level/type","headers":{"content-type":"headers/type"}}`), &preferred); err != nil {
 		t.Fatal(err)
 	}
 	if got := preferred.Headers["Content-Type"]; got != "headers/type" {
-		t.Fatalf("headers Content-Type = %q, want headers object to override legacy member", got)
+		t.Fatalf("headers Content-Type = %q, want headers object to override top-level field", got)
 	}
 	for _, payload := range []string{
 		`{"url":"https://example.test","headers":{"X-Test":"one","x-test":"two"}}`,
@@ -988,9 +988,7 @@ func TestUploadRetriesWhenThePeerStopsReading(t *testing.T) {
 	}
 }
 
-// TestMetadataStillHasADeadline confirms the split did not simply remove the
-// metadata bound: a service that accepts a connection and never answers must
-// not hang the run.
+// A service that accepts a connection but never answers must time out.
 func TestMetadataStillHasADeadline(t *testing.T) {
 	t.Parallel()
 	release := make(chan struct{})
@@ -1015,14 +1013,7 @@ func TestMetadataStillHasADeadline(t *testing.T) {
 	}
 }
 
-// TestBackoffIsJitteredWithinBounds covers the retry schedule under load.
-//
-// Transfers that fail together retry together: a store shedding load answers
-// every in-flight request at once, so an unjittered backoff returns the whole
-// set at the same instant and reproduces the burst that caused the shedding.
-// The spread has to be real, and it also has to stay bounded -- half the
-// computed delay is kept as a floor so a retry never becomes more aggressive
-// than the schedule allows.
+// Retries must vary within the permitted interval to avoid synchronised bursts.
 func TestBackoffIsJitteredWithinBounds(t *testing.T) {
 	t.Parallel()
 	for attempt := range 6 {
@@ -1101,15 +1092,8 @@ func TestUploadReusesConnections(t *testing.T) {
 		}
 	}
 
-	// The assertion is deliberately "fewer than one connection per upload"
-	// rather than a proportion. A connection returns to the pool
-	// asynchronously, so a tight loop on a busy machine dials more of them, and
-	// a tighter bound here failed on a loaded host while the code was correct.
-	//
-	// Nothing is given up by loosening it. Without the drain the count is not
-	// merely higher, it is exactly one per upload every time, because a body
-	// left unread can never be pooled -- so this separates the two states
-	// completely while staying indifferent to scheduling.
+	// Pool returns are asynchronous, so scheduling affects the connection count.
+	// Require some reuse: undrained response bodies prevent all reuse.
 	lock.Lock()
 	defer lock.Unlock()
 	if len(connections) >= uploads {
@@ -1249,7 +1233,7 @@ func TestRequestErrorDistinguishesRequestTimeoutFromParentCancellation(t *testin
 		t.Fatalf("requestError() = %T %v, want RequestTimeoutError", err, err)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatal("RequestTimeoutError no longer preserves deadline identity")
+		t.Fatal("RequestTimeoutError does not preserve deadline identity")
 	}
 	if strings.Contains(err.Error(), "secret") {
 		t.Fatalf("request timeout exposed URL credentials: %v", err)

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"sync"
 
 	"github.com/google/uuid"
@@ -20,6 +21,37 @@ const identityEncoding = "tamsin/deterministic-id/v1"
 // point, or a manifest that reaches the same bytes is provenance, not identity.
 func generatedRootFlowID(profileKey, mediaKey string) string {
 	return framedID("flow/content-profile/v1", profileKey, mediaKey)
+}
+
+func streamedFlowID(profileKey string, flow tams.Flow, info media.FlowInfo, overrides tams.Flow) (string, error) {
+	// Initial rate estimates and whole-input duration are not identity evidence.
+	// The same source revision must keep its IDs as segments establish cadence.
+	initial := func(flow tams.Flow) tams.Flow {
+		flow = flowIdentityFields(flow)
+		delete(flow, "avg_bit_rate")
+		delete(flow, "max_bit_rate")
+		if parameters, ok := flow["essence_parameters"].(map[string]any); ok {
+			parameters = maps.Clone(parameters)
+			delete(parameters, "frame_rate")
+			delete(parameters, "vfr")
+			flow["essence_parameters"] = parameters
+		}
+		return flow
+	}
+	info.Duration = 0
+	info.Collected = append([]media.CollectedFlow(nil), info.Collected...)
+	for index := range info.Collected {
+		info.Collected[index].Flow = initial(info.Collected[index].Flow)
+	}
+	mediaKey, err := mediaInterpretationFingerprint(initial(flow), info)
+	if err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(flowIdentityFields(overrides))
+	if err != nil {
+		return "", err
+	}
+	return framedID("flow/input-revision/v1", profileKey, mediaKey, string(encoded)), nil
 }
 
 // generatedChildFlowID anchors every derived member to the root Flow. Besides

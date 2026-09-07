@@ -33,6 +33,17 @@ func TestProfilesCommandPublishesOrderedHumanAndMachineCatalogues(t *testing.T) 
 	if code != ExitOK || jsonErr.Len() != 0 {
 		t.Fatalf("JSON profiles exit = %d, stderr = %s", code, jsonErr.String())
 	}
+	wire := assertJSONKeys(t, jsonOut.Bytes(), "schema_version", "profile_policy_version", "profiles")
+	if string(wire["schema_version"]) != `"1.0"` || string(wire["profile_policy_version"]) != `"1"` {
+		t.Fatalf("profiles report versions = %s", jsonOut.String())
+	}
+	var profiles []json.RawMessage
+	if err := json.Unmarshal(wire["profiles"], &profiles); err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range profiles {
+		assertJSONKeys(t, profile, "name", "version", "selection", "essence_storage", "segment_duration", "segment_format", "ffmpeg", "source_bytes_preserved", "object_pattern", "intended_use", "resource_note")
+	}
 	var report profilesReport
 	if err := json.Unmarshal(jsonOut.Bytes(), &report); err != nil {
 		t.Fatalf("decode profiles report %q: %v", jsonOut.String(), err)

@@ -284,10 +284,7 @@ func TestInterlaceModeOmitsAmbiguousAndPsFClaims(t *testing.T) {
 	}
 }
 
-// TestContainerProfilePolicy pins the small set of decisions Tamsin owns. The
-// mapper describes supported outputs; it is not a promise to classify every
-// file FFmpeg can open. Unknowns therefore stay visibly generic rather than
-// inheriting an extension or being guessed into the ISO family.
+// Unknown containers must stay generic, without guessing from their extension.
 func TestContainerProfilePolicy(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {
@@ -493,18 +490,8 @@ func testIdentity() Identity {
 	}
 }
 
-// TestCollectedEssencesCarryContainerPositionAndOffset covers the two facts a
-// demultiplexed ingest needs about each stream, both of which were previously
-// inferred from its position in the collection.
-//
-// The position is not the container index. Anything that is not essence -- an
-// attached picture, most obviously -- is filtered out before the collection is
-// built, so counting the collection maps the wrong track: FFmpeg is told
-// `-map 0:N` and N has to mean what the container means by it.
-//
-// The offset matters because essences do not necessarily start together. Once
-// each is a Flow of its own, the only thing keeping them in sync is where each
-// was placed on the shared timeline.
+// Filtering attached pictures must preserve container stream indices for
+// FFmpeg's -map 0:N. Per-stream offsets keep demuxed essences synchronised.
 func TestCollectedEssencesCarryContainerPositionAndOffset(t *testing.T) {
 	t.Parallel()
 	probe := Probe{

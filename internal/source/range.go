@@ -8,9 +8,8 @@ import (
 	"strings"
 )
 
-// byteContentRange is the satisfied form of Content-Range. Resumed transfers
-// deliberately require a numeric total: without one, there is no way to prove
-// that an open-ended range delivered the rest of one complete representation.
+// byteContentRange is the satisfied form of Content-Range. A numeric total is
+// required to check that a resumed transfer delivers the complete representation.
 type byteContentRange struct {
 	start int64
 	end   int64
@@ -92,9 +91,8 @@ func validateCompleteRange(value string, offset, knownTotal, contentLength int64
 	return contentRange, nil
 }
 
-// validStrongETag accepts the strong entity-tag grammar used by If-Range. A
-// date or weak validator can make a useful cache validator, but cannot prove
-// byte-for-byte identity strongly enough to append a resumed body.
+// validStrongETag checks the If-Range strong entity-tag grammar. Dates and weak
+// validators cannot establish byte-for-byte identity for appending a resumed body.
 func validStrongETag(value string) bool {
 	if len(value) < 2 || value[0] != '"' || value[len(value)-1] != '"' {
 		return false
@@ -107,9 +105,7 @@ func validStrongETag(value string) bool {
 	return true
 }
 
-// exactRangeReadCloser turns a clean, short response (or a response with extra
-// bytes) into a read error, so staging retries instead of authenticating an
-// incomplete or overlong composite.
+// exactRangeReadCloser rejects short or overlong responses so staging retries.
 type exactRangeReadCloser struct {
 	body      io.ReadCloser
 	remaining int64
@@ -131,6 +127,16 @@ func (reader *exactRangeReadCloser) Read(buffer []byte) (int, error) {
 		reader.remaining -= int64(read)
 		if err == io.EOF && reader.remaining > 0 {
 			return read, io.ErrUnexpectedEOF
+		}
+		if reader.remaining == 0 && err == nil {
+			// A range-serving consumer can stop at the advertised length without
+			// asking for EOF. Validate the terminator before returning that byte.
+			var probe [1]byte
+			extra, endErr := io.ReadFull(reader.body, probe[:])
+			if extra > 0 {
+				return read, errors.New("resumed response body exceeds its declared Content-Range")
+			}
+			return read, endErr
 		}
 		return read, err
 	}

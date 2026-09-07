@@ -783,31 +783,15 @@ func containsStatus(expected []int, actual int) bool {
 	return false
 }
 
-// maxRetryAfter caps how long a server can send a client away for.
-//
-// Retry-After is an instruction, and it is honoured -- but a command that was
-// bounded by its own retry budget should not become unbounded because a store
-// asked for an hour. Past this point the delay is worth less than the chance to
-// fail and let the caller decide.
+// maxRetryAfter caps server-requested retry delays.
 const maxRetryAfter = 2 * time.Minute
 
-// backoffJitter is the width of the random spread added to a delay the server
-// asked for. It is small, because it only has to break the synchronisation
-// between clients, not meaningfully change when they return.
+// backoffJitter spreads retries after a server-requested delay.
 const backoffJitter = 500 * time.Millisecond
 
-// backoffDelay is how long to wait before retrying attempt.
-//
-// The exponential part is jittered because the transfers that fail together are
-// the ones most likely to retry together. A store shedding load under pressure
-// answers every in-flight request at once, and an unjittered backoff sends the
-// whole set back at the same instant, reproducing the burst that caused the
-// shedding. Half the computed delay is kept as a floor so a retry cannot become
-// aggressive, and the remainder is spread randomly.
-//
-// A Retry-After is an instruction rather than an estimate, so it is never
-// shortened. Jitter is added on top of it, which desynchronises clients that
-// were all told the same thing without any of them returning early.
+// backoffDelay jitters exponential retries between half and all of the base
+// delay to avoid synchronised bursts. Retry-After is capped at maxRetryAfter,
+// with jitter added after the capped delay.
 func backoffDelay(attempt int, retryAfter string) time.Duration {
 	if seconds, err := strconv.Atoi(retryAfter); err == nil && seconds >= 0 {
 		return min(time.Duration(seconds)*time.Second, maxRetryAfter) + jitter(backoffJitter)

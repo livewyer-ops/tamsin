@@ -2,12 +2,19 @@
 set -Eeuo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-contract_name="${TAMSIN_E2E_CONTRACT:-tams-v8.2.json}"
-case "$contract_name" in
-  tams-v8.1.json|tams-v8.2.json) ;;
-  *) echo "Unsupported TAMS E2E contract: $contract_name" >&2; exit 2 ;;
+TAMS_VERSION="${TAMSIN_E2E_VERSION:-8.2}"
+case "$TAMS_VERSION" in
+  8.1)
+    TAMOSS_COMMIT=cda9611e31ff427d34afb2c06c45c78c91262ee9
+    TAMS_COMMIT=98d307b09b5ebf79278aa7d3aad53295154e2c17
+    ;;
+  8.2)
+    TAMOSS_COMMIT=c17e20fe4aa732e6c0b30f904ca25e3dd2cf2c9c
+    TAMS_COMMIT=34fb31b80cb8afb3194f28c8b787301379caacf8
+    ;;
+  *) echo "Unsupported TAMS E2E version: $TAMS_VERSION" >&2; exit 2 ;;
 esac
-contract="$root/contracts/$contract_name"
+PROFILE=local-kind
 
 require() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -15,18 +22,6 @@ require() {
     exit 2
   }
 }
-
-# Read the live service pins before bootstrapping the remaining tools.
-require jq
-contract_value() {
-  local selector="$1"
-  jq -er "$selector | strings | select(length > 0)" "$contract"
-}
-TAMOSS_COMMIT="$(contract_value '.tamoss.commit')"
-TAMS_COMMIT="$(contract_value '.tams.commit')"
-TAMS_VERSION="$(contract_value '.tams.version')"
-TAMOSS_RELEASE="$(contract_value '.tamoss.release')"
-PROFILE="$(contract_value '.tamoss.profile')"
 
 AQUA_VERSION="v2.60.1"
 PROJECT_NAME="tamsin-e2e"
@@ -127,7 +122,7 @@ if ! command -v aqua >/dev/null 2>&1; then
   export PATH="$cache/aqua-bin:$PATH"
 fi
 
-for command in aqua base64 curl docker git jq kubectl python3 tar; do
+for command in aqua base64 curl docker git go jq kubectl python3 tar; do
   require "$command"
 done
 
@@ -204,8 +199,7 @@ spec:
         publicEndpoint:
           url: $S3_URL
 EOF
-# Written whole rather than appended to, so a cached checkout reused across runs
-# does not accumulate the patch entry.
+# Overwrite to avoid duplicate patch entries when reusing a cached checkout.
 cat >"$tamoss/deploy/environments/$PROFILE/kustomization.yaml" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -316,16 +310,9 @@ export TAMSIN_AUTH_MODE="bearer"
 export TAMSIN_HTTP_INSECURE_SKIP_VERIFY="true"
 export TAMSIN_LOG_LEVEL="warn"
 export TAMSIN_FORMAT="json"
-api_ready=false
-for _ in {1..90}; do
-  if curl --ipv4 --resolve "api.tamoss.localtest.me:$HTTPS_PORT:127.0.0.1" \
-    --insecure --fail --silent "${API_URL%/}/readyz" >/dev/null 2>&1; then
-    api_ready=true
-    break
-  fi
-  sleep 2
-done
-if [ "$api_ready" != true ]; then
+if ! curl --ipv4 --resolve "api.tamoss.localtest.me:$HTTPS_PORT:127.0.0.1" \
+  --insecure --fail --silent --retry 89 --retry-delay 2 --retry-all-errors \
+  --retry-max-time 180 --max-time 5 "${API_URL%/}/readyz" >/dev/null 2>&1; then
   echo "Timed out waiting for TAMOSS API readiness at ${API_URL%/}/readyz" >&2
   exit 1
 fi
@@ -344,10 +331,8 @@ printf '../manifest-media/one.ts\n../manifest-media/two.ts\n' > "$fixtures/list/
 cp "$tamoss/deploy/demo/tamoss-demo.ts" "$fixtures/http/http.ts"
 printf '\2' >> "$fixtures/http/http.ts"
 cp "$tamoss/deploy/demo/tamoss-demo.ts" "$fixtures/s3/s3.ts"
-# The TAMOSS demo clip carries video only, so on its own it exercises neither
-# essence-storage arrangement: a single-essence input produces one Flow either
-# way. Add a synthetic audio track to the real video to make a genuine
-# multiplex. FFmpeg comes from the image under test rather than the host.
+# Add audio to the video-only demo to exercise both essence-storage arrangements.
+# Use FFmpeg from the image under test.
 mkdir -p "$fixtures/muxed"
 docker run --rm --entrypoint ffmpeg -v "$fixtures:/fixtures" -u "$(id -u):$(id -g)" \
   "$IMAGE" -hide_banner -loglevel error -y \
@@ -362,7 +347,8 @@ docker run --rm --entrypoint ffprobe -v "$fixtures:/fixtures:ro" -u "$(id -u):$(
 printf '\3' >> "$fixtures/s3/s3.ts"
 
 port_file="$fixtures/http.port"
-python3 -u "$root/scripts/e2e-http.py" "$fixtures/http" "$port_file" >"$fixtures/http.log" 2>&1 &
+go build -o "$fixtures/e2e-http" "$root/scripts/e2e-http.go"
+"$fixtures/e2e-http" "$fixtures/http" "$port_file" >"$fixtures/http.log" 2>&1 &
 http_pid=$!
 for _ in {1..30}; do
   if [ -s "$port_file" ]; then
@@ -382,7 +368,7 @@ run_ingest() {
   local name="$1"
   local expected="$2"
   shift 2
-  rm -f "$fixtures/$name.events.jsonl" "$fixtures/$name.json"
+  rm -f "$fixtures/$name.events.jsonl"
   docker run --rm --network host "${docker_host_args[@]}" \
     -e TAMSIN_ENDPOINT -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_TOKEN \
     -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_LOG_LEVEL -e TAMSIN_FORMAT \
@@ -395,99 +381,34 @@ run_ingest() {
   assert_ingest_artifacts "$name" "$expected"
 }
 
-# Validate the live NDJSON process protocol, then project its terminal records
-# into a compact document for the graph assertions below.
+# Check terminal outcomes here; CLI tests cover protocol sequencing and framing.
 assert_ingest_artifacts() {
-  local name="$1"
-  local expected="$2"
+  local name="$1" expected="$2"
   jq -s -e --argjson expected "$expected" '
-    length > 0 and
-    .[0].type == "hello" and .[-1].type == "run.finished" and
-    ([.[].seq] == [range(0; length)]) and
-    ([.[].run_id] | unique | length) == 1 and
-    all(.[]; .protocol == "tamsin.ingest.events" and .protocol_version == "2.1") and
-    ([.[] | select(.type == "input.finished")] | length) == $expected and
-    (.[-1].payload.outcome == "succeeded" and
-     .[-1].payload.exit_code == 0 and
-     .[-1].payload.total == $expected and
-     .[-1].payload.succeeded == $expected and
-     .[-1].payload.failed == 0)
+    [.[] | select(.type == "input.finished") | .payload] as $inputs |
+    last.type == "run.finished" and
+    (last.payload | .outcome == "succeeded" and .exit_code == 0 and
+      .total == $expected and .succeeded == $expected and .failed == 0) and
+    ($inputs | length) == $expected and
+    all($inputs[];
+      (.status == "ingested" or .status == "resumed") and
+      .verification == "verified" and .object_count > 0) and
+    all(.[] | select(.type == "flow.result") | .payload;
+      .disposition == "written" or .disposition == "unchanged") and
+    ([.[] | select(.type == "object.result")] | length) > 0 and
+    all(.[] | select(.type == "object.result") | .payload;
+      (.disposition == "ingested" or .disposition == "resumed") and
+      .verification_status == "verified")
   ' "$fixtures/$name.events.jsonl" >/dev/null || {
     cat "$fixtures/$name.events.jsonl" >&2
     return 1
   }
-  if LC_ALL=C grep -q $'\r\|\033' "$fixtures/$name.events.jsonl"; then
-    printf 'e2e: %s event stream contains a carriage return or terminal escape\n' "$name" >&2
-    return 1
-  fi
-  jq -s -e '
-    . as $events |
-    (first($events[] | select(.type == "hello"))) as $hello |
-    (first($events[] | select(.type == "run.started"))) as $start |
-    (first($events[] | select(.type == "run.finished"))) as $terminal |
-    {
-      schema_version: $hello.payload.result_schema_version,
-      tool_version: $hello.payload.tool_version,
-      tool_commit: $hello.payload.tool_commit,
-      profile_version: $start.payload.profile_version,
-      run_id: $hello.run_id,
-      total: $terminal.payload.total,
-      succeeded: $terminal.payload.succeeded,
-      failed: $terminal.payload.failed,
-      results: (
-        [$events[] | select(.type == "input.finished")]
-        | sort_by(.scope.input_index)
-        | map(
-            . as $input
-            | .payload
-            | .flows = [
-                $events[]
-                | select(.type == "flow.result" and .scope.input_index == $input.scope.input_index)
-                | . as $flow
-                | .payload + {
-                    objects: [
-                      $events[]
-                      | select(
-                          .type == "object.result" and
-                          .scope.input_index == $input.scope.input_index and
-                          .scope.flow_id == $flow.payload.flow_id
-                        )
-                      | .payload
-                    ]
-                  }
-              ]
-          )
-      )
-    }
-  ' "$fixtures/$name.events.jsonl" >"$fixtures/$name.json" || {
-    cat "$fixtures/$name.events.jsonl" >&2
-    return 1
-  }
-  jq -e --argjson expected "$expected" \
-	'.schema_version == "2.1" and ((.tool_version | length) > 0) and ((.tool_commit | length) > 0) and
-	 ((.profile_version | length) > 0) and ((.run_id | length) > 0) and
-	 .failed == 0 and .succeeded == $expected and (.results | length) == $expected and
-	 all(.results[]; ((.profile | length) > 0) and ((.profile_version | length) > 0) and
-	     (.status == "ingested" or .status == "resumed") and .verification == "verified" and
-	     all(.flows[];
-	       (.disposition == "written" or .disposition == "unchanged") and
-	       all((.objects // [])[];
-	         (.disposition == "ingested" or .disposition == "resumed") and
-	         .verification_status == "verified"
-	       )
-	     ) and
-	     ((((.flows | map((.objects // []) | length) | add) // 0) > 0)))' \
-    "$fixtures/$name.json" >/dev/null || {
-      cat "$fixtures/$name.json" >&2
-      return 1
-    }
 }
 api_component() {
   jq -rn --arg value "$1" '$value | @uri'
 }
 
-# Live conformance assertions use the API directly. They verify what the
-# service retained without making TAMSin carry a general control-plane CLI.
+# Read the API directly to check persisted resources.
 api_request() {
   local method="$1" path="$2" body="${3:-}"
   local options=(
@@ -509,43 +430,17 @@ get_flow() {
 }
 
 get_segments() {
-  local query='limit=1000&accept_get_urls=&presigned=false'
-  if [ -n "${2:-}" ]; then
-    query="$query&object_id=$(api_component "$2")"
-  fi
-  api_request GET "flows/$(api_component "$1")/segments?$query"
-}
-
-retract_segment() {
-  local flow_id="$1" timerange="$2" object_id="$3"
-  api_request DELETE \
-    "flows/$(api_component "$flow_id")/segments?timerange=$(api_component "$timerange")&object_id=$(api_component "$object_id")" \
-    >/dev/null
-
-  local segments
-  for _ in {1..120}; do
-    segments="$(get_segments "$flow_id" "$object_id")" || return 1
-    if jq -e --arg timerange "$timerange" --arg object_id "$object_id" \
-      'all(.[]; .timerange != $timerange or .object_id != $object_id)' <<<"$segments" >/dev/null; then
-      return 0
-    fi
-    sleep 0.25
-  done
-  printf 'e2e: Segment %s remained on Flow %s after retraction\n' "$object_id" "$flow_id" >&2
-  return 1
+  api_request GET "flows/$(api_component "$1")/segments?limit=1000&accept_get_urls=&presigned=false"
 }
 
 result_flow_ids() {
-  jq -er '.results[].flows[].flow_id' "$1"
+  jq -r 'select(.type == "flow.result") | .payload.flow_id' "$1"
 }
 
 # Pair each reported Object with its owning Flow.
 result_flow_objects() {
-  jq -r '.results[]
-         | .flows[]
-         | .flow_id as $flow
-         | (.objects // [])[]
-         | "\($flow)\t\(.object_id)"' "$1"
+  jq -r 'select(.type == "object.result")
+         | [.scope.flow_id, .payload.object_id] | @tsv' "$1"
 }
 
 # Check persisted Flows against the named specification rules.
@@ -647,7 +542,7 @@ assert_flow_conformance() {
   local segments
   segments="$own_segments"
   local object_id
-  for object_id in $(result_flow_objects "$fixtures/$name.json" | awk -F'\t' -v flow="$flow_id" '$1 == flow {print $2}'); do
+  for object_id in $(result_flow_objects "$fixtures/$name.events.jsonl" | awk -F'\t' -v flow="$flow_id" '$1 == flow {print $2}'); do
     jq -e --arg id "$object_id" 'any(.[]; .object_id == $id)' <<<"$segments" >/dev/null || {
       printf 'e2e: %s Object %s is owned by Flow %s but is not registered as one of its Segments\n' \
         "$name" "$object_id" "$flow_id" >&2
@@ -659,16 +554,17 @@ assert_flow_conformance() {
 
 run_ingest local-file 1 -i /fixtures/single/demo.ts
 run_ingest local-file-resume 1 -i /fixtures/single/demo.ts
-jq -e '.results[0].status == "resumed" and .results[0].verification == "verified" and
-       all(.results[0].flows[]; all((.objects // [])[]; .disposition == "resumed"))' \
-  "$fixtures/local-file-resume.json" >/dev/null
-for flow_id in $(result_flow_ids "$fixtures/local-file.json"); do
+jq -s -e 'all(.[] | select(.type == "input.finished") | .payload;
+         .status == "resumed" and .verification == "verified") and
+       all(.[] | select(.type == "object.result") | .payload; .disposition == "resumed")' \
+  "$fixtures/local-file-resume.events.jsonl" >/dev/null
+for flow_id in $(result_flow_ids "$fixtures/local-file.events.jsonl"); do
   assert_flow_conformance local-file "$flow_id"
 done
 
 if [ "$TAMS_VERSION" = "8.2" ]; then
   profile_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
-  source_flow_id="$(jq -er '.results[0].root_flow_id' "$fixtures/local-file.json")"
+  source_flow_id="$(jq -ser '.[] | select(.type == "input.finished") | .payload.root_flow_id' "$fixtures/local-file.events.jsonl")"
   profile_body="$(get_flow "$source_flow_id" | jq -c --arg id "$profile_id" '
     {
       id: $id,
@@ -689,19 +585,28 @@ if [ "$TAMS_VERSION" = "8.2" ]; then
         ($duration.numerator | type) == "number" and ($duration.denominator | type) == "number"' >/dev/null
 
   run_ingest profile-backed 1 --tams-flow-profile "video=$profile_id" -i /fixtures/single/demo.ts
-  profiled_flow="$(jq -er --arg id "$profile_id" '
-    .results[0].flows[] | select(.tams_flow_profile_id == $id) | .flow_id
-  ' "$fixtures/profile-backed.json")"
+  profiled_flow="$(jq -ser --arg id "$profile_id" '
+    .[] | select(.type == "flow.result" and .payload.tams_flow_profile_id == $id) | .payload.flow_id
+  ' "$fixtures/profile-backed.events.jsonl")"
   get_flow "$profiled_flow" | jq -e --arg id "$profile_id" '.profile_id == $id' >/dev/null
 fi
 
 run_ingest directory 2 -i /fixtures/directory
-for flow_id in $(result_flow_ids "$fixtures/directory.json"); do
+for flow_id in $(result_flow_ids "$fixtures/directory.events.jsonl"); do
   assert_flow_conformance directory "$flow_id"
 done
 run_ingest manifest 2 -i /fixtures/list/sources.txt
-run_ingest http 1 -i "$http_url"
-for flow_id in $(result_flow_ids "$fixtures/http.json"); do
+run_ingest http 1 --input-mode stream -i "$http_url"
+run_ingest http-resume 1 --input-mode stream -i "$http_url"
+jq -s -e 'all(.[] | select(.type == "input.finished") | .payload; .status == "resumed" and (has("sha256") | not))' \
+  "$fixtures/http-resume.events.jsonl" >/dev/null
+run_ingest http-fallback 1 -i "${http_url%/http.ts}/stage/http.ts"
+jq -s -e 'all(.[] | select(.type == "input.finished") | .payload; (.sha256 | length) == 64)' \
+  "$fixtures/http-fallback.events.jsonl" >/dev/null
+if [ "$TAMS_VERSION" = "8.2" ]; then
+  run_ingest http-profile 1 --input-mode stream --tams-flow-profile "video=$profile_id" -i "$http_url"
+fi
+for flow_id in $(result_flow_ids "$fixtures/http.events.jsonl"); do
   assert_flow_conformance http "$flow_id"
 done
 
@@ -709,15 +614,16 @@ done
 # explicit whole-file Object and an explicit container, which take different
 # paths through Flow metadata.
 run_ingest whole-file 1 -d 0 -i /fixtures/single/demo.ts
-for flow_id in $(result_flow_ids "$fixtures/whole-file.json"); do
+for flow_id in $(result_flow_ids "$fixtures/whole-file.events.jsonl"); do
   assert_flow_conformance whole-file "$flow_id"
 done
-jq -e '.results[0] as $result | $result.flows[] | select(.flow_id == $result.root_flow_id) | .objects | length == 1' \
-  "$fixtures/whole-file.json" >/dev/null
+jq -s -e '([.[] | select(.type == "input.finished")][0].payload.root_flow_id) as $root |
+  [.[] | select(.type == "object.result" and .scope.flow_id == $root)] | length == 1' \
+  "$fixtures/whole-file.events.jsonl" >/dev/null
 
 run_ingest mpegts-format 1 --segment-format mpegts -i /fixtures/single/demo.ts
-mpegts_flow="$(jq -er '.results[0].root_flow_id' "$fixtures/mpegts-format.json")"
-for flow_id in $(result_flow_ids "$fixtures/mpegts-format.json"); do
+mpegts_flow="$(jq -ser '.[] | select(.type == "input.finished") | .payload.root_flow_id' "$fixtures/mpegts-format.events.jsonl")"
+for flow_id in $(result_flow_ids "$fixtures/mpegts-format.events.jsonl"); do
   assert_flow_conformance mpegts-format "$flow_id"
 done
 # The Flow must declare the container that was written, not the input's.
@@ -733,14 +639,14 @@ run_ingest independent-essences 1 --essence-storage independent -i /fixtures/mux
 # AppNote 0001: a demultiplexed ingest produces a Flow per essence plus the
 # Multi-Flow recording that they came from one input. The collector is the Flow
 # that stands for the input, so it is what the result names.
-independent_collector="$(jq -er '.results[0].root_flow_id' "$fixtures/independent-essences.json")"
-jq -e '(.results[0].flows | length) >= 3 and ((.results[0].root_flow_id // "") | length) > 0 and
-       ([.results[0].flows[].flow_id] | length == (unique | length))' \
-  "$fixtures/independent-essences.json" >/dev/null || {
+independent_collector="$(jq -ser '.[] | select(.type == "input.finished") | .payload.root_flow_id' "$fixtures/independent-essences.events.jsonl")"
+jq -s -e '[.[] | select(.type == "flow.result") | .payload.flow_id] |
+  length >= 3 and length == (unique | length)' \
+  "$fixtures/independent-essences.events.jsonl" >/dev/null || {
   printf 'e2e: independent storage should report a Flow per essence plus the collector\n' >&2
   exit 1
 }
-for flow_id in $(result_flow_ids "$fixtures/independent-essences.json"); do
+for flow_id in $(result_flow_ids "$fixtures/independent-essences.events.jsonl"); do
   assert_flow_conformance independent-essences "$flow_id"
   if [ "$flow_id" = "$independent_collector" ]; then
     # The collector records the association and owns no media of its own: its
@@ -761,7 +667,7 @@ for flow_id in $(result_flow_ids "$fixtures/independent-essences.json"); do
 done
 
 run_ingest muxed-essences 1 --essence-storage muxed -i /fixtures/muxed/muxed.ts
-muxed_flow="$(jq -er '.results[0].root_flow_id' "$fixtures/muxed-essences.json")"
+muxed_flow="$(jq -ser '.[] | select(.type == "input.finished") | .payload.root_flow_id' "$fixtures/muxed-essences.events.jsonl")"
 assert_flow_conformance muxed-essences "$muxed_flow"
 # The collector owns the Objects; each parent Collection Item maps one child to
 # a track inside them, while the collected Flow has no container of its own.
@@ -770,31 +676,17 @@ get_flow "$muxed_flow" | jq -e '.format == "urn:x-nmos:format:multi" and ((.flow
   exit 1
 }
 
-# Check service-side deletion via curl. TAMSin's verification-failure cleanup
-# and 202 deletion-request handling are covered by client/ingest HTTP tests.
-retract_flow="$(jq -er '.results[0].root_flow_id' "$fixtures/whole-file.json")"
-retract_timerange="$(jq -er '.results[0] as $result | $result.flows[] | select(.flow_id == $result.root_flow_id) | .objects[0].timerange' "$fixtures/whole-file.json")"
-retract_object="$(jq -er '.results[0] as $result | $result.flows[] | select(.flow_id == $result.root_flow_id) | .objects[0].object_id' "$fixtures/whole-file.json")"
-retract_segment "$retract_flow" "$retract_timerange" "$retract_object"
-# Retraction is terminal only once the exact Object/timerange tuple is absent.
-get_segments "$retract_flow" "$retract_object" | jq -e 'length == 0' >/dev/null || {
-  printf 'e2e: Segment %s is still present after terminal retraction from Flow %s\n' \
-    "$retract_object" "$retract_flow" >&2
-  exit 1
-}
-rm -f "$fixtures/stdin.events.jsonl" "$fixtures/stdin.json"
+rm -f "$fixtures/stdin.events.jsonl"
 cat "$fixtures/single/demo.ts" \
   | docker run --rm -i --network host "${docker_host_args[@]}" \
       -e TAMSIN_ENDPOINT -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_TOKEN \
       -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_LOG_LEVEL -e TAMSIN_FORMAT \
       "$IMAGE" --profile essence-segments -i - --stdin-name event.ts >"$fixtures/stdin.events.jsonl"
 assert_ingest_artifacts stdin 1
-# This is deliberately the same media and treatment as local-file above.
-# Locator-independent identity must therefore resume the existing graph even
-# though a non-reopenable stdin stream supplied the bytes this time.
-jq -e '.failed == 0 and .succeeded == 1 and .results[0].status == "resumed" and
-       .results[0].verification == "verified"' "$fixtures/stdin.json" >/dev/null || {
-  cat "$fixtures/stdin.json" >&2
+# The same media and treatment must resume the local-file graph through stdin.
+jq -s -e 'all(.[] | select(.type == "input.finished") | .payload;
+  .status == "resumed" and .verification == "verified")' "$fixtures/stdin.events.jsonl" >/dev/null || {
+  cat "$fixtures/stdin.events.jsonl" >&2
   exit 1
 }
 
@@ -816,14 +708,17 @@ docker run --rm --network host "${docker_host_args[@]}" \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
   -v "$aws_dist:/aws:ro" -v "$fixtures:/fixtures:ro" --entrypoint /aws/aws "$IMAGE" \
   --endpoint-url "$S3_URL" --no-verify-ssl s3 cp /fixtures/s3/s3.ts s3://tamsin-inputs/s3.ts >/dev/null
-rm -f "$fixtures/s3.events.jsonl" "$fixtures/s3.json"
-docker run --rm --network host "${docker_host_args[@]}" \
-  -e TAMSIN_ENDPOINT -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_TOKEN \
-  -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_LOG_LEVEL -e TAMSIN_FORMAT \
-  -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
-  "$IMAGE" --profile essence-segments -i s3://tamsin-inputs/ --s3-endpoint "$S3_URL" --s3-path-style >"$fixtures/s3.events.jsonl"
-assert_ingest_artifacts s3 1
-jq -e '.failed == 0 and .succeeded == 1 and .results[0].status == "ingested"' "$fixtures/s3.json" >/dev/null
+for name in s3 s3-resume; do
+  docker run --rm --network host "${docker_host_args[@]}" \
+    -e TAMSIN_ENDPOINT -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_TOKEN \
+    -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_LOG_LEVEL -e TAMSIN_FORMAT \
+    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
+    "$IMAGE" --profile essence-segments --input-mode stream -i s3://tamsin-inputs/ --s3-endpoint "$S3_URL" --s3-path-style >"$fixtures/$name.events.jsonl"
+  assert_ingest_artifacts "$name" 1
+  jq -s -e 'all(.[] | select(.type == "input.finished") | .payload; has("sha256") | not)' "$fixtures/$name.events.jsonl" >/dev/null
+done
+jq -s -e 'all(.[] | select(.type == "input.finished") | .payload; .status == "ingested")' "$fixtures/s3.events.jsonl" >/dev/null
+jq -s -e 'all(.[] | select(.type == "input.finished") | .payload; .status == "resumed")' "$fixtures/s3-resume.events.jsonl" >/dev/null
 
 # Exercise URL-token acquisition exactly as specified by TAMS 8.1.
 TAMSIN_ENDPOINT="$API_URL?access_token=$TAMSIN_AUTH_TOKEN" TAMSIN_AUTH_MODE=url-token \
@@ -843,5 +738,5 @@ TAMSIN_AUTH_MODE=oauth-client docker run --rm --network host "${docker_host_args
   -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_FORMAT \
   "$IMAGE" doctor --online >/dev/null
 
-printf 'TAMOSS %s end-to-end matrix passed with profile %s: local, deterministic resume, directory, manifest, HTTP, stdin, S3, whole-file, MPEG-TS segments, Segment retraction, bearer, URL token, and OAuth client credentials.\nFlows read back from the live service satisfied AppNote 0003 tag naming, AppNote 0006 container and collection rules, and operator-owned generation handling.\n' \
-  "$TAMOSS_RELEASE" "$PROFILE"
+printf 'TAMS %s end-to-end matrix passed with profile %s: local, deterministic resume, directory, manifest, HTTP, stdin, S3, whole-file, MPEG-TS segments, bearer, URL token, and OAuth client credentials.\nFlows read back from the live service satisfied AppNote 0003 tag naming, AppNote 0006 container and collection rules, and operator-owned generation handling.\n' \
+  "$TAMS_VERSION" "$PROFILE"

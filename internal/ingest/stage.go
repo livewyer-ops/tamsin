@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/livewyer-ops/tamsin/internal/observability"
 	"github.com/livewyer-ops/tamsin/internal/source"
@@ -22,9 +24,18 @@ type stagedFile struct {
 	// copy of a remote input is ours alone and cannot change underneath us; a
 	// local input belongs to whoever is running Tamsin and may be rewritten at
 	// any point, so the two cannot be treated alike.
-	owned   bool
-	cleanup func()
-	lease   *stagingLease
+	owned    bool
+	cleanup  func()
+	lease    *stagingLease
+	bridge   *source.Bridge
+	revision string
+}
+
+func (s stagedFile) identityKey() string {
+	if s.revision != "" {
+		return s.revision
+	}
+	return s.sha256
 }
 
 func stage(ctx context.Context, item source.Item, tempRoot string, retries int, lease *stagingLease,
@@ -61,7 +72,7 @@ func stage(ctx context.Context, item source.Item, tempRoot string, retries int, 
 		lease.subtract(stagedBytes)
 		stagedBytes = 0
 	}
-	filename := filepath.Join(directory, safeFilename(item.Name))
+	filename := filepath.Join(directory, stagedFilename(item.Name))
 	output, err := os.OpenFile(filename, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		_ = input.Close()
@@ -137,4 +148,18 @@ func stage(ctx context.Context, item source.Item, tempRoot string, retries int, 
 		path: filename, size: size, sha256: hex.EncodeToString(hash.Sum(nil)),
 		owned: true, cleanup: cleanup, lease: lease,
 	}, nil
+}
+
+var stagedExtension = regexp.MustCompile(`^\.[a-z0-9]{1,8}$`)
+
+// stagedFilename keeps only a short alphanumeric extension from the remote or
+// stdin name, because FFmpeg selects a few raw formats by extension alone. The
+// basename itself never reaches the media tools, and the demuxer allowlist
+// decides what an extension may select.
+func stagedFilename(name string) string {
+	extension := strings.ToLower(filepath.Ext(strings.TrimSpace(name)))
+	if !stagedExtension.MatchString(extension) {
+		extension = ".bin"
+	}
+	return "input" + extension
 }

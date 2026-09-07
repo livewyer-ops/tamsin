@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/livewyer-ops/tamsin/security/advisories/new
     about: Report vulnerabilities privately; never include sensitive details in an issue.
   - name: Documentation
-    url: https://github.com/livewyer-ops/tamsin/blob/main/docs/README.md
-    about: Start with the documentation map for setup and operational guidance.
+    url: https://github.com/livewyer-ops/tamsin#readme
+    about: Installation, configuration and operational guidance.

@@ -1,6 +1,4 @@
-// Package observability provides the deliberately small, secret-safe
-// operational vocabulary shared by input resolution, ingest, and the TAMS
-// client.
+// Package observability records run metrics and classified retry events.
 //
 // It never accepts a URL, header, response body, or error message as a log
 // attribute. Callers supply typed operations and ordinary errors/status codes;
@@ -19,9 +17,7 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/netio"
 )
 
-// Operation is a closed vocabulary for a retryable operation. Keeping this a
-// typed value rather than caller-provided prose prevents a locator or provider
-// message from accidentally becoming an operation name.
+// Operation names a retryable operation without including caller-provided text.
 type Operation uint8
 
 const (
@@ -77,10 +73,8 @@ type Snapshot struct {
 	Stranded      int64
 }
 
-// RetryEvent is the secret-safe semantic form of a scheduled retry. It is
-// suitable for machine event streams because every string belongs to a closed
-// vocabulary; raw URLs, provider messages, response bodies, and credentials
-// never cross this boundary.
+// RetryEvent describes a scheduled retry using fixed classes. It excludes raw
+// URLs, provider messages, response bodies and credentials.
 type RetryEvent struct {
 	Operation   Operation
 	Attempt     int

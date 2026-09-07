@@ -84,14 +84,8 @@ func ParseAPIVersion(document map[string]any) (APIVersion, error) {
 	return APIVersion{Major: parsedMajor, Minor: parsedMinor}, nil
 }
 
-// ServiceLimits are the lifetimes a service advertises for the things it hands
-// a client, and they are scheduling instructions rather than trivia.
-//
-// A Media Object is collected if it is not registered against a Flow Segment in
-// time, and a presigned URL stops working when it expires. A client that
-// allocates everything up front, uploads for an hour and registers at the end
-// is relying on neither of those happening, which the specification does not
-// promise: the guaranteed minimums are five minutes and thirty seconds.
+// ServiceLimits are the advertised minimum Object registration and presigned
+// URL start lifetimes. Scheduling must respect both deadlines.
 type ServiceLimits struct {
 	// ObjectRegistration is how long a Media Object survives unregistered.
 	ObjectRegistration time.Duration
@@ -121,15 +115,9 @@ var (
 	timestampDurationPattern = regexp.MustCompile(`^(0|[1-9][0-9]*):(0|[1-9][0-9]{0,8})$`)
 )
 
-// ParseServiceLimits reads the advertised lifetimes from a service document.
-//
-// The ingest path allocates Objects and consumes generated PUT/GET URLs, so it
-// cannot safely schedule either operation without bounded guarantees. Treating
-// a missing or malformed value as zero used to mean "unlimited" to the batching
-// code, inverting an invalid service document into the least safe schedule.
-// min_object_timeout is required by the schema and therefore fails when absent;
-// min_presigned_url_timeout is conditional, so absence uses its explicit pinned
-// minimum while a present value is strictly validated.
+// ParseServiceLimits requires min_object_timeout and validates both lifetimes.
+// An omitted min_presigned_url_timeout uses the pinned specification minimum;
+// a missing or malformed value must never imply an unlimited lifetime.
 func ParseServiceLimits(document map[string]any) (ServiceLimits, error) {
 	object, err := requiredLifetime(document, "min_object_timeout", MinimumObjectRegistration)
 	if err != nil {

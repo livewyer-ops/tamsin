@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -38,10 +39,7 @@ func (t *truncatingReader) Read(buffer []byte) (int, error) {
 
 func (t *truncatingReader) Close() error { return nil }
 
-// TestStagingResumesAfterATruncatedTransfer covers the case that makes staging
-// expensive to get wrong. Staging a large input is often the longest part of an
-// ingest, and a connection dropping near the end used to cost the whole
-// transfer again.
+// A truncated transfer must resume from the staged prefix.
 func TestStagingResumesAfterATruncatedTransfer(t *testing.T) {
 	t.Parallel()
 	content := bytes.Repeat([]byte("time-addressable media "), 4096)
@@ -320,9 +318,7 @@ func TestWorthResuming(t *testing.T) {
 	}
 }
 
-// TestStagingHonoursTheConfiguredRetryBudget covers the allowance itself. It
-// used to be a constant of its own, so --retries moved the HTTP client's budget
-// while staging kept resuming four times regardless, and the two multiplied.
+// Staging must respect the configured retry budget.
 func TestStagingHonoursTheConfiguredRetryBudget(t *testing.T) {
 	t.Parallel()
 	content := bytes.Repeat([]byte("media "), 2048)
@@ -357,5 +353,27 @@ func TestStagingHonoursTheConfiguredRetryBudget(t *testing.T) {
 				t.Fatalf("observed retries = %d, want %d", got, retries)
 			}
 		})
+	}
+}
+
+func TestStageUsesAFixedFilenameForRemoteInputs(t *testing.T) {
+	t.Parallel()
+	item := source.Item{
+		URI: "https://media.example.test/evil.m3u8", Name: "evil.m3u8", Size: 5,
+		Open: func(context.Context) (io.ReadCloser, error) { return io.NopCloser(strings.NewReader("#EXTM")), nil },
+	}
+	staged, err := stage(context.Background(), item, t.TempDir(), 0, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer staged.cleanup()
+	if filepath.Base(staged.path) != "input.m3u8" {
+		t.Fatalf("remote basename reached the staged file: %s", staged.path)
+	}
+	for name, want := range map[string]string{"": "input.bin", "clip": "input.bin", "../x/clip.APTX": "input.aptx",
+		"a.b.verylongextension": "input.bin", "clip.m4v?sig=1": "input.bin", "stdin.bin": "input.bin"} {
+		if got := stagedFilename(name); got != want {
+			t.Errorf("stagedFilename(%q) = %q, want %q", name, got, want)
+		}
 	}
 }

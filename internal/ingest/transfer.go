@@ -221,9 +221,9 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []
 	if reservation != nil {
 		reservation.releaseAll()
 	}
-	records := registrationRecords(chunk, registrationUploaded)
+	records := registrationRecords(chunk)
 	for _, record := range records {
-		setRegistrationState(record, registrationUploaded, objectResults)
+		setObjectDisposition(objectResults, record.object.id, ObjectDispositionUploaded)
 	}
 
 	requests := make([]tams.SegmentRequest, 0, len(chunk))
@@ -234,7 +234,7 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []
 		})
 	}
 	for _, record := range records {
-		setRegistrationState(record, registrationIndeterminate, objectResults)
+		setObjectDisposition(objectResults, record.object.id, ObjectDispositionRegistrationIndeterminate)
 	}
 	registrationRecovered := false
 	if err := p.client.RegisterSegments(ctx, flowID, requests); err != nil {
@@ -246,7 +246,7 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []
 		registrationRecovered = true
 	} else {
 		for _, record := range records {
-			setRegistrationState(record, registrationRegistered, objectResults)
+			setObjectDisposition(objectResults, record.object.id, ObjectDispositionRegistered)
 		}
 	}
 
@@ -303,7 +303,7 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []
 		}
 	}
 	for _, object := range chunk {
-		setObjectStatus(objectResults, object.id, ObjectStatusIngested)
+		setObjectDisposition(objectResults, object.id, ObjectDispositionIngested)
 	}
 	completed := make(map[string]struct{}, len(chunk))
 	for _, object := range chunk {
@@ -484,7 +484,7 @@ func (p *Pipeline) registerPreparedObjects(ctx context.Context, flowID string, o
 		if p.config.VerificationMode != VerificationNone {
 			resumed = append(resumed, verificationTask{object: object, segment: *segment})
 		}
-		setObjectStatus(objectResults, object.id, ObjectStatusResumed)
+		setObjectDisposition(objectResults, object.id, ObjectDispositionResumed)
 	}
 	// Resumed Objects are checked before missing uploads. When URL lifetimes are
 	// advertised, the tasks intentionally carry no URL: verifyOne refreshes each
@@ -500,11 +500,11 @@ func (p *Pipeline) registerPreparedObjects(ctx context.Context, flowID string, o
 		for index, outcome := range outcomes {
 			switch outcome {
 			case outcomeRetracted:
-				setObjectStatus(objectResults, resumed[index].object.id, ObjectStatusRetracted)
+				setObjectDisposition(objectResults, resumed[index].object.id, ObjectDispositionRetracted)
 				setObjectVerification(objectResults, resumed[index].object.id,
 					ObjectVerificationFailed, VerificationMethodReadback)
 			case outcomeRetractionFailed:
-				setObjectStatus(objectResults, resumed[index].object.id, ObjectStatusStranded)
+				setObjectDisposition(objectResults, resumed[index].object.id, ObjectDispositionStranded)
 				setObjectVerification(objectResults, resumed[index].object.id,
 					ObjectVerificationFailed, VerificationMethodReadback)
 			}
@@ -547,7 +547,7 @@ func (p *Pipeline) registerPreparedObjects(ctx context.Context, flowID string, o
 	}
 
 	for _, object := range missing {
-		setObjectStatus(objectResults, object.id, ObjectStatusIngested)
+		setObjectDisposition(objectResults, object.id, ObjectDispositionIngested)
 	}
 	return nil
 }

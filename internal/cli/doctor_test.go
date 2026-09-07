@@ -162,6 +162,15 @@ func TestDoctorReportJSONAndHumanAreCheckOriented(t *testing.T) {
 	if code != ExitOK {
 		t.Fatalf("exit = %d; stdout = %s; stderr = %s", code, stdout, stderr)
 	}
+	keys := []string{"schema_version", "status", "tamsin", "tool_version", "tool_commit", "go", "os", "arch", "profile", "online", "checks"}
+	if result.ToolBuildDate != "" {
+		keys = append(keys, "tool_build_date")
+	}
+	wire := assertJSONKeys(t, []byte(stdout), keys...)
+	if string(wire["schema_version"]) != `"1.0"` || string(wire["online"]) != "false" {
+		t.Fatalf("doctor version/online fields = %s", stdout)
+	}
+	assertJSONKeys(t, wire["profile"], "selection", "name", "version", "segment_duration", "segment_format", "essence_storage", "requires_ffmpeg")
 	if result.SchemaVersion != DoctorReportSchemaVersion || result.Status != doctorPass ||
 		result.Tamsin == "" || result.ToolVersion == "" || result.ToolCommit == "" ||
 		result.Go == "" || result.OS == "" || result.Arch == "" || result.Profile.Name != ingest.ProfilePreserve {
@@ -189,6 +198,23 @@ func TestDoctorReportJSONAndHumanAreCheckOriented(t *testing.T) {
 	if strings.HasPrefix(strings.TrimSpace(textOut.String()), "{") {
 		t.Fatalf("text report is JSON: %s", textOut.String())
 	}
+}
+
+func assertJSONKeys(t *testing.T, data []byte, keys ...string) map[string]json.RawMessage {
+	t.Helper()
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		t.Fatal(err)
+	}
+	if len(object) != len(keys) {
+		t.Fatalf("JSON = %s, want keys %v", data, keys)
+	}
+	for _, key := range keys {
+		if _, ok := object[key]; !ok {
+			t.Fatalf("JSON = %s, missing key %q", data, key)
+		}
+	}
+	return object
 }
 
 func TestDoctorChecksFFmpegOnlyForMediaWritingTreatment(t *testing.T) {

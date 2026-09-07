@@ -358,7 +358,7 @@ func TestCredentialEndpointPolicy(t *testing.T) {
 		{name: "localhost subdomain is remote", url: "http://localhost.example.test/tams", allowHTTP: true},
 		{name: "localhost suffix is remote", url: "http://127.0.0.1.example.test/tams", allowHTTP: true},
 		{name: "trailing dot is not the exact localhost name", url: "http://localhost./tams", allowHTTP: true},
-		{name: "legacy integer IPv4 is not accepted", url: "http://2130706433/tams", allowHTTP: true},
+		{name: "integer IPv4 is not accepted", url: "http://2130706433/tams", allowHTTP: true},
 		{name: "abbreviated IPv4 is not accepted", url: "http://127.1/tams", allowHTTP: true},
 		{name: "octal-looking IPv4 is not accepted", url: "http://0177.0.0.1/tams", allowHTTP: true},
 		{name: "unspecified IPv6 is not loopback", url: "http://[::]/tams", allowHTTP: true},

@@ -42,7 +42,7 @@ func registrationFixture(t *testing.T, client *fakeClient, objects, transfers in
 			id: id, path: path, size: int64(len(data)), sha256: hex.EncodeToString(digest[:]),
 			start: int64(index) * int64(time.Second), duration: int64(time.Second), timerange: timerange,
 		}
-		results[index] = ObjectResult{ObjectID: id, Timerange: timerange, Status: ObjectStatusPlanned}
+		results[index] = ObjectResult{ObjectID: id, Timerange: timerange, Disposition: ObjectDispositionPlanned}
 	}
 	return pipeline, prepared, results
 }
@@ -179,8 +179,8 @@ func TestRegistrationResponseLossAndReadbackFailureRetractsEveryObject(t *testin
 		}
 	}
 	for _, result := range results {
-		if result.Status != ObjectStatusRetracted {
-			t.Fatalf("object %s status = %q, want retracted", result.ObjectID, result.Status)
+		if result.Disposition != ObjectDispositionRetracted {
+			t.Fatalf("object %s status = %q, want retracted", result.ObjectID, result.Disposition)
 		}
 	}
 }
@@ -241,12 +241,15 @@ func TestIncompleteFreshListingVerifiesVisibleAndRetractsEveryMissingObject(t *t
 		t.Fatalf("verified = %d, deletions = %d, remaining = %d", verified, deletions, remaining)
 	}
 	for index, result := range results {
-		want := ObjectStatusVerified
+		want := ObjectDispositionRegistered
 		if index >= 2 {
-			want = ObjectStatusRetracted
+			want = ObjectDispositionRetracted
 		}
-		if result.Status != want {
-			t.Fatalf("object %s status = %q, want %q", result.ObjectID, result.Status, want)
+		if result.Disposition != want {
+			t.Fatalf("object %s status = %q, want %q", result.ObjectID, result.Disposition, want)
+		}
+		if index < 2 && (result.Verification != ObjectVerificationVerified || result.VerificationMethod != VerificationMethodReadback) {
+			t.Fatalf("visible object was not verified by readback: %#v", result)
 		}
 	}
 }
@@ -284,12 +287,12 @@ func TestTypedPartialRegistrationDoesNotReadAfterWrite(t *testing.T) {
 		t.Fatalf("deletions = %d, remaining = %d; authoritative registered complement was not rolled back", deletions, remaining)
 	}
 	for index, result := range results {
-		want := ObjectStatusRetracted
+		want := ObjectDispositionRetracted
 		if index >= 2 {
-			want = ObjectStatusRejected
+			want = ObjectDispositionRejected
 		}
-		if result.Status != want {
-			t.Fatalf("object %s status = %q, want %q", result.ObjectID, result.Status, want)
+		if result.Disposition != want {
+			t.Fatalf("object %s status = %q, want %q", result.ObjectID, result.Disposition, want)
 		}
 	}
 }
@@ -341,8 +344,8 @@ func TestRegistrationCleanupReportsEveryStrandedObject(t *testing.T) {
 		t.Fatalf("attempted %d of %d retractions", deletions, len(objects))
 	}
 	for _, result := range results {
-		if result.Status != ObjectStatusStranded {
-			t.Fatalf("object %s status = %q, want stranded", result.ObjectID, result.Status)
+		if result.Disposition != ObjectDispositionStranded {
+			t.Fatalf("object %s status = %q, want stranded", result.ObjectID, result.Disposition)
 		}
 	}
 }

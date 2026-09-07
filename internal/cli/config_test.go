@@ -95,6 +95,32 @@ func TestConfigurationPrecedence(t *testing.T) {
 	}
 }
 
+func TestInputModeConfigurationPrecedence(t *testing.T) {
+	app := &application{v: newSettings()}
+	command := app.ingestCommand()
+	get := func() string { return app.configString(command, "input-mode", "ingest.input_mode") }
+	if get() != "auto" {
+		t.Fatal("input mode did not default to auto")
+	}
+	app.v.file = map[string]any{"ingest.input_mode": "stage"}
+	if get() != "stage" {
+		t.Fatal("file input mode was ignored")
+	}
+	t.Setenv("TAMSIN_INGEST_INPUT_MODE", "stream")
+	if get() != "stream" {
+		t.Fatal("environment did not override file")
+	}
+	if err := command.Flags().Set("input-mode", "auto"); err != nil {
+		t.Fatal(err)
+	}
+	if get() != "auto" {
+		t.Fatal("flag did not override environment")
+	}
+	if err := ingest.InputMode("pipe").Validate(); err == nil {
+		t.Fatal("unknown input mode was accepted")
+	}
+}
+
 func TestConfigurationEnvironmentIsStrict(t *testing.T) {
 	app := &application{v: newSettings()}
 	t.Setenv("TAMSIN_HTTP_RETRIES", "4")

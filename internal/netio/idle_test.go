@@ -130,3 +130,19 @@ func TestIdleWatchProgressAndStopAreRaceSafe(t *testing.T) {
 	})
 	group.Wait()
 }
+
+func TestDemandBodyPausesForConsumerButTimesOutARead(t *testing.T) {
+	t.Parallel()
+	watch := NewIdleWatch(context.Background(), 40*time.Millisecond)
+	body := watch.DemandBody(io.NopCloser(contextReader{ctx: watch.Context()}))
+	defer body.Close()
+	time.Sleep(100 * time.Millisecond)
+	if watch.Context().Err() != nil {
+		t.Fatal("consumer backpressure expired the upstream clock")
+	}
+	_, err := body.Read(make([]byte, 1))
+	var timeout *IdleTimeoutError
+	if !errors.As(err, &timeout) {
+		t.Fatalf("stalled read: %v", err)
+	}
+}

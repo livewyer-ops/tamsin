@@ -9,11 +9,8 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/tams"
 )
 
-// The startup phases share mutable state, so the order they run in is
-// load-bearing rather than stylistic. This drives the whole sequence: if storage
-// selection ran before the backends request was checked, it would resolve
-// against a nil list and report "no default storage backend", blaming the
-// operator's configuration for what was actually a transport failure.
+// Check request errors before backend selection, so transport failures do not
+// become misleading "no default storage backend" errors.
 func TestStartupPreflightBlamesTheBackendsRequestNotTheSelection(t *testing.T) {
 	t.Parallel()
 

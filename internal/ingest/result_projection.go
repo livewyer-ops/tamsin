@@ -18,18 +18,15 @@ func (p *Pipeline) newObjectResult(object preparedObject) ObjectResult {
 	}
 	return ObjectResult{
 		ObjectID: object.id, Timerange: object.timerange, Bytes: object.size, SHA256: object.sha256,
-		Status: ObjectStatusPlanned, Disposition: ObjectDispositionPlanned,
+		Disposition:  ObjectDispositionPlanned,
 		Verification: verification, VerificationMethod: VerificationMethodNone,
 	}
 }
 
-func setObjectStatus(objects []ObjectResult, objectID string, status ObjectStatus) {
+func setObjectDisposition(objects []ObjectResult, objectID string, disposition ObjectDisposition) {
 	for index := range objects {
 		if objects[index].ObjectID == objectID {
-			objects[index].Status = status
-			if disposition := objectDispositionForStatus(status); disposition != "" {
-				objects[index].Disposition = disposition
-			}
+			objects[index].Disposition = disposition
 			return
 		}
 	}
@@ -49,41 +46,13 @@ func setObjectVerification(objects []ObjectResult, objectID string,
 
 func finalizeObjectResult(object *ObjectResult) {
 	if object.Disposition == "" {
-		object.Disposition = objectDispositionForStatus(object.Status)
-		if object.Disposition == "" {
-			object.Disposition = ObjectDispositionUnattempted
-		}
+		object.Disposition = ObjectDispositionUnattempted
 	}
 	if object.Verification == "" {
 		object.Verification = ObjectVerificationNotReached
 	}
 	if object.VerificationMethod == "" {
 		object.VerificationMethod = VerificationMethodNone
-	}
-}
-
-func objectDispositionForStatus(status ObjectStatus) ObjectDisposition {
-	switch status {
-	case ObjectStatusPlanned:
-		return ObjectDispositionPlanned
-	case ObjectStatusUploaded:
-		return ObjectDispositionUploaded
-	case ObjectStatusRegistered, ObjectStatusVerified:
-		return ObjectDispositionRegistered
-	case ObjectStatusResumed:
-		return ObjectDispositionResumed
-	case ObjectStatusIngested:
-		return ObjectDispositionIngested
-	case ObjectStatusRejected:
-		return ObjectDispositionRejected
-	case ObjectStatusRetractionIndeterminate:
-		return ObjectDispositionRegistrationIndeterminate
-	case ObjectStatusRetracted:
-		return ObjectDispositionRetracted
-	case ObjectStatusStranded:
-		return ObjectDispositionStranded
-	default:
-		return ""
 	}
 }
 

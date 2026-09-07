@@ -122,12 +122,12 @@ func inspectResult(result ingest.Result) resultState {
 		state.totalObjects += flowObjectCount(flow)
 		for _, object := range flow.Objects {
 			entry := objectState{flow: flow, object: object}
-			switch object.Status {
-			case ingest.ObjectStatusStranded:
+			switch object.Disposition {
+			case ingest.ObjectDispositionStranded:
 				state.stranded = append(state.stranded, entry)
-			case ingest.ObjectStatusRetracted:
+			case ingest.ObjectDispositionRetracted:
 				state.retracted = append(state.retracted, entry)
-			case ingest.ObjectStatusRetractionIndeterminate:
+			case ingest.ObjectDispositionRegistrationIndeterminate:
 				state.registrationUncertain = append(state.registrationUncertain, entry)
 			}
 		}
@@ -314,9 +314,9 @@ func writeFlow(output *humanWriter, rootFlowID string, flow ingest.FlowResult, v
 		output.line(4, "not attempted")
 	}
 	for _, object := range flow.Objects {
-		switch object.Status {
-		case ingest.ObjectStatusStranded, ingest.ObjectStatusRetracted, ingest.ObjectStatusRetractionIndeterminate:
-			output.keyValue(4, string(object.Status)+" object", object.ObjectID)
+		switch object.Disposition {
+		case ingest.ObjectDispositionStranded, ingest.ObjectDispositionRetracted, ingest.ObjectDispositionRegistrationIndeterminate:
+			output.keyValue(4, objectLabel(object)+" object", object.ObjectID)
 		}
 	}
 }
@@ -328,8 +328,24 @@ func flowObjectCount(flow ingest.FlowResult) int {
 	return len(flow.Objects)
 }
 
+func objectLabel(object ingest.ObjectResult) string {
+	switch object.Disposition {
+	case ingest.ObjectDispositionRegistered:
+		if object.Verification == ingest.ObjectVerificationVerified {
+			return "verified"
+		}
+	case ingest.ObjectDispositionRegistrationIndeterminate:
+		return "registration-indeterminate"
+	case ingest.ObjectDispositionRejected:
+		return "registration-rejected"
+	case ingest.ObjectDispositionUnattempted:
+		return "planned"
+	}
+	return string(object.Disposition)
+}
+
 func writeObject(output *humanWriter, object ingest.ObjectResult) {
-	label := string(object.Status)
+	label := objectLabel(object)
 	if label == "" {
 		label = "object"
 	} else {

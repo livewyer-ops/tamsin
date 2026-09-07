@@ -168,6 +168,7 @@ func configDefinitions() []configDefinition {
 		{key: "ingest.essence_storage", kind: configString, defaultValue: string(media.EssenceStorageIndependent), fileAllowed: true},
 		{key: "ingest.flow_id", kind: configString, defaultValue: "", fileAllowed: true},
 		{key: "ingest.flow_metadata", kind: configString, defaultValue: "", fileAllowed: true},
+		{key: "ingest.input_mode", kind: configString, defaultValue: "auto", fileAllowed: true},
 		{key: "ingest.max_inputs", kind: configInt, defaultValue: source.DefaultMaxInputs, fileAllowed: true},
 		{key: "ingest.probe_concurrency", kind: configInt, defaultValue: 2, fileAllowed: true},
 		{key: "ingest.profile", kind: configString, defaultValue: "", fileAllowed: true},
@@ -585,6 +586,9 @@ func (a *application) validateConfigValues(command *cobra.Command) error {
 		return errors.New("max-inputs must be positive")
 	}
 	if err := ingest.DryRunMode(a.configString(command, "dry-run", "ingest.dry_run")).Validate(); err != nil {
+		return err
+	}
+	if err := ingest.InputMode(a.configString(command, "input-mode", "ingest.input_mode")).Validate(); err != nil {
 		return err
 	}
 	if err := ingest.VerificationMode(a.configString(command, "verify", "ingest.verify")).Validate(); err != nil {

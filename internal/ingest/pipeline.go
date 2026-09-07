@@ -11,7 +11,6 @@ import (
 	"mime"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +40,15 @@ const multiOutputEssenceThreshold = 4
 const rendererIdentityEpoch = "2"
 
 func New(config Config, client TAMSClient, prober media.Prober, segmenter media.Segmenter, logger *slog.Logger, reporter progress.Reporter) (*Pipeline, error) {
+	if config.InputMode == "" {
+		config.InputMode = InputAuto
+	}
+	if err := config.InputMode.Validate(); err != nil {
+		return nil, err
+	}
+	if config.InputMode == InputStream && len(config.FFmpegArgs) > 0 {
+		return nil, errors.New("stream input mode cannot be combined with FFmpeg arguments; use auto or stage")
+	}
 	if config.DryRunMode == "" {
 		config.DryRunMode = DryRunOff
 	}
@@ -161,23 +169,15 @@ func New(config Config, client TAMSClient, prober media.Prober, segmenter media.
 	}, nil
 }
 
-func (p *Pipeline) ResultContract() ResultContract {
-	return ResultContract{
+func (p *Pipeline) newBatch(results []Result) BatchResult {
+	return BatchResult{
 		SchemaVersion:  ResultSchemaVersion,
 		ToolVersion:    version.Version,
 		ToolCommit:     version.SourceCommit(),
 		ToolBuildDate:  version.BuildDate(),
 		ProfileVersion: p.config.ProfileVersion,
 		RunID:          p.runID,
-	}
-}
-
-func (p *Pipeline) newBatch(results []Result) BatchResult {
-	contract := p.ResultContract()
-	return BatchResult{
-		SchemaVersion: contract.SchemaVersion, ToolVersion: contract.ToolVersion,
-		ToolCommit: contract.ToolCommit, ToolBuildDate: contract.ToolBuildDate,
-		ProfileVersion: contract.ProfileVersion, RunID: contract.RunID, Results: results,
+		Results:        results,
 	}
 }
 
@@ -419,32 +419,43 @@ func (p *Pipeline) initialVerificationStatus() VerificationStatus {
 	return VerificationNotRequested
 }
 
-func (p *Pipeline) ingestOne(ctx context.Context, item source.Item, storageID string) (Result, error) {
+func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID string, mode InputMode) (result Result, returnErr error) {
 	p.logger.Info("preparing input", "input", safeURI(item.URI))
-	lease, required, available, err := p.staging.reserve(ctx, item, p.config)
+	staged, err := p.prepareInput(ctx, item, mode)
 	if err != nil {
-		return Result{}, withFailure(FailureCodeStagingCapacity, FailureMessageStagingCapacity, true, err)
-	}
-	defer lease.release()
-	p.logger.Debug("staging preflight", "input", safeURI(item.URI),
-		"estimated_required_bytes", required, "available_bytes", available)
-	staged, err := stage(ctx, item, p.config.TempDirectory, p.config.Retries, lease, p.observability)
-	if err != nil {
-		return Result{}, withFailure(FailureCodeSourceTransferFailed, FailureMessageSourceTransferFailed, true, err)
+		return Result{}, classifyPrepareFailure(err)
 	}
 	defer staged.cleanup()
-	p.observability.Staged(staged.size)
+	if staged.bridge != nil {
+		ctx = staged.bridge.Context()
+		defer func() {
+			upstream := staged.bridge.Upstream()
+			if upstream == nil {
+				returnErr = staged.bridge.Redact(returnErr)
+				return
+			}
+			code, message := FailureCodeSourceTransferFailed, FailureMessageSourceTransferFailed
+			if errors.Is(upstream, source.ErrSnapshotChanged) {
+				code, message = FailureCodeSourceChanged, FailureMessageSourceChanged
+			}
+			// A concurrent upstream failure forbids staging fallback even when
+			// the initial media evidence also proves insufficient.
+			returnErr = &fallbackForbiddenError{errors.Join(withFailure(code, message, true, upstream), staged.bridge.Redact(returnErr))}
+		}()
+	}
 
+	// The container is identified from its own bytes before any media tool
+	// parses the input.
+	contentType, err := staged.contentType(ctx)
+	if err != nil {
+		return Result{}, withFailure(FailureCodeMediaAnalysisFailed, FailureMessageMediaContainerUnknown, true, err)
+	}
 	// The input's own probe is an ffprobe spawn like any other, so it draws on
 	// the same budget; leaving it out let one process per concurrent input
 	// escape the bound.
-	probe, err := p.probeInput(ctx, staged.path)
+	probe, err := p.probePreparedInput(ctx, staged)
 	if err != nil {
 		return Result{}, withFailure(FailureCodeMediaAnalysisFailed, FailureMessageMediaAnalysisFailed, true, err)
-	}
-	contentType, err := media.DetectContentType(staged.path)
-	if err != nil {
-		return Result{}, withFailure(FailureCodeMediaAnalysisFailed, FailureMessageMediaContainerUnknown, true, err)
 	}
 	writesOutput := ffmpegWritesOutput(p.config, probe)
 	if writesOutput {
@@ -478,15 +489,16 @@ func (p *Pipeline) ingestOne(ctx context.Context, item source.Item, storageID st
 		}
 	}
 
-	profileKey := flowProfile(staged.sha256, p.config)
+	profileKey := flowProfile(staged.identityKey(), p.config)
 	flowID := p.config.FlowID
 	sourceID := p.config.SourceID
 	if sourceID == "" {
-		sourceID = sourceIdentity(staged.sha256)
+		sourceID = sourceIdentity(staged.identityKey())
 	}
 	identity := media.Identity{
-		FlowID: flowID, SourceID: sourceID, Label: generatedLabel(staged.sha256),
+		FlowID: flowID, SourceID: sourceID, Label: generatedLabel(staged.identityKey()),
 		URI: safeURI(item.URI), SHA256: staged.sha256, Size: staged.size,
+		InputRevision: staged.revision,
 		IngestProfile: p.config.Profile, IngestProfileVersion: p.config.ProfileVersion,
 		FFmpegVersion: ffmpegVersion, MediaToolchain: toolchainFingerprint,
 	}
@@ -501,6 +513,12 @@ func (p *Pipeline) ingestOne(ctx context.Context, item source.Item, storageID st
 				fmt.Errorf("derive media interpretation identity: %w", err))
 		}
 		flowID = generatedRootFlowID(profileKey, mediaKey)
+		if staged.bridge != nil {
+			flowID, err = streamedFlowID(profileKey, flow, flowInfo, p.config.FlowMetadata)
+			if err != nil {
+				return Result{}, err
+			}
+		}
 	}
 	// A locator is not part of generated identity. Consequently two resolved
 	// items in this process can name the same graph when their staged bytes and
@@ -538,7 +556,7 @@ func (p *Pipeline) ingestOne(ctx context.Context, item source.Item, storageID st
 	for index, collected := range flowInfo.Collected {
 		position := strconv.Itoa(index)
 		collectedID := generatedChildFlowID(flowID, "collected", position)
-		collectedSourceID := sourceIdentity(staged.sha256, "essence", position)
+		collectedSourceID := sourceIdentity(staged.identityKey(), "essence", position)
 		collected.Flow["id"] = collectedID
 		collected.Flow["source_id"] = collectedSourceID
 		collectedFlows = append(collectedFlows, collectedFlow{
@@ -593,7 +611,7 @@ func (p *Pipeline) ingestOne(ctx context.Context, item source.Item, storageID st
 	}
 	p.applyBitRates(flow, objects)
 
-	result := Result{
+	result = Result{
 		Input: safeURI(item.URI), Profile: p.config.Profile, ProfileVersion: p.config.ProfileVersion,
 		FFmpegVersion: ffmpegVersion, MediaToolchain: toolchainFingerprint,
 		RootFlowID: flowID, Bytes: staged.size, SHA256: staged.sha256,
@@ -648,7 +666,7 @@ func (p *Pipeline) ingestOne(ctx context.Context, item source.Item, storageID st
 	result.Status = ResultStatusIngested
 	allResumed := len(result.Flows[rootIndex].Objects) > 0
 	for _, object := range result.Flows[rootIndex].Objects {
-		if object.Status != ObjectStatusResumed {
+		if object.Disposition != ObjectDispositionResumed {
 			allResumed = false
 			break
 		}
@@ -678,6 +696,13 @@ func hasValidContainerOverride(flow tams.Flow) bool {
 // misleading. JSON Pointers make the error actionable against the supplied
 // document and New's caller reports it as a usage error.
 func validateFlowMetadataOverrides(flow tams.Flow) error {
+	if tags, ok := flow["tags"].(map[string]any); ok {
+		for _, field := range []string{media.TagPrefix + "input_revision", media.TagPrefix + "sha256"} {
+			if _, present := tags[field]; present {
+				return fmt.Errorf("--flow-metadata /tags/%s is derived from the input and cannot be overridden", field)
+			}
+		}
+	}
 	for _, field := range []struct {
 		name   string
 		action string
@@ -810,7 +835,7 @@ func (p *Pipeline) ingestIndependently(ctx context.Context, item source.Item, st
 	// the essences are derived beneath it.
 	collectorSourceID := p.config.SourceID
 	if collectorSourceID == "" {
-		collectorSourceID = sourceIdentity(staged.sha256)
+		collectorSourceID = sourceIdentity(staged.identityKey())
 	}
 	if p.config.SegmentDuration > 0 && p.config.DryRunMode != DryRunFast {
 		return p.ingestIndependentRolling(ctx, safeURI(item.URI), staged, collector, flowInfo,
@@ -865,7 +890,7 @@ func (p *Pipeline) ingestIndependently(ctx context.Context, item source.Item, st
 	for index, essence := range flowInfo.Collected {
 		position := strconv.Itoa(index)
 		flowID := generatedChildFlowID(collectorID, "essence", position)
-		sourceID := sourceIdentity(staged.sha256, "essence", position)
+		sourceID := sourceIdentity(staged.identityKey(), "essence", position)
 		flow := essence.Flow
 		mergeFlow(flow, p.config.FlowMetadata)
 		flow["id"] = flowID
@@ -943,7 +968,7 @@ func (p *Pipeline) ingestIndependently(ctx context.Context, item source.Item, st
 	resumed := true
 	for _, flowResult := range result.Flows {
 		for _, object := range flowResult.Objects {
-			if object.Status != ObjectStatusResumed {
+			if object.Disposition != ObjectDispositionResumed {
 				resumed = false
 			}
 		}
@@ -1152,7 +1177,13 @@ func (p *Pipeline) renderSegmentsTo(ctx context.Context, staged stagedFile, flow
 		Input: staged.path, Duration: p.config.SegmentDuration, Format: p.config.SegmentFormat,
 		SourceContainer: flowInfo.SegmentContainer, StreamIndices: streamIndices,
 		Directory: directory, AdditionalArgs: additionalArgs, StagingWindow: window,
-	}, sink)
+		BitExact: staged.bridge != nil,
+	}, func(record media.SegmentRecord) error {
+		if err := segmentCtx.Err(); err != nil {
+			return err
+		}
+		return sink(record)
+	})
 	releaseProcess()
 	releaseRolling()
 	close(monitorDone)
@@ -1410,6 +1441,9 @@ func monitorStagingDirectory(ctx context.Context, cancel context.CancelFunc, lea
 }
 
 func ensureStagedInputUnchanged(ctx context.Context, staged stagedFile) error {
+	if staged.bridge != nil {
+		return staged.bridge.Upstream()
+	}
 	size, checksum, err := digestFile(ctx, staged.path)
 	if err != nil {
 		return fmt.Errorf("recheck local input after media processing: %w", err)
@@ -1641,38 +1675,24 @@ func mediaToolchainFingerprint(profile, profileVersion, ffmpegReport string) str
 	return identityFingerprint("media-toolchain/v1", profile, profileVersion, ffmpegReport)
 }
 
-// sourceIdentity derives a Source identifier from the content it stands for.
-//
-// A Source is the content; Flows are representations of it. Deriving the
-// identifier from the location instead meant that reusing a path or an S3 key
-// for an unrelated programme handed the new content the old Source, asserting
-// that the two are the same thing in different renditions. Nothing about a
-// filename supports that claim, and a store cannot tell afterwards that it was
-// made in error.
-//
-// Content is the safer basis because it errs the other way: the same bytes
-// segmented differently share a Source, which is what makes several renditions
-// of one input hang together, while different bytes never silently inherit one.
-// A genuine re-encode does produce different bytes and so a different Source,
-// which is what --source-id is for -- an operator asserting an equivalence they
-// know about and Tamsin cannot see.
-//
-// The same essence keeps one Source whether it was stored inside a multiplex or
-// demultiplexed alongside it, because those are two representations of the same
-// content and that is precisely what a Source is for.
+// sourceIdentity derives a Source identifier from content, independent of its
+// location or packaging. The same essence shares a Source across muxed and
+// demuxed Flows. Re-encoding changes the bytes; --source-id lets the operator
+// assert equivalence when the resulting media still represents the same Source.
 func sourceIdentity(digest string, parts ...string) string {
 	return namedID(append([]string{"source", digest}, parts...)...)
 }
 
 func namedID(parts ...string) string {
-	// Source and Object IDs predate the length-framed Flow recipe. Preserve
-	// their encoding so this Flow fix does not rotate an unchanged Source or the
-	// Objects beneath an explicit --flow-id and thereby break resume.
+	// Source and Object identity encodings must stay stable for resume.
 	return uuid.NewSHA1(idNamespace, []byte(strings.Join(parts, "\x00"))).String()
 }
 
 func generatedLabel(digest string) string {
-	const prefix = "Tamsin "
+	const prefix = "TAMSin "
+	// A streamed identity key is a labelled fingerprint; the label shows the
+	// same twelve digest characters for every input kind.
+	digest = strings.TrimPrefix(digest, "sha256:")
 	if len(digest) > 12 {
 		digest = digest[:12]
 	}
@@ -1709,14 +1729,6 @@ func greatestCommonDivisor(left, right int64) int64 {
 		return -left
 	}
 	return left
-}
-
-func safeFilename(name string) string {
-	name = filepath.Base(strings.TrimSpace(name))
-	if name == "." || name == string(filepath.Separator) || name == "" {
-		return "input.bin"
-	}
-	return name
 }
 
 func safeURI(raw string) string {

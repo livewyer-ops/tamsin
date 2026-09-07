@@ -117,6 +117,18 @@ func TestStagingEstimateCoversSourceAndGeneratedOutput(t *testing.T) {
 			config: Config{EssenceStorage: media.EssenceStorageMuxed, SegmentDuration: time.Second}, want: size + outputAllowance,
 		},
 		{
+			name: "streamed output only", item: source.Item{Size: size},
+			config: Config{InputMode: InputStream, SegmentDuration: time.Second}, want: outputAllowance,
+		},
+		{
+			name: "largest finite stream reserves bounded output", item: source.Item{Size: 1<<63 - 1},
+			config: Config{InputMode: InputStream, SegmentDuration: time.Second}, want: rollingOutputWindowBytes,
+		},
+		{
+			name: "streamed fast dry run creates no output", item: source.Item{Size: size},
+			config: Config{InputMode: InputStream, DryRunMode: DryRunFast, SegmentDuration: time.Second}, want: 0,
+		},
+		{
 			name: "unknown remote length", item: source.Item{Size: -1},
 			config: Config{EssenceStorage: media.EssenceStorageMuxed}, unknown: true,
 		},

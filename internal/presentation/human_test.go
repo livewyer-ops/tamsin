@@ -272,11 +272,11 @@ func successBatch() ingest.BatchResult {
 			Flows: []ingest.FlowResult{
 				{FlowID: testCollection, SourceID: testSource, Disposition: ingest.FlowWritten},
 				{FlowID: testVideo, SourceID: "88888888-8888-4888-8888-888888888888", Role: "video", Disposition: ingest.FlowWritten, Objects: []ingest.ObjectResult{
-					{ObjectID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", Timerange: "0:0_1:25", Bytes: 500000, SHA256: strings.Repeat("1", 64), Status: ingest.ObjectStatusVerified},
-					{ObjectID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", Timerange: "1:25_2:25", Bytes: 500000, SHA256: strings.Repeat("2", 64), Status: ingest.ObjectStatusVerified},
+					{ObjectID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", Timerange: "0:0_1:25", Bytes: 500000, SHA256: strings.Repeat("1", 64), Disposition: ingest.ObjectDispositionRegistered, Verification: ingest.ObjectVerificationVerified},
+					{ObjectID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", Timerange: "1:25_2:25", Bytes: 500000, SHA256: strings.Repeat("2", 64), Disposition: ingest.ObjectDispositionRegistered, Verification: ingest.ObjectVerificationVerified},
 				}},
 				{FlowID: testAudio, SourceID: "99999999-9999-4999-8999-999999999999", Role: "audio", Disposition: ingest.FlowWritten, Objects: []ingest.ObjectResult{
-					{ObjectID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", Timerange: "0:0_2:25", Bytes: 514152, SHA256: strings.Repeat("3", 64), Status: ingest.ObjectStatusVerified},
+					{ObjectID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", Timerange: "0:0_2:25", Bytes: 514152, SHA256: strings.Repeat("3", 64), Disposition: ingest.ObjectDispositionRegistered, Verification: ingest.ObjectVerificationVerified},
 				}},
 			},
 		}},
@@ -298,9 +298,9 @@ func failureBatch() ingest.BatchResult {
 			Flows: []ingest.FlowResult{
 				{FlowID: testCollection, SourceID: testSource, Disposition: ingest.FlowIndeterminate},
 				{FlowID: testVideo, SourceID: "88888888-8888-4888-8888-888888888888", Role: "video", Disposition: ingest.FlowWritten, Objects: []ingest.ObjectResult{
-					{ObjectID: testStranded, Timerange: "0:0_1:25", Bytes: 1_048_576, SHA256: strings.Repeat("5", 64), Status: ingest.ObjectStatusStranded},
-					{ObjectID: testRetracted, Timerange: "1:25_2:25", Bytes: 1_048_576, SHA256: strings.Repeat("6", 64), Status: ingest.ObjectStatusRetracted},
-					{ObjectID: testUncertain, Timerange: "2:25_3:25", Bytes: 1_048_576, SHA256: strings.Repeat("7", 64), Status: ingest.ObjectStatusRetractionIndeterminate},
+					{ObjectID: testStranded, Timerange: "0:0_1:25", Bytes: 1_048_576, SHA256: strings.Repeat("5", 64), Disposition: ingest.ObjectDispositionStranded},
+					{ObjectID: testRetracted, Timerange: "1:25_2:25", Bytes: 1_048_576, SHA256: strings.Repeat("6", 64), Disposition: ingest.ObjectDispositionRetracted},
+					{ObjectID: testUncertain, Timerange: "2:25_3:25", Bytes: 1_048_576, SHA256: strings.Repeat("7", 64), Disposition: ingest.ObjectDispositionRegistrationIndeterminate},
 				}},
 			},
 		}},
@@ -310,3 +310,30 @@ func failureBatch() ingest.BatchResult {
 type failingWriter struct{ err error }
 
 func (writer failingWriter) Write([]byte) (int, error) { return 0, writer.err }
+
+func TestObjectLabelsPreserveReceiptWording(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		disposition  ingest.ObjectDisposition
+		verification ingest.ObjectVerificationStatus
+		want         string
+	}{
+		{"", "", ""},
+		{ingest.ObjectDispositionPlanned, "", "planned"},
+		{ingest.ObjectDispositionUnattempted, "", "planned"},
+		{ingest.ObjectDispositionUploaded, "", "uploaded"},
+		{ingest.ObjectDispositionRegistered, "", "registered"},
+		{ingest.ObjectDispositionRegistered, ingest.ObjectVerificationVerified, "verified"},
+		{ingest.ObjectDispositionRegistrationIndeterminate, "", "registration-indeterminate"},
+		{ingest.ObjectDispositionRejected, "", "registration-rejected"},
+		{ingest.ObjectDispositionIngested, ingest.ObjectVerificationVerified, "ingested"},
+		{ingest.ObjectDispositionResumed, ingest.ObjectVerificationVerified, "resumed"},
+		{ingest.ObjectDispositionRetracted, "", "retracted"},
+		{ingest.ObjectDispositionStranded, "", "stranded"},
+	} {
+		object := ingest.ObjectResult{Disposition: test.disposition, Verification: test.verification}
+		if got := objectLabel(object); got != test.want {
+			t.Errorf("objectLabel(%#v) = %q, want %q", object, got, test.want)
+		}
+	}
+}

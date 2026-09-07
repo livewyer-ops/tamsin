@@ -19,9 +19,7 @@ import (
 	"github.com/rogpeppe/go-internal/testscript"
 )
 
-// TestMain registers the CLI as an in-process command for testscript. Running
-// it this way keeps coverage attribution and avoids depending on a built
-// binary, while each script still gets its own process-like environment.
+// TestMain registers the CLI with testscript without requiring a built binary.
 func TestMain(m *testing.M) {
 	testscript.Main(m, map[string]func(){
 		"tamsin": func() {
@@ -30,11 +28,6 @@ func TestMain(m *testing.M) {
 	})
 }
 
-// TestScript exercises the CLI the way an operator meets it: real arguments,
-// real exit codes, and stdout kept separate from diagnostic stderr. The scripts
-// live in testdata/script as txtar archives, so a case is a readable transcript
-// rather than a wall of assertions.
-//
 // Run `go test ./cmd/tamsin -update` to refresh golden output after an
 // intentional change.
 func TestScript(t *testing.T) {
@@ -43,8 +36,7 @@ func TestScript(t *testing.T) {
 		UpdateScripts:       *update,
 		RequireExplicitExec: true,
 		Setup: func(env *testscript.Env) error {
-			// Scripts must not pick up an operator's real configuration or
-			// credentials, so the environment starts empty of both.
+			// Isolate scripts from the operator's configuration and credentials.
 			env.Setenv("HOME", env.WorkDir)
 			env.Setenv("XDG_CONFIG_HOME", filepath.Join(env.WorkDir, "config"))
 			for _, name := range []string{
@@ -57,8 +49,7 @@ func TestScript(t *testing.T) {
 			return nil
 		},
 		Cmds: map[string]func(ts *testscript.TestScript, neg bool, args []string){
-			// checkevents validates the complete ingest process protocol rather
-			// than treating newline-delimited JSON as a final batch document.
+			// checkevents validates the ingest event stream.
 			// Usage: checkevents FILE OUTCOME TOTAL EXIT_CODE [INPUT_STATUS,...]
 			"checkevents": checkEvents,
 		},

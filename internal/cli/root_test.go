@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/livewyer-ops/tamsin/internal/ingest"
 	"github.com/livewyer-ops/tamsin/internal/ingestevent"
+	"github.com/livewyer-ops/tamsin/internal/media"
 	"github.com/livewyer-ops/tamsin/internal/observability"
 	"github.com/livewyer-ops/tamsin/internal/progress"
 	"github.com/livewyer-ops/tamsin/internal/source"
@@ -276,22 +278,12 @@ func TestCLIRequiresProfileAndResolvesExplicitEssenceSegmentsProfile(t *testing.
 	}
 }
 
-func TestRetiredAPIInvocationPointsToTamsctl(t *testing.T) {
+func TestCLIRejectsTooManyPositionalArguments(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
-	code := Execute(context.Background(), []string{"api", "flow", "get", "flow-id"}, strings.NewReader(""), &stdout, &stderr)
-	if code != ExitUsage || !strings.Contains(stderr.String(), "moved to tamsctl") ||
+	code := Execute(context.Background(), []string{"input.mp4", "https://tams.example.test", "extra"}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitUsage || !strings.Contains(stderr.String(), "accepts at most 2 arg(s)") ||
 		strings.Contains(stderr.String(), "profile is required") {
-		t.Fatalf("exit=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
-	}
-}
-
-func TestRetiredAPIHelpPointsToTamsctl(t *testing.T) {
-	t.Parallel()
-	var stdout, stderr bytes.Buffer
-	code := Execute(context.Background(), []string{"help", "api"}, strings.NewReader(""), &stdout, &stderr)
-	if code != ExitOK || !strings.Contains(stdout.String(), "moved to tamsctl") ||
-		strings.Contains(stdout.String(), "profile is required") || stderr.Len() != 0 {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 }
@@ -383,6 +375,85 @@ func TestCLINumericFlowProfileMatchesByJSONSemanticsBeforeMutation(t *testing.T)
 	}
 	if mutations.Load() != 0 || flowReads.Load() != 0 {
 		t.Fatalf("Profile mismatch crossed planning boundary: mutations=%d flow_reads=%d", mutations.Load(), flowReads.Load())
+	}
+}
+
+func TestCLIStreamedNumericProfileAndEventOrdering(t *testing.T) {
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip("requires ffmpeg and ffprobe")
+		}
+	}
+	filename := filepath.Join(t.TempDir(), "media.wav")
+	if output, err := exec.CommandContext(t.Context(), "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=3", "-c:a", "pcm_s16le", filename).CombinedOutput(); err != nil {
+		t.Fatalf("fixture: %v: %s", err, output)
+	}
+	probe, err := (media.FFprobe{}).Probe(t.Context(), filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentType, err := media.DetectContentType(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, _, err := media.BuildFlow(probe, media.Identity{}, contentType, media.EssenceStorageMuxed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"id", "source_id", "label", "description", "tags", "max_bit_rate"} {
+		delete(metadata, field)
+	}
+	metadata["segment_duration"] = map[string]any{"numerator": 1, "denominator": 1}
+	const profileID = "60d9df18-6d9d-4b86-84bf-d1dcf14b3a28"
+	var mismatch atomic.Bool
+	var writes atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writes.Add(1)
+			w.WriteHeader(405)
+			return
+		}
+		switch r.URL.Path {
+		case "/input.wav":
+			w.Header().Set("ETag", `"fixture"`)
+			http.ServeFile(w, r, filename)
+		case "/service":
+			_, _ = io.WriteString(w, `{"api_version":"8.2","min_object_timeout":"300:0","min_presigned_url_timeout":"30:0"}`)
+		case "/service/storage-backends":
+			_, _ = io.WriteString(w, `[{"id":"6ba7b810-9dad-11d1-80b4-00c04fd430c8","default_storage":true,"store_type":"memory"}]`)
+		case "/service/profiles/" + profileID:
+			if mismatch.Load() {
+				metadata["essence_parameters"].(map[string]any)["sample_rate"] = 48001
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": profileID, "label": "audio", "flow_metadata": metadata})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	args := []string{"--profile", "muxed-segments", "--segment-duration=1s", "--input-mode=stream", "--format=json", "--progress=none",
+		"--auth=none", "--endpoint", server.URL, "--tams-flow-profile", profileID, "--input", server.URL + "/input.wav?signature=private-marker"}
+	var stdout, stderr bytes.Buffer
+	if code := Execute(t.Context(), append(append([]string{}, args...), "--dry-run=exact"), strings.NewReader(""), &stdout, &stderr); code != ExitOK {
+		t.Fatalf("matching streamed Profile: exit=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+	}
+	state := decodeCLIIngestEventStream(t, stdout.Bytes()).state
+	if state.Inputs[0].Finished == nil || state.Inputs[0].Finished.SHA256 != "" {
+		t.Fatal("streamed event claimed an input digest")
+	}
+	for _, flow := range state.Inputs[0].PlannedFlows {
+		if flow.TAMSFlowProfileID != profileID {
+			t.Fatal("Profile UUID was lost")
+		}
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "private-marker") {
+		t.Fatal("input query leaked")
+	}
+	mismatch.Store(true)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Execute(t.Context(), args, strings.NewReader(""), &stdout, &stderr); code != ExitPartial || writes.Load() != 0 || !strings.Contains(stdout.String(), "/sample_rate") {
+		t.Fatalf("mismatch: exit=%d writes=%d stdout=%s stderr=%s", code, writes.Load(), &stdout, &stderr)
 	}
 }
 

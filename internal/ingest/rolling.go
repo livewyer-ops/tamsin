@@ -9,6 +9,7 @@ import (
 
 	"github.com/livewyer-ops/tamsin/internal/media"
 	"github.com/livewyer-ops/tamsin/internal/progress"
+	"github.com/livewyer-ops/tamsin/internal/source"
 	"github.com/livewyer-ops/tamsin/internal/tams"
 	"github.com/livewyer-ops/tamsin/internal/tamsschema"
 )
@@ -36,7 +37,7 @@ func newRollingObjectPreparer(p *Pipeline, flowID string, streamIndex int, start
 	}
 }
 
-func (p *rollingObjectPreparer) prepare(ctx context.Context, record media.SegmentRecord) (preparedObject, error) {
+func (p *rollingObjectPreparer) prepare(ctx context.Context, record media.SegmentRecord, measured *media.Probe) (preparedObject, error) {
 	if record.StreamIndex != p.streamIndex {
 		return preparedObject{}, fmt.Errorf("renderer emitted stream %d for rolling stream %d", record.StreamIndex, p.streamIndex)
 	}
@@ -56,11 +57,14 @@ func (p *rollingObjectPreparer) prepare(ctx context.Context, record media.Segmen
 			return preparedObject{}, errors.New("renderer emitted a non-positive segment interval")
 		}
 		if !p.anchored {
-			probe, probeErr := p.pipeline.prober.Probe(ctx, record.Path)
-			if probeErr != nil {
-				return preparedObject{}, probeErr
+			if measured == nil {
+				probe, probeErr := p.pipeline.prober.Probe(ctx, record.Path)
+				if probeErr != nil {
+					return preparedObject{}, probeErr
+				}
+				measured = &probe
 			}
-			p.anchorStart, _, err = media.ProbeTiming(probe)
+			p.anchorStart, _, err = media.ProbeTiming(*measured)
 			if err != nil {
 				return preparedObject{}, err
 			}
@@ -128,6 +132,10 @@ type rollingFlowState struct {
 }
 
 type rollingExecution struct {
+	graph        flowGraph
+	planned      []plannedFlowWrite
+	started      bool
+	stream       *streamValidation
 	pipeline     *Pipeline
 	ctx          context.Context
 	result       *Result
@@ -167,7 +175,16 @@ func (e *rollingExecution) accept(record media.SegmentRecord) error {
 	if state == nil {
 		return fmt.Errorf("renderer emitted unplanned stream %d", record.StreamIndex)
 	}
-	object, err := state.preparer.prepare(e.ctx, record)
+	var measured *media.Probe
+	ready := true
+	if e.stream != nil {
+		var err error
+		measured, ready, err = e.validateSegment(record, state)
+		if err != nil {
+			return withFailure(FailureCodeMediaPrepareFailed, FailureMessageMediaPrepareFailed, true, err)
+		}
+	}
+	object, err := state.preparer.prepare(e.ctx, record, measured)
 	if err != nil {
 		return err
 	}
@@ -177,6 +194,20 @@ func (e *rollingExecution) accept(record media.SegmentRecord) error {
 	e.totalBytes += object.size
 	e.pendingBytes += object.size
 	e.pendingCount++
+	if e.stream != nil && e.planned == nil {
+		if !ready {
+			if e.pendingCount >= rollingCommitObjects {
+				return insufficientStreamEvidence()
+			}
+			return nil
+		}
+		e.started = true
+		e.planned, err = e.pipeline.beginRollingFlowPlan(e.ctx, e.graph, e.result.Flows)
+		if err != nil {
+			return err
+		}
+		return e.flushPending()
+	}
 	if record.FlushStaging || e.pendingBytes >= e.commitBytes || e.pendingCount >= rollingCommitObjects {
 		return e.flushPending()
 	}
@@ -214,7 +245,7 @@ func (e *rollingExecution) flush(state *rollingFlowState) error {
 			e.ctx, state.flowID, objects, objectResults, e.storageID, &state.throughput)
 		if operationErr != nil {
 			for index := range objectResults {
-				if objectResults[index].Status == ObjectStatusPlanned {
+				if objectResults[index].Disposition == ObjectDispositionPlanned {
 					objectResults[index].Disposition = ObjectDispositionUnattempted
 				}
 			}
@@ -246,12 +277,14 @@ func (e *rollingExecution) flush(state *rollingFlowState) error {
 }
 
 func actionRequiredObject(object ObjectResult) bool {
-	return object.Status == ObjectStatusStranded || object.Status == ObjectStatusRetractionIndeterminate ||
-		object.Disposition == ObjectDispositionStranded ||
+	return object.Disposition == ObjectDispositionStranded ||
 		object.Disposition == ObjectDispositionRegistrationIndeterminate
 }
 
 func (e *rollingExecution) finish() error {
+	if e.stream != nil && e.planned == nil {
+		return insufficientStreamEvidence()
+	}
 	var failures []error
 	for _, state := range e.ordered {
 		if err := e.flush(state); err != nil {
@@ -281,29 +314,33 @@ func (e *rollingExecution) publishTotals(final bool) {
 
 func (p *Pipeline) rollingStagingWindow(staged stagedFile) *media.SegmentStagingWindow {
 	high := min(staged.lease.reservedHeadroom(), rollingOutputWindowBytes)
+	if staged.bridge != nil {
+		// Leave room for open segments while the closure queue pauses FFmpeg.
+		high /= 2
+	}
 	if high <= 0 {
 		high = 1
 	}
 	return &media.SegmentStagingWindow{HighBytes: high, LowBytes: high / 2}
 }
 
-func (p *Pipeline) beginRollingFlowPlan(ctx context.Context, inputURI string, graph flowGraph,
+func (p *Pipeline) beginRollingFlowPlan(ctx context.Context, graph flowGraph,
 	results []FlowResult) ([]plannedFlowWrite, error) {
-	state := flowExecutionState{graph: graph, inputURI: inputURI, results: results}
-	if err := planFlowWrites(ctx, p, &state); err != nil {
+	planned, err := p.planFlowWrites(ctx, graph, results)
+	if err != nil {
 		return nil, err
 	}
 	// A new Flow plan may point directly at graph member maps. Keep the value
 	// actually written here separate from bitrate fields discovered later, or
 	// an in-memory client can make an unwritten mutation look persisted.
-	for index := range state.planned {
-		state.planned[index].effective = maps.Clone(state.planned[index].effective)
-		state.planned[index].request = maps.Clone(state.planned[index].request)
+	for index := range planned {
+		planned[index].effective = maps.Clone(planned[index].effective)
+		planned[index].request = maps.Clone(planned[index].request)
 	}
-	if err := writeFlowGraph(ctx, p, &state); err != nil {
+	if err := p.writeFlowGraph(ctx, planned, results); err != nil {
 		return nil, err
 	}
-	return state.planned, nil
+	return planned, nil
 }
 
 func (p *Pipeline) finishRollingFlowMetadata(ctx context.Context, graph flowGraph, planned []plannedFlowWrite) error {
@@ -411,21 +448,25 @@ func (p *Pipeline) ingestMuxedRolling(ctx context.Context, itemLabel string, sta
 			return result, withFailure(FailureCodeSourceChanged, FailureMessageSourceChanged, true, err)
 		}
 	}
-	planned, err := p.beginRollingFlowPlan(ctx, itemLabel, graph, result.Flows)
-	if err != nil {
-		return result, err
-	}
-	defer p.finishRollingFlowStatus(ctx, graph, &returnErr)
-
 	state := &rollingFlowState{
 		flowID: flowID, resultIndex: rootIndex, flow: flow,
 		preparer: newRollingObjectPreparer(p, flowID, media.AllStreams, p.config.Start),
 	}
 	window := p.rollingStagingWindow(staged)
 	execution := newRollingExecution(p, ctx, &result, storageID, window, state)
+	if err := execution.begin(graph, staged.bridge != nil); err != nil {
+		return result, err
+	}
+	defer execution.finishStatus(&returnErr)
 	cleanup, renderErr := p.renderSegmentsTo(ctx, staged, flowInfo, []int{media.AllStreams},
 		p.config.FFmpegArgs, window, execution.accept)
-	finishErr := execution.finish()
+	renderErr = execution.renderFailure(renderErr)
+	var finishErr error
+	// A written plan is committed as far as it was validated; only a failure
+	// before the plan has nothing to keep.
+	if execution.planned != nil || renderErr == nil {
+		finishErr = execution.finish()
+	}
 	cleanup()
 	if execution.totalObjects == 0 && renderErr == nil && finishErr == nil {
 		renderErr = errors.New("media renderer produced no objects")
@@ -439,7 +480,7 @@ func (p *Pipeline) ingestMuxedRolling(ctx context.Context, itemLabel string, sta
 		}
 	}
 	applyRollingBitRates(flow, state.preparer.rates)
-	if err := p.finishRollingFlowMetadata(ctx, graph, planned); err != nil {
+	if err := p.finishRollingFlowMetadata(ctx, graph, execution.planned); err != nil {
 		return result, err
 	}
 	if p.config.DryRunMode != DryRunOff {
@@ -457,6 +498,10 @@ func rollingExecutionError(renderErr, finishErr error) error {
 	var classified *classifiedFailure
 	if errors.As(joined, &classified) {
 		return joined
+	}
+	var unavailable *source.StreamUnavailableError
+	if errors.As(joined, &unavailable) {
+		return withFailure(FailureCodeStreamUnavailable, FailureMessageStreamUnavailable, true, joined)
 	}
 	if finishErr != nil {
 		return withFailure(FailureCodeTAMSRegistrationFailed, FailureMessageTAMSRegistrationFailed, true, joined)
@@ -483,7 +528,7 @@ func (p *Pipeline) ingestIndependentRolling(ctx context.Context, itemLabel strin
 	for index, essence := range flowInfo.Collected {
 		position := fmt.Sprint(index)
 		flowID := generatedChildFlowID(collectorID, "essence", position)
-		sourceID := sourceIdentity(staged.sha256, "essence", position)
+		sourceID := sourceIdentity(staged.identityKey(), "essence", position)
 		flow := essence.Flow
 		mergeFlow(flow, p.config.FlowMetadata)
 		flow["id"] = flowID
@@ -518,23 +563,25 @@ func (p *Pipeline) ingestIndependentRolling(ctx context.Context, itemLabel strin
 			return result, withFailure(FailureCodeSourceChanged, FailureMessageSourceChanged, true, err)
 		}
 	}
-	planned, err := p.beginRollingFlowPlan(ctx, itemLabel, graph, result.Flows)
-	if err != nil {
-		return result, err
-	}
-	defer p.finishRollingFlowStatus(ctx, graph, &returnErr)
-
 	window := p.rollingStagingWindow(staged)
 	execution := newRollingExecution(p, ctx, &result, storageID, window, states...)
+	if err := execution.begin(graph, staged.bridge != nil); err != nil {
+		return result, err
+	}
+	defer execution.finishStatus(&returnErr)
 	var renderErr error
-	if canRenderRollingMultiOutput(states, p.config.FFmpegArgs) {
+	if staged.bridge != nil || canRenderRollingMultiOutput(states, p.config.FFmpegArgs) {
 		streamIndices := make([]int, len(states))
 		for index, state := range states {
 			streamIndices[index] = state.preparer.streamIndex
 		}
 		cleanup, err := p.renderSegmentsTo(ctx, staged, flowInfo, streamIndices, nil,
 			window, execution.accept)
-		finishErr := execution.finish()
+		err = execution.renderFailure(err)
+		var finishErr error
+		if execution.planned != nil || err == nil {
+			finishErr = execution.finish()
+		}
 		cleanup()
 		renderErr = rollingExecutionError(err, finishErr)
 	} else {
@@ -574,7 +621,7 @@ func (p *Pipeline) ingestIndependentRolling(ctx context.Context, itemLabel strin
 	for _, state := range states {
 		applyRollingBitRates(state.flow, state.preparer.rates)
 	}
-	if err := p.finishRollingFlowMetadata(ctx, graph, planned); err != nil {
+	if err := p.finishRollingFlowMetadata(ctx, graph, execution.planned); err != nil {
 		return result, err
 	}
 	if p.config.DryRunMode != DryRunOff {

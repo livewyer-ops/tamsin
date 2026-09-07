@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"sort"
 	"strings"
 
 	"github.com/livewyer-ops/tamsin/internal/media"
+	"github.com/livewyer-ops/tamsin/internal/source"
 	"github.com/livewyer-ops/tamsin/internal/tams"
 	"github.com/livewyer-ops/tamsin/internal/tamsschema"
 )
@@ -72,6 +74,42 @@ func (p *Pipeline) planFlowWrite(ctx context.Context, member graphFlow) (planned
 	}
 
 	plan.existed = true
+	existingTags, _ := existing["tags"].(map[string]any)
+	generatedTags, _ := member.flow["tags"].(map[string]any)
+	existingRevision := stringField(existingTags, media.TagPrefix+"input_revision")
+	generatedRevision := stringField(generatedTags, media.TagPrefix+"input_revision")
+	switch {
+	case existingRevision == generatedRevision:
+	case existingRevision == "":
+		// The Flow was written from local or staged bytes. Streaming would give
+		// the same material a revision identity; staging keeps it comparable.
+		return plannedFlowWrite{}, &source.StreamUnavailableError{Reason: fmt.Sprintf("flow %s was created from a staged input", member.id)}
+	case generatedRevision == "":
+		return plannedFlowWrite{}, fmt.Errorf("flow %s was created from a streamed input revision; re-run with --input-mode=stream or use a new Flow ID", member.id)
+	default:
+		return plannedFlowWrite{}, fmt.Errorf("flow %s belongs to a different input revision; use a new Flow ID", member.id)
+	}
+	if generatedRevision != "" {
+		for _, field := range []string{"format", "codec", "container", "essence_parameters", "segment_duration"} {
+			existingValue, existingPresent := existing[field]
+			generatedValue, generatedPresent := member.flow[field]
+			if field == "essence_parameters" {
+				// A normal Flow GET may materialise the BBC default vfr=false.
+				// This is a reuse guard, not Profile matching: Profile fields
+				// remain presence-strict in expandFlowProfile.
+				existingParameters, _ := existingValue.(map[string]any)
+				generatedParameters, _ := generatedValue.(map[string]any)
+				if _, present := generatedParameters["vfr"]; !present && existingParameters["vfr"] == false && generatedParameters["frame_rate"] != nil {
+					existingParameters = maps.Clone(existingParameters)
+					delete(existingParameters, "vfr")
+					existingValue = existingParameters
+				}
+			}
+			if existingPresent != generatedPresent || !equalJSONValues(existingValue, generatedValue) {
+				return plannedFlowWrite{}, fmt.Errorf("flow %s already declares different metadata at /%s; use a new Flow ID", member.id, field)
+			}
+		}
+	}
 	existingSourceID := stringField(existing, "source_id")
 	generatedSourceID := stringField(member.flow, "source_id")
 	if existingSourceID != generatedSourceID {
@@ -293,8 +331,7 @@ func preserveForeignMetadata(existing, generated, operatorOverrides tams.Flow) t
 	sources := make(map[string]struct{})
 	for _, tagSet := range []map[string]any{existingTags, generatedTags} {
 		collectProvenanceSources(sources, tagSet[media.ProvenanceSourcesTag])
-		// Migrate the singular tag written by earlier builds when this Flow is
-		// next touched, without losing where that ingest came from.
+		// Preserve source provenance supplied in either tag form.
 		collectProvenanceSources(sources, tagSet[media.TagPrefix+"source"])
 	}
 	tags := make(map[string]any, len(existingTags)+len(generatedTags))

@@ -29,14 +29,3 @@ func TestAccumulateObjectSummaryClassifiesEveryTerminalProjection(t *testing.T) 
 		t.Fatalf("Object summary = %#v, want %#v", summary, want)
 	}
 }
-
-func TestAccumulateObjectSummaryUsesLegacyStatusProjection(t *testing.T) {
-	t.Parallel()
-
-	var summary ObjectSummary
-	AccumulateObjectSummary(&summary, ObjectResult{Bytes: 12, Status: ObjectStatusIngested})
-	if summary.Total != 1 || summary.Bytes != 12 || summary.Ingested != 1 {
-		t.Fatalf("legacy status summary = %#v", summary)
-	}
-	AccumulateObjectSummary(nil, ObjectResult{Bytes: 99, Status: ObjectStatusStranded})
-}

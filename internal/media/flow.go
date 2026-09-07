@@ -2,6 +2,7 @@ package media
 
 import (
 	"fmt"
+	"io"
 	"math/bits"
 	"mime"
 	"net/http"
@@ -18,6 +19,7 @@ type Identity struct {
 	Label                string
 	URI                  string
 	SHA256               string
+	InputRevision        string
 	Size                 int64
 	IngestProfile        string
 	IngestProfileVersion string
@@ -161,8 +163,13 @@ const (
 func provenanceTags(identity Identity) map[string]any {
 	tags := map[string]any{
 		ProvenanceSourcesTag: []string{identity.URI},
-		TagPrefix + "sha256": identity.SHA256,
 		TagPrefix + "bytes":  strconv.FormatInt(identity.Size, 10),
+	}
+	if identity.SHA256 != "" {
+		tags[TagPrefix+"sha256"] = identity.SHA256
+	}
+	if identity.InputRevision != "" {
+		tags[TagPrefix+"input_revision"] = identity.InputRevision
 	}
 	if identity.IngestProfile != "" {
 		tags[TagPrefix+"ingest_profile"] = identity.IngestProfile
@@ -418,8 +425,12 @@ func DetectContentType(filename string) (string, error) {
 		return "", fmt.Errorf("open input for content detection: %w", err)
 	}
 	defer file.Close()
+	return DetectReaderContentType(file)
+}
+
+func DetectReaderContentType(reader io.Reader) (string, error) {
 	buffer := make([]byte, 512)
-	read, err := file.Read(buffer)
+	read, err := io.ReadFull(reader, buffer)
 	if err != nil && read == 0 {
 		return "", fmt.Errorf("read input for content detection: %w", err)
 	}
@@ -619,8 +630,7 @@ func describeContainer(format Format, streamType, detected string) containerDesc
 		return essenceContainer(streamType, "video/webm", "audio/webm")
 	}
 	if names["matroska"] {
-		// RFC 9559 registered these names and says new implementations should
-		// no longer emit the historical x-matroska forms.
+		// Use the media types registered in RFC 9559.
 		return essenceContainer(streamType, "video/matroska", "audio/matroska")
 	}
 	if names["mov"] || names["mp4"] || names["m4a"] || names["3gp"] || names["3g2"] || names["mj2"] {

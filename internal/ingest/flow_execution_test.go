@@ -45,4 +45,7 @@ func TestFlowExecutionRejectsInvalidRegistrationTargetIndex(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "internal flow target index") {
 		t.Fatalf("executeFlowPlan() = %v, want internal index validation error", err)
 	}
+	if status := stringField(client.flows[graph.flows[0].id], "status"); status != flowStatusAwaitingContent {
+		t.Fatalf("Flow status after invalid registration target = %q, want awaiting_content", status)
+	}
 }
