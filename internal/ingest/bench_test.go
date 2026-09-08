@@ -517,7 +517,7 @@ func TestRollingMediaProcessBudgetCannotDeadlockAcrossInputs(t *testing.T) {
 	}
 }
 
-func TestSegmentManifestUsesOneAnchorProbePerOutput(t *testing.T) {
+func TestEachOutputObjectIsMeasured(t *testing.T) {
 	t.Parallel()
 	prober := &countingProber{}
 	pipeline, err := New(Config{
@@ -530,8 +530,8 @@ func TestSegmentManifestUsesOneAnchorProbePerOutput(t *testing.T) {
 	if _, err := pipeline.Run(context.Background(), []source.Item{benchFixture(t)}); err != nil {
 		t.Fatal(err)
 	}
-	if calls := prober.calls.Load(); calls != 2 {
-		t.Fatalf("ffprobe calls = %d, want one source probe and one generated-output anchor", calls)
+	if calls := prober.calls.Load(); calls != 9 {
+		t.Fatalf("ffprobe calls = %d, want one source probe and eight measured Objects", calls)
 	}
 }
 

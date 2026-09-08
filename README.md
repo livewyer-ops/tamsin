@@ -19,15 +19,15 @@ Flow graphs, uploads and registers Media Objects, and verifies the stored bytes.
 
 ## Install
 
-Download a 64-bit binary from [8.2.0-in1](https://github.com/livewyer-ops/tamsin/releases/tag/8.2.0-in1):
+Download a 64-bit binary from [8.2.0-in2](https://github.com/livewyer-ops/tamsin/releases/tag/8.2.0-in2):
 
-- Linux: [Intel/AMD](https://github.com/livewyer-ops/tamsin/releases/download/8.2.0-in1/tamsin-linux-amd64), [ARM](https://github.com/livewyer-ops/tamsin/releases/download/8.2.0-in1/tamsin-linux-arm64)
-- macOS: [Intel](https://github.com/livewyer-ops/tamsin/releases/download/8.2.0-in1/tamsin-darwin-amd64), [Apple Silicon (ARM)](https://github.com/livewyer-ops/tamsin/releases/download/8.2.0-in1/tamsin-darwin-arm64)
+- Linux: [Intel/AMD](https://github.com/livewyer-ops/tamsin/releases/download/8.2.0-in2/tamsin-linux-amd64), [ARM](https://github.com/livewyer-ops/tamsin/releases/download/8.2.0-in2/tamsin-linux-arm64)
+- macOS: [Intel](https://github.com/livewyer-ops/tamsin/releases/download/8.2.0-in2/tamsin-darwin-amd64), [Apple Silicon (ARM)](https://github.com/livewyer-ops/tamsin/releases/download/8.2.0-in2/tamsin-darwin-arm64)
 
 Requires FFprobe 5.1+; rendered treatments also need FFmpeg 5.1+.
 The [Docker image](#using-docker) includes both.
 
-Download [SHA256SUMS](https://github.com/livewyer-ops/tamsin/releases/download/8.2.0-in1/SHA256SUMS)
+Download [SHA256SUMS](https://github.com/livewyer-ops/tamsin/releases/download/8.2.0-in2/SHA256SUMS)
 into the same directory and verify the binary before installing:
 
 <details>
@@ -108,7 +108,7 @@ Using the same endpoint and credential environment as above:
 docker run --rm \
   --mount "type=bind,src=$PWD/programme.ts,dst=/media/programme.ts,readonly" \
   -e TAMSIN_ENDPOINT -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_TOKEN \
-  ghcr.io/livewyer-ops/tamsin:8.2.0-in1 \
+  ghcr.io/livewyer-ops/tamsin:8.2.0-in2 \
   ingest --profile essence-segments --input /media/programme.ts
 ```
 

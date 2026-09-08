@@ -101,6 +101,18 @@ does not transcode and therefore does not promise a two-second decoder refresh
 when the source has a longer GOP. It also does not create HLS/DASH manifests,
 adaptive-bitrate renditions, encryption, or CDN packaging.
 
+Browser HLS playback requires compatible media Objects as well as a playlist.
+For H.264/AAC playback through TAMOSS, select `mpegts-segments@1`. Source-family
+MP4 segments are ordinary MP4 files, not fragmented MP4 HLS segments.
+
+TAMSin measures each rendered Object's presentation timestamps and sample
+durations to register its Segment range and `ts_offset`; it does not infer
+these from FFmpeg's segment-list decode timestamps or container duration.
+Release `8.2.0-in2` corrects this mapping and negative timestamp formatting.
+Re-ingest affected media into new Flows to obtain corrected metadata; existing
+Flows are not rewritten. The renderer epoch changes to prevent an automatic
+retry from silently reusing an older rendered Flow.
+
 TAMSin owns the output muxer through `--segment-format`. An explicit FFmpeg
 `-f`, `-format`, or `-segment_format` is accepted only when it repeats the
 resolved policy; a conflicting value is rejected with guidance to select the

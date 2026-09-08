@@ -192,7 +192,7 @@ func (p *Pipeline) probeStreamSegment(ctx context.Context, path string) (media.P
 		return media.Probe{}, err
 	}
 	defer release()
-	probe, err := p.prober.Probe(ctx, path)
+	probe, err := p.probeObject(ctx, path)
 	if err != nil {
 		return media.Probe{}, err
 	}
