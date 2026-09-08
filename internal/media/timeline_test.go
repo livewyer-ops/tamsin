@@ -10,7 +10,12 @@ func TestTimestampRoundTrip(t *testing.T) {
 	}{
 		{text: "0:0", ns: 0},
 		{text: "1:250000000", ns: 1_250_000_000},
-		{text: "-1:600000000", ns: -400_000_000},
+		{text: "-0:400000000", ns: -400_000_000},
+		{text: "-0:80000000", ns: -80_000_000},
+		{text: "-1:600000000", ns: -1_600_000_000},
+		{text: "-0:1", ns: -1},
+		{text: "9223372036:854775807", ns: 1<<63 - 1},
+		{text: "-9223372036:854775808", ns: -1 << 63},
 		{text: "-2:0", ns: -2_000_000_000},
 	}
 	for _, testCase := range cases {
@@ -47,7 +52,7 @@ func TestTimeRange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if actual != "[-1:600000000_0:600000000)" {
+	if actual != "[-0:400000000_0:600000000)" {
 		t.Fatalf("TimeRange() = %q", actual)
 	}
 	instant, err := TimeRange(0, 0)

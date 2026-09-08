@@ -9,6 +9,18 @@ that API version, so `8.2.0-in1` is the first TAMSin release targeting TAMS
 8.2. A trailing `-rcM` marks the Mth release candidate for that version, for
 example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
 
+## [8.2.0-in2] - 2026-09-08
+
+- Measure each rendered Object's presentation bounds instead of extrapolating
+  timestamps from the first Object or trusting FFmpeg segment-list durations.
+  Use the same calculation for staged, rolling and streamed ingest, including
+  reordered video and audio padding. Missing timing fails before registration.
+- Correct signed TAMS timestamp parsing and formatting: minus 80 milliseconds
+  is `-0:80000000`, not `-1:920000000`.
+- Advance renderer identity epoch to 3. Re-ingest affected media into new Flows;
+  existing Segment metadata is not repaired automatically. Packaging profiles
+  are unchanged; use `mpegts-segments@1` for HLS-compatible browser media.
+
 ## [8.2.0-in1] - 2026-09-07
 
 This release supersedes the `v1.0.0-rc.1` to `v1.0.0-rc.3` prereleases, which

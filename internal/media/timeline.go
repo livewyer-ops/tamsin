@@ -39,12 +39,17 @@ func ParseSeconds(value string) (int64, error) {
 	return quotient.Int64(), nil
 }
 func ParseTimestamp(value string) (int64, error) {
-	seconds, nanoseconds, err := tamstime.ParseParts(strings.TrimSpace(value))
+	value = strings.TrimSpace(value)
+	seconds, nanoseconds, err := tamstime.ParseParts(value)
 	if err != nil {
 		return 0, fmt.Errorf("invalid TAMS timestamp %q: %w", value, err)
 	}
 	total := new(big.Int).Mul(big.NewInt(seconds), big.NewInt(nanosecondsPerSecond))
-	total.Add(total, big.NewInt(nanoseconds))
+	if strings.HasPrefix(value, "-") {
+		total.Sub(total, big.NewInt(nanoseconds))
+	} else {
+		total.Add(total, big.NewInt(nanoseconds))
+	}
 	if !total.IsInt64() {
 		return 0, fmt.Errorf("TAMS timestamp %q exceeds supported timeline range", value)
 	}
@@ -54,11 +59,13 @@ func ParseTimestamp(value string) (int64, error) {
 func Timestamp(nanoseconds int64) string {
 	seconds := nanoseconds / nanosecondsPerSecond
 	remainder := nanoseconds % nanosecondsPerSecond
-	if remainder < 0 {
-		seconds--
-		remainder += nanosecondsPerSecond
+	sign := ""
+	if nanoseconds < 0 {
+		sign = "-"
+		seconds = -seconds
+		remainder = -remainder
 	}
-	return strconv.FormatInt(seconds, 10) + ":" + strconv.FormatInt(remainder, 10)
+	return sign + strconv.FormatInt(seconds, 10) + ":" + strconv.FormatInt(remainder, 10)
 }
 func TimestampOffset(flowTimestamp, objectTimestamp int64) (int64, error) {
 	offset := new(big.Int).Sub(big.NewInt(flowTimestamp), big.NewInt(objectTimestamp))

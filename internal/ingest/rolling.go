@@ -20,14 +20,11 @@ const (
 )
 
 type rollingObjectPreparer struct {
-	pipeline      *Pipeline
-	flowID        string
-	streamIndex   int
-	flowPosition  int64
-	anchorStart   int64
-	manifestStart int64
-	anchored      bool
-	rates         *media.SegmentBitRateAccumulator
+	pipeline     *Pipeline
+	flowID       string
+	streamIndex  int
+	flowPosition int64
+	rates        *media.SegmentBitRateAccumulator
 }
 
 func newRollingObjectPreparer(p *Pipeline, flowID string, streamIndex int, start int64) *rollingObjectPreparer {
@@ -51,46 +48,19 @@ func (p *rollingObjectPreparer) prepare(ctx context.Context, record media.Segmen
 	if err != nil {
 		return preparedObject{}, err
 	}
-	var objectStart, duration int64
-	if record.Timed {
-		if record.End <= record.Start {
-			return preparedObject{}, errors.New("renderer emitted a non-positive segment interval")
-		}
-		if !p.anchored {
-			if measured == nil {
-				probe, probeErr := p.pipeline.prober.Probe(ctx, record.Path)
-				if probeErr != nil {
-					return preparedObject{}, probeErr
-				}
-				measured = &probe
-			}
-			p.anchorStart, _, err = media.ProbeTiming(*measured)
-			if err != nil {
-				return preparedObject{}, err
-			}
-			p.manifestStart = record.Start
-			p.anchored = true
-		}
-		manifestOffset, offsetErr := media.TimestampOffset(record.Start, p.manifestStart)
-		if offsetErr != nil {
-			return preparedObject{}, fmt.Errorf("calculate segment manifest offset: %w", offsetErr)
-		}
-		objectStart, err = media.TimestampShift(p.anchorStart, manifestOffset)
-		if err != nil {
-			return preparedObject{}, fmt.Errorf("calculate segment object start: %w", err)
-		}
-		duration, err = media.TimestampOffset(record.End, record.Start)
-		if err != nil {
-			return preparedObject{}, fmt.Errorf("calculate segment duration: %w", err)
-		}
-	} else {
-		probe, probeErr := p.pipeline.prober.Probe(ctx, record.Path)
+	if record.Timed && record.End <= record.Start {
+		return preparedObject{}, errors.New("renderer emitted a non-positive segment interval")
+	}
+	if measured == nil {
+		probe, probeErr := p.pipeline.probeObject(ctx, record.Path)
 		if probeErr != nil {
 			return preparedObject{}, probeErr
 		}
-		if objectStart, duration, err = media.ProbeTiming(probe); err != nil {
-			return preparedObject{}, err
-		}
+		measured = &probe
+	}
+	objectStart, duration, err := media.ProbeTiming(*measured)
+	if err != nil {
+		return preparedObject{}, err
 	}
 
 	timerange, err := media.TimeRange(p.flowPosition, duration)
@@ -119,6 +89,13 @@ func (p *rollingObjectPreparer) prepare(ctx context.Context, record media.Segmen
 	}
 	p.rates.Add(media.SegmentMeasurement{Bytes: size, Duration: duration})
 	return object, nil
+}
+
+func (p *Pipeline) probeObject(ctx context.Context, path string) (media.Probe, error) {
+	if prober, ok := p.prober.(media.ObjectProber); ok {
+		return prober.ProbeObject(ctx, path)
+	}
+	return p.prober.Probe(ctx, path)
 }
 
 type rollingFlowState struct {

@@ -37,7 +37,7 @@ const multiOutputEssenceThreshold = 4
 // rendererIdentityEpoch changes only when TAMSin deliberately changes the
 // semantics of media it writes. Package rebuilds and FFmpeg patch releases are
 // provenance, not a new ingest policy, and must not manufacture a new Flow.
-const rendererIdentityEpoch = "2"
+const rendererIdentityEpoch = "3"
 
 func New(config Config, client TAMSClient, prober media.Prober, segmenter media.Segmenter, logger *slog.Logger, reporter progress.Reporter) (*Pipeline, error) {
 	if config.InputMode == "" {
@@ -1261,32 +1261,7 @@ func (p *Pipeline) prepareObjectsForStream(ctx context.Context, flowID string, s
 		duration    int64
 	}
 	measurements := make([]measurement, len(paths))
-	probeSegments := len(paths) > 1 || streamIndex != media.AllStreams
-	manifestTiming := len(records) > 0
-	for _, record := range records {
-		manifestTiming = manifestTiming && record.Timed
-	}
-	var anchorStart, manifestStart int64
-	if manifestTiming {
-		release, err := p.acquireProbe(ctx)
-		if err != nil {
-			cleanup()
-			return nil, func() {}, err
-		}
-		probe, probeErr := p.prober.Probe(ctx, records[0].Path)
-		release()
-		if probeErr != nil {
-			cleanup()
-			return nil, func() {}, probeErr
-		}
-		parsedAnchor, _, err := media.ProbeTiming(probe)
-		if err != nil {
-			cleanup()
-			return nil, func() {}, err
-		}
-		anchorStart = parsedAnchor
-		manifestStart = records[0].Start
-	}
+	probeSegments := len(paths) > 1 || streamIndex != media.AllStreams || records[0].Timed
 	// Without segmentation the single Media Object is the staged file itself,
 	// which staging has already read end to end to hash. Reading it a second
 	// time only re-derives a digest that cannot have changed -- but only when
@@ -1321,21 +1296,8 @@ func (p *Pipeline) prepareObjectsForStream(ctx context.Context, flowID string, s
 				return err
 			}
 			entry := measurement{size: size, checksum: checksum, objectStart: flowInfo.Start, duration: flowInfo.Duration}
-			if manifestTiming {
-				manifestOffset, offsetErr := media.TimestampOffset(records[index].Start, manifestStart)
-				if offsetErr != nil {
-					return fmt.Errorf("calculate segment manifest offset: %w", offsetErr)
-				}
-				entry.objectStart, err = media.TimestampShift(anchorStart, manifestOffset)
-				if err != nil {
-					return fmt.Errorf("calculate segment object start: %w", err)
-				}
-				entry.duration, err = media.TimestampOffset(records[index].End, records[index].Start)
-				if err != nil {
-					return fmt.Errorf("calculate segment duration: %w", err)
-				}
-			} else if probeSegments {
-				probe, probeErr := p.prober.Probe(groupCtx, path)
+			if probeSegments {
+				probe, probeErr := p.probeObject(groupCtx, path)
 				if probeErr != nil {
 					return probeErr
 				}
