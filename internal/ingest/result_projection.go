@@ -44,16 +44,18 @@ func setObjectVerification(objects []ObjectResult, objectID string,
 	}
 }
 
-func finalizeObjectResult(object *ObjectResult) {
-	if object.Disposition == "" {
-		object.Disposition = ObjectDispositionUnattempted
+// completedStatus reports a successful ingest as resumed only when it has
+// Objects and every one of them was already in the store.
+func completedStatus(flows []FlowResult) ResultStatus {
+	total, resumed := 0, 0
+	for _, flow := range flows {
+		total += flow.ObjectSummary.Total
+		resumed += flow.ObjectSummary.Resumed
 	}
-	if object.Verification == "" {
-		object.Verification = ObjectVerificationNotReached
+	if total > 0 && resumed == total {
+		return ResultStatusResumed
 	}
-	if object.VerificationMethod == "" {
-		object.VerificationMethod = VerificationMethodNone
-	}
+	return ResultStatusIngested
 }
 
 func compactObjectResults(flows []FlowResult) {
@@ -62,10 +64,8 @@ func compactObjectResults(flows []FlowResult) {
 			continue
 		}
 		var summary ObjectSummary
-		for objectIndex := range flows[flowIndex].Objects {
-			object := &flows[flowIndex].Objects[objectIndex]
-			finalizeObjectResult(object)
-			AccumulateObjectSummary(&summary, *object)
+		for _, object := range flows[flowIndex].Objects {
+			AccumulateObjectSummary(&summary, object)
 		}
 		flows[flowIndex].ObjectSummary = summary
 	}

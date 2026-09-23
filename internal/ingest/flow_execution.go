@@ -3,7 +3,6 @@ package ingest
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/livewyer-ops/tamsin/internal/source"
 )
@@ -18,7 +17,8 @@ type flowRegistrationTarget struct {
 // executeFlowPlan commits one input's Flow graph. The phases run in a fixed
 // order: nothing may be written before the graph is planned and validated, and
 // no Media Object may be registered against a Flow that was not written first.
-func (p *Pipeline) executeFlowPlan(ctx context.Context, inputURI string, graph flowGraph, storageID string, targets []flowRegistrationTarget, results []FlowResult) error {
+func (p *Pipeline) executeFlowPlan(ctx context.Context, inputURI string, graph flowGraph, storageID string,
+	targets []flowRegistrationTarget, results []FlowResult) (returnErr error) {
 	planned, err := p.planFlowWrites(ctx, graph, results)
 	if err != nil {
 		return err
@@ -30,23 +30,14 @@ func (p *Pipeline) executeFlowPlan(ctx context.Context, inputURI string, graph f
 	if err := p.writeFlowGraph(ctx, planned, results); err != nil {
 		return err
 	}
+	defer p.finishFlowStatus(ctx, graph, "Flow graph", &returnErr)
 	for _, target := range targets {
-		if target.resultIndex < 0 || target.resultIndex >= len(results) {
-			err := fmt.Errorf("internal flow target index %d is outside results length %d", target.resultIndex, len(results))
-			return errors.Join(err, p.recoverFlowStatuses(ctx, graph))
-		}
 		if target.role != "" {
 			p.logger.Info("ingesting essence", "input", inputURI, "flow_id", target.flowID, "role", target.role)
 		}
 		if err := p.registerFlow(ctx, target.flowID, target.objects, results[target.resultIndex].Objects, storageID); err != nil {
-			err = withFailure(FailureCodeTAMSRegistrationFailed, FailureMessageTAMSRegistrationFailed, true, err)
-			return errors.Join(err, p.recoverFlowStatuses(ctx, graph))
+			return withFailure(FailureCodeTAMSRegistrationFailed, FailureMessageTAMSRegistrationFailed, true, err)
 		}
-	}
-	if err := p.setFlowGraphStatus(ctx, graph, flowStatusClosedComplete); err != nil {
-		recoveryErr := p.recoverFlowStatuses(ctx, graph)
-		return withFailure(FailureCodeFlowWriteFailed, FailureMessageFlowWriteFailed, true,
-			errors.Join(fmt.Errorf("close completed Flow graph: %w", err), recoveryErr))
 	}
 	return nil
 }
@@ -83,8 +74,4 @@ func collectPlannedFlowObjects(targets []flowRegistrationTarget) []preparedObjec
 		objects = append(objects, target.objects...)
 	}
 	return objects
-}
-
-func flowExecutionTarget(flowID string, resultIndex int, objects []preparedObject, role string) flowRegistrationTarget {
-	return flowRegistrationTarget{flowID: flowID, resultIndex: resultIndex, objects: objects, role: role}
 }

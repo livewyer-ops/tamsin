@@ -307,13 +307,10 @@ func (l *stagingLease) add(bytes int64) error {
 	}
 	if required > l.reserved {
 		extra := required - l.reserved
-		if l.manager == nil {
-			l.reserved = required
-		} else if err := l.manager.extend(l.label, extra, required); err != nil {
+		if err := l.manager.extend(l.label, extra, required); err != nil {
 			return err
-		} else {
-			l.reserved += extra
 		}
+		l.reserved += extra
 	}
 	l.used = required
 	return nil
@@ -329,11 +326,6 @@ func (l *stagingLease) reserveAdditional(ctx context.Context, bytes int64) error
 		return nil
 	}
 	l.mu.Lock()
-	if l.manager == nil {
-		l.reserved += bytes
-		l.mu.Unlock()
-		return nil
-	}
 	currentReserved := l.reserved
 	target, err := checkedAdd(currentReserved, bytes)
 	manager := l.manager
@@ -447,9 +439,7 @@ func (l *stagingLease) release() {
 	l.released = true
 	reserved := l.reserved
 	l.mu.Unlock()
-	if l.manager != nil {
-		l.manager.release(reserved)
-	}
+	l.manager.release(reserved)
 }
 
 type stagingWriter struct {

@@ -12,7 +12,7 @@ import (
 func TestTrackerPublishesCumulativePhases(t *testing.T) {
 	t.Parallel()
 	var snapshots []Snapshot
-	tracker := NewTracker(Observer(func(snapshot Snapshot) { snapshots = append(snapshots, snapshot) }),
+	tracker := NewTracker(reportFunc(func(snapshot Snapshot) { snapshots = append(snapshots, snapshot) }),
 		Scope{InputIndex: 2, Input: "programme.ts"}, PhaseStore, PhaseVerify)
 	if err := tracker.SetTotals(PhaseStore, 2, 30, true); err != nil {
 		t.Fatal(err)
@@ -57,7 +57,7 @@ func TestTrackerRejectsInvalidOrReopenedTotals(t *testing.T) {
 func TestTrackerIsConcurrencySafe(t *testing.T) {
 	t.Parallel()
 	var current Snapshot
-	tracker := NewTracker(Observer(func(snapshot Snapshot) { current = snapshot }), Scope{InputIndex: 0}, PhaseStore)
+	tracker := NewTracker(reportFunc(func(snapshot Snapshot) { current = snapshot }), Scope{InputIndex: 0}, PhaseStore)
 	const workers = 32
 	var group sync.WaitGroup
 	for range workers {
@@ -129,3 +129,8 @@ func TestNoneReportsNothing(t *testing.T) {
 		t.Fatalf("none output = %q", output.String())
 	}
 }
+
+type reportFunc func(Snapshot)
+
+func (f reportFunc) Report(snapshot Snapshot) { f(snapshot) }
+func (reportFunc) Close()                     {}

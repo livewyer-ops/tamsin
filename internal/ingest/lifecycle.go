@@ -83,7 +83,6 @@ func (p *Pipeline) observeObjectBatch(ctx context.Context, flowID string,
 		if _, selected := objectIDs[results[resultIndex].ObjectID]; !selected {
 			continue
 		}
-		finalizeObjectResult(&results[resultIndex])
 		results[resultIndex].reported = true
 		batch = append(batch, publicObjectResult(results[resultIndex]))
 	}
@@ -112,7 +111,6 @@ func (p *Pipeline) observeRemainingObjects(index int, flows []FlowResult) error 
 			if object.Disposition == ObjectDispositionPlanned && p.config.DryRunMode == DryRunOff {
 				object.Disposition = ObjectDispositionUnattempted
 			}
-			finalizeObjectResult(object)
 			object.reported = true
 			batch = append(batch, publicObjectResult(*object))
 		}

@@ -109,11 +109,6 @@ func (c *countingClient) AllocateStorage(ctx context.Context, flowID string, req
 	return c.inner.AllocateStorage(ctx, flowID, request)
 }
 
-func (c *countingClient) RegisterSegment(ctx context.Context, flowID string, request tams.SegmentRequest) error {
-	defer c.record("RegisterSegment")()
-	return c.inner.RegisterSegment(ctx, flowID, request)
-}
-
 func (c *countingClient) RegisterSegments(ctx context.Context, flowID string, requests []tams.SegmentRequest) error {
 	defer c.record("RegisterSegments")()
 	return c.inner.RegisterSegments(ctx, flowID, requests)
@@ -287,7 +282,6 @@ func TestRoundTripsPerObject(t *testing.T) {
 		"Segments":         client.count("Segments"),
 		"AllocateStorage":  client.count("AllocateStorage"),
 		"UploadFile":       client.count("UploadFile"),
-		"RegisterSegment":  client.count("RegisterSegment"),
 		"RegisterSegments": client.count("RegisterSegments"),
 		"Object":           client.count("Object"),
 		"DownloadDigest":   client.count("DownloadDigest"),

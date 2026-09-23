@@ -92,7 +92,6 @@ func TestUploadDeadlineFollowsTheAllocationPresignedFlag(t *testing.T) {
 			pipeline, objects, results := registrationFixture(t, client, 1, 1, false)
 			pipeline.client = uploadDeadlineClient{client, test.presigned, test.wantDeadline}
 			pipeline.apiVersion = tams.APIVersion{Major: 8, Minor: test.minor}
-			pipeline.limits = tams.ServiceLimits{ObjectRegistration: 300 * time.Second, PresignedURL: 30 * time.Second}
 			if err := commitRegistrationFixture(context.Background(), pipeline, objects, results); err != nil {
 				t.Fatal(err)
 			}
@@ -155,7 +154,7 @@ func TestRegistrationResponseLossAndReadbackFailureRetractsEveryObject(t *testin
 	client.registerSegmentsErr = errors.New("connection reset after request body")
 	client.registerSegmentsCommit = -1
 	client.listSegmentsErr = errors.New("segment listing unavailable")
-	pipeline, objects, results := registrationFixture(t, client, 4, 2, true)
+	pipeline, objects, results := registrationFixture(t, client, 4, 4, true)
 
 	err := commitRegistrationFixture(context.Background(), pipeline, objects, results)
 	if err == nil || !strings.Contains(err.Error(), "connection reset") || !strings.Contains(err.Error(), "listing unavailable") {
@@ -190,10 +189,6 @@ func TestSuccessfulRegistrationWithFreshListingFailureRollsBack(t *testing.T) {
 	client := newFakeClient()
 	client.listSegmentsErr = errors.New("cannot issue fresh URLs")
 	pipeline, objects, results := registrationFixture(t, client, 3, 3, true)
-	pipeline.limits = tams.ServiceLimits{
-		ObjectRegistration: tams.MinimumObjectRegistration,
-		PresignedURL:       tams.MinimumPresignedURL,
-	}
 
 	err := commitRegistrationFixture(context.Background(), pipeline, objects, results)
 	if err == nil || !strings.Contains(err.Error(), "cannot issue fresh URLs") {
@@ -211,10 +206,6 @@ func TestIncompleteFreshListingVerifiesVisibleAndRetractsEveryMissingObject(t *t
 	t.Parallel()
 	client := newFakeClient()
 	pipeline, objects, results := registrationFixture(t, client, 5, 5, true)
-	pipeline.limits = tams.ServiceLimits{
-		ObjectRegistration: tams.MinimumObjectRegistration,
-		PresignedURL:       tams.MinimumPresignedURL,
-	}
 	client.hasListingOverride = true
 	for _, object := range objects[:2] {
 		client.listSegmentsOverride = append(client.listSegmentsOverride, tams.Segment{
@@ -257,7 +248,7 @@ func TestIncompleteFreshListingVerifiesVisibleAndRetractsEveryMissingObject(t *t
 func TestTypedPartialRegistrationDoesNotReadAfterWrite(t *testing.T) {
 	t.Parallel()
 	client := newFakeClient()
-	pipeline, objects, results := registrationFixture(t, client, 4, 2, true)
+	pipeline, objects, results := registrationFixture(t, client, 4, 4, true)
 	registered := []tams.SegmentRequest{
 		{ObjectID: objects[0].id, Timerange: objects[0].timerange},
 		{ObjectID: objects[1].id, Timerange: objects[1].timerange},
@@ -300,7 +291,7 @@ func TestTypedPartialRegistrationDoesNotReadAfterWrite(t *testing.T) {
 func TestCancellationImmediatelyAfterRegistrationCannotSkipRollback(t *testing.T) {
 	t.Parallel()
 	client := newFakeClient()
-	pipeline, objects, results := registrationFixture(t, client, 4, 2, true)
+	pipeline, objects, results := registrationFixture(t, client, 4, 4, true)
 	ctx, cancel := context.WithCancel(context.Background())
 	client.onRegisterSegments = cancel
 
@@ -322,7 +313,7 @@ func TestRegistrationCleanupReportsEveryStrandedObject(t *testing.T) {
 	client.registerSegmentsErr = errors.New("response lost")
 	client.registerSegmentsCommit = -1
 	client.listSegmentsErr = errors.New("readback lost")
-	pipeline, objects, results := registrationFixture(t, client, 6, 2, true)
+	pipeline, objects, results := registrationFixture(t, client, 6, 6, true)
 	client.deleteSegmentsErrors = make(map[string]error, len(objects))
 	for _, object := range objects {
 		client.deleteSegmentsErrors[object.timerange] = errors.New("flow is read-only")
@@ -352,14 +343,13 @@ func TestRegistrationCleanupReportsEveryStrandedObject(t *testing.T) {
 
 func TestRegistrationCleanupUsesOneSharedDeadline(t *testing.T) {
 	client := newFakeClient()
-	client.registerSegmentsErr = errors.New("response lost")
-	client.registerSegmentsCommit = -1
 	client.listSegmentsErr = errors.New("readback lost")
 	client.blockDeleteUntilDone = true
 	pipeline, objects, results := registrationFixture(t, client, 5, 1, true)
-	pipeline.registrationRecoveryTimeout = 40 * time.Millisecond
+	pipeline.recoveryTimeout = 40 * time.Millisecond
 
-	err := commitRegistrationFixture(context.Background(), pipeline, objects, results)
+	err := pipeline.reconcileRegistrationError(context.Background(), "flow",
+		objects, results, errors.New("response lost"))
 	if err == nil {
 		t.Fatal("deadline-bound cleanup unexpectedly succeeded")
 	}

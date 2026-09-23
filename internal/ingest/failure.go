@@ -191,11 +191,7 @@ func describeRunFailure(result Result, cause error, runCtx context.Context) *Fai
 		return &failure
 	}
 	if runCtx != nil && runCtx.Err() != nil {
-		return interruptedFailure()
+		return DescribeInputInterruptedFailure()
 	}
 	return DescribeFailure(result, cause)
-}
-
-func interruptedFailure() *Failure {
-	return DescribeInputInterruptedFailure()
 }

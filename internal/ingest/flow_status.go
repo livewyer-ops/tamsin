@@ -86,7 +86,9 @@ func (p *Pipeline) recoverFlowStatuses(ctx context.Context, graph flowGraph) err
 	return nil
 }
 
-func (p *Pipeline) finishRollingFlowStatus(ctx context.Context, graph flowGraph, returnErr *error) {
+// finishFlowStatus closes a written graph whose ingest succeeded, or leaves a
+// failed one awaiting content.
+func (p *Pipeline) finishFlowStatus(ctx context.Context, graph flowGraph, graphName string, returnErr *error) {
 	if *returnErr != nil {
 		*returnErr = errors.Join(*returnErr, p.recoverFlowStatuses(ctx, graph))
 		return
@@ -94,6 +96,6 @@ func (p *Pipeline) finishRollingFlowStatus(ctx context.Context, graph flowGraph,
 	if err := p.setFlowGraphStatus(ctx, graph, flowStatusClosedComplete); err != nil {
 		recoveryErr := p.recoverFlowStatuses(ctx, graph)
 		*returnErr = withFailure(FailureCodeFlowWriteFailed, FailureMessageFlowWriteFailed, true,
-			errors.Join(fmt.Errorf("close completed rolling Flow graph: %w", err), recoveryErr))
+			errors.Join(fmt.Errorf("close completed %s: %w", graphName, err), recoveryErr))
 	}
 }

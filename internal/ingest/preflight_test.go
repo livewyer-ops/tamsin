@@ -75,17 +75,23 @@ func TestStartupPreflightChecksRequestFailuresBeforeResponseSemantics(t *testing
 	}
 }
 
-// Selection over a nil backend list is what the phase above would produce if the
-// two ran the other way round, and it is also the genuine classification when
-// the request succeeded but returned nothing usable.
+// Selection over a nil backend list is what the preflight would see if request
+// errors were checked the other way round, and it is also the genuine
+// classification when the request succeeded but returned nothing usable.
 func TestStartupStorageSelectionReportsAnUnusableBackendList(t *testing.T) {
 	t.Parallel()
 
-	var classified *classifiedFailure
-	err := selectStorage(&startupState{})
+	client := newFakeClient()
+	client.backends = nil
+	pipeline, err := New(Config{Concurrency: 1}, client, fakeProber{}, nil, discardLogger(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = pipeline.runStartupPreflight(context.Background())
 	if err == nil {
 		t.Fatal("selection over a nil backend list unexpectedly succeeded")
 	}
+	var classified *classifiedFailure
 	if !errors.As(err, &classified) || classified.Code != FailureCodeStorageUnavailable {
 		t.Fatalf("storage selection failure code = %#v", err)
 	}
@@ -96,35 +102,53 @@ func TestStartupStorageSelectionReportsAnUnusableBackendList(t *testing.T) {
 func TestStartupPreflightReportsServiceFailureBeforeLifetimes(t *testing.T) {
 	t.Parallel()
 
-	pipeline := &Pipeline{logger: discardLogger()}
-	state := &startupState{serviceErr: errors.New("503 Service Unavailable")}
-	err := checkServiceRequest(state)
-	var classified *classifiedFailure
-	if err == nil || !errors.As(err, &classified) || classified.Message != FailureMessagePreflightFailed {
-		t.Fatalf("unreadable service was not classified as a preflight failure: %#v", err)
-	}
-
-	incompatible := &startupState{service: map[string]any{"api_version": "7.0"}}
-	err = checkServiceCompatibility(pipeline, incompatible)
-	if err == nil || !errors.As(err, &classified) || classified.Message != FailureMessagePreflightIncompatible {
-		t.Fatalf("a differing major version was not classified as incompatible: %#v", err)
+	for _, testCase := range []struct {
+		name        string
+		serviceErr  error
+		service     map[string]any
+		wantMessage string
+	}{
+		{name: "unreadable service", serviceErr: errors.New("503 Service Unavailable"), wantMessage: FailureMessagePreflightFailed},
+		{name: "differing major version", service: map[string]any{"api_version": "7.0"}, wantMessage: FailureMessagePreflightIncompatible},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			client := newFakeClient()
+			client.serviceErr = testCase.serviceErr
+			client.serviceDocument = testCase.service
+			pipeline, err := New(Config{Concurrency: 1}, client, fakeProber{}, nil, discardLogger(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = pipeline.runStartupPreflight(context.Background())
+			var classified *classifiedFailure
+			if err == nil || !errors.As(err, &classified) || classified.Message != testCase.wantMessage {
+				t.Fatalf("preflight failure = %#v, want message %q", err, testCase.wantMessage)
+			}
+		})
 	}
 }
 
 // The selected backend ID is what every later Object registration is addressed
-// to, so the phase must write the resolved ID back into the run's state.
+// to, so the preflight must return the resolved ID.
 func TestStartupPreflightAdoptsTheResolvedDefaultBackend(t *testing.T) {
 	t.Parallel()
 
-	state := &startupState{backends: []tams.StorageBackend{
+	client := newFakeClient()
+	client.backends = []tams.StorageBackend{
 		{ID: "other"},
 		{ID: "chosen", DefaultStorage: true},
-	}}
-	if err := selectStorage(state); err != nil {
+	}
+	pipeline, err := New(Config{Concurrency: 1}, client, fakeProber{}, nil, discardLogger(), nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if state.storageID != "chosen" {
-		t.Fatalf("resolved storage ID = %q, want %q", state.storageID, "chosen")
+	storageID, err := pipeline.runStartupPreflight(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storageID != "chosen" {
+		t.Fatalf("resolved storage ID = %q, want %q", storageID, "chosen")
 	}
 }
 
@@ -133,10 +157,13 @@ func TestStartupPreflightAdoptsTheResolvedDefaultBackend(t *testing.T) {
 func TestStartupRequestsReportParentCancellation(t *testing.T) {
 	t.Parallel()
 
-	pipeline := &Pipeline{client: newFakeClient(), logger: discardLogger()}
+	pipeline, err := New(Config{Concurrency: 1}, newFakeClient(), fakeProber{}, nil, discardLogger(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := issueStartupRequests(ctx, pipeline, &startupState{})
+	_, err = pipeline.runStartupPreflight(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled startup requests returned %v, want context.Canceled", err)
 	}

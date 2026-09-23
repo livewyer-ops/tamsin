@@ -1060,7 +1060,7 @@ func TestPipelineProgressKeepsStoreAndVerificationSeparate(t *testing.T) {
 		progressLock sync.Mutex
 		snapshots    []progress.Snapshot
 	)
-	reporter := progress.Observer(func(snapshot progress.Snapshot) {
+	reporter := progressFunc(func(snapshot progress.Snapshot) {
 		progressLock.Lock()
 		defer progressLock.Unlock()
 		snapshots = append(snapshots, snapshot)
@@ -2363,3 +2363,8 @@ func TestFlowIsNotOverwrittenWhenItCannotBeRead(t *testing.T) {
 		}
 	}
 }
+
+type progressFunc func(progress.Snapshot)
+
+func (f progressFunc) Report(snapshot progress.Snapshot) { f(snapshot) }
+func (progressFunc) Close()                              {}

@@ -32,7 +32,7 @@ func (e *rollingExecution) begin(graph flowGraph, streamed bool) error {
 
 func (e *rollingExecution) finishStatus(err *error) {
 	if e.planned != nil {
-		e.pipeline.finishRollingFlowStatus(e.ctx, e.graph, err)
+		e.pipeline.finishFlowStatus(e.ctx, e.graph, "rolling Flow graph", err)
 	}
 }
 

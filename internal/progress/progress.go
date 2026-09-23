@@ -85,16 +85,6 @@ type Discard struct{}
 func (Discard) Report(Snapshot) {}
 func (Discard) Close()          {}
 
-// Observer adapts a function to Reporter.
-type Observer func(Snapshot)
-
-func (o Observer) Report(snapshot Snapshot) {
-	if o != nil {
-		o(snapshot)
-	}
-}
-func (Observer) Close() {}
-
 type phaseState struct {
 	completedObjects int
 	totalObjects     int
