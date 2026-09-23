@@ -325,10 +325,17 @@ func TestFFmpegRuntimeTagIsConsistent(t *testing.T) {
 		}
 		tags[source.file] = match[1]
 	}
-	for _, tag := range tags {
-		if tag != tags["Dockerfile"] {
-			t.Fatalf("FFmpeg runtime tags disagree: %v", tags)
-		}
+	defined := tags["Dockerfile.ffmpeg"]
+	if tags[".github/workflows/ffmpeg-runtime.yml"] != defined {
+		t.Fatalf("FFmpeg runtime tags disagree: %v", tags)
+	}
+	// The release image can only pin a revision after it is published, so the
+	// pin may trail the runtime definition within the same FFmpeg line.
+	revision := regexp.MustCompile(`^(.+)-r([1-9][0-9]*)$`)
+	pinned, next := revision.FindStringSubmatch(tags["Dockerfile"]), revision.FindStringSubmatch(defined)
+	if pinned == nil || next == nil || pinned[1] != next[1] ||
+		len(pinned[2]) > len(next[2]) || len(pinned[2]) == len(next[2]) && pinned[2] > next[2] {
+		t.Fatalf("Dockerfile must pin a published revision of the defined FFmpeg runtime: %v", tags)
 	}
 }
 
