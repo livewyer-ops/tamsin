@@ -58,6 +58,10 @@ type ProfileDefinition struct {
 	ResourceNote         string
 }
 
+// Segmented profiles target Media Objects that are, in the words of TAMS
+// AppNote 0001, "typically short (on the order of seconds) and independently
+// decodable". Cuts land on keyframes, so a long GOP raises the floor and actual
+// Segments vary around the target.
 var builtInProfiles = []ProfileDefinition{
 	{
 		Name: ProfilePreserve, Version: "1",

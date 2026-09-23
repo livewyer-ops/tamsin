@@ -334,7 +334,6 @@ func TestObjectLabelsPreserveReceiptWording(t *testing.T) {
 		{"", "", ""},
 		{ingest.ObjectDispositionPlanned, "", "planned"},
 		{ingest.ObjectDispositionUnattempted, "", "planned"},
-		{ingest.ObjectDispositionUploaded, "", "uploaded"},
 		{ingest.ObjectDispositionRegistered, "", "registered"},
 		{ingest.ObjectDispositionRegistered, ingest.ObjectVerificationVerified, "verified"},
 		{ingest.ObjectDispositionRegistrationIndeterminate, "", "registration-indeterminate"},

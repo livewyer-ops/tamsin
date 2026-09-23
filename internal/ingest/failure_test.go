@@ -93,7 +93,6 @@ func TestPublishedFailureCodesAreStable(t *testing.T) {
 		{FailureCodeAuthFailed, "authentication.failed"},
 		{FailureCodeInputFailed, "ingest.input_failures"},
 		{FailureCodeSourceFailed, "source.failed"},
-		{FailureCodeMediaFailed, "media.failed"},
 		{FailureCodeTAMSFailed, "tams.failed"},
 		{FailureCodeInterrupted, "run.interrupted"},
 		{FailureCodeRunFailed, "run.failed"},

@@ -33,13 +33,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// defaultSegmentDuration targets Media Objects that are, in the words of TAMS
-// AppNote 0001, "typically short (on the order of seconds) and independently
-// decodable". Cuts land on keyframes, so a long GOP raises the floor and actual
-// Segments vary around this target. Set --segment-duration 0 to store an input
-// as a single Media Object instead.
-const defaultSegmentDuration = 10 * time.Second
-
 const maxConfigFileBytes = 2 << 20
 
 var diagnosticURLPattern = regexp.MustCompile(`(?i)\b(?:https?|s3)://[^\s<>"']+`)
@@ -222,7 +215,7 @@ func addPersistentFlags(command *cobra.Command) {
 	flags.String("config", "", "configuration file (default: $XDG_CONFIG_HOME/tamsin/config.yaml)")
 	flags.StringP("endpoint", "o", "", "TAMS API endpoint")
 	flags.String("format", "human", "result format: human or json")
-	flags.String("progress", "auto", "progress reporting: auto, plain, or none")
+	flags.String("progress", "auto", "progress reporting: auto or none (plain is the same as auto)")
 	flags.String("color", "auto", "color output: auto, always, or never")
 	flags.BoolP("quiet", "q", false, "suppress successful human output")
 	flags.BoolP("verbose", "v", false, "show expanded human result details")
@@ -375,12 +368,12 @@ func addTreatmentFlags(command *cobra.Command) {
 	flags := command.Flags()
 	flags.String("profile", "", profileFlagDescription())
 	registerProfileCompletion(command)
-	flags.DurationP("segment-duration", "d", defaultSegmentDuration,
-		"target duration of each TAMS Flow Segment; 0 disables segmentation, leaving storage to decide whole input or whole essence")
-	flags.String("segment-format", string(media.SegmentFormatSource),
-		"container for Flow Segments: source or mpegts")
-	flags.String("essence-storage", string(media.EssenceStorageIndependent),
-		"how a muxed input is stored: independent (one Flow per essence) or muxed (keep the multiplex)")
+	flags.DurationP("segment-duration", "d", 0,
+		"override the profile's target Flow Segment duration; 0 disables segmentation, leaving storage to decide whole input or whole essence")
+	flags.String("segment-format", "",
+		"override the profile's Flow Segment container: source or mpegts")
+	flags.String("essence-storage", "",
+		"override how the profile stores a muxed input: independent (one Flow per essence) or muxed (keep the multiplex)")
 	flags.StringArray("ffmpeg-arg", nil, "additional explicit FFmpeg argument (repeatable)")
 }
 

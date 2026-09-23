@@ -49,7 +49,7 @@ stdout '-j, --concurrency'
 stdout '-o, --endpoint'
 stdout '--profile'
 stdout '--format.*human or json'
-stdout '--progress.*auto, plain, or none'
+stdout '--progress.*auto or none \(plain is the same as auto\)'
 stdout '--color.*auto, always, or never'
 stdout '-q, --quiet'
 stdout '-v, --verbose'
@@ -64,8 +64,10 @@ exec tamsin completion zsh
 exec tamsin completion fish
 exec tamsin completion powershell
 
-# The structured override keeps its documented 10-second default. A required
-# profile supplies the complete policy, so this flag default is not a hidden
-# ingest-profile default.
+# A required profile supplies the complete policy, so the structured overrides
+# advertise no defaults of their own.
 exec tamsin ingest --help
-stdout 'default 10s'
+stdout 'override the profile''s target Flow Segment duration'
+! stdout 'default 10s'
+! stdout 'default "source"'
+! stdout 'default "independent"'

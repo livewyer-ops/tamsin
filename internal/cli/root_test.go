@@ -241,16 +241,6 @@ func TestCLISegmentDurationShorthand(t *testing.T) {
 	}
 }
 
-// TestCLIDefaultSegmentDurationIsTenSeconds pins the default. Segmenting by
-// default makes ffmpeg a runtime requirement for every ingest, so a silent
-// change here alters what a deployment needs installed.
-func TestCLIDefaultSegmentDurationIsTenSeconds(t *testing.T) {
-	t.Parallel()
-	if defaultSegmentDuration != 10*time.Second {
-		t.Fatalf("default segment duration = %s, want 10s", defaultSegmentDuration)
-	}
-}
-
 func TestCLIRequiresProfileAndResolvesExplicitEssenceSegmentsProfile(t *testing.T) {
 	t.Parallel()
 	app := &application{v: newSettings()}

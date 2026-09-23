@@ -178,7 +178,6 @@ type ObjectDisposition string
 
 const (
 	ObjectDispositionPlanned                   ObjectDisposition = "planned"
-	ObjectDispositionUploaded                  ObjectDisposition = "uploaded"
 	ObjectDispositionRegistrationIndeterminate ObjectDisposition = "registration_indeterminate"
 	ObjectDispositionRegistered                ObjectDisposition = "registered"
 	ObjectDispositionRejected                  ObjectDisposition = "rejected"

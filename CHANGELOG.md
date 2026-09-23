@@ -9,6 +9,19 @@ that API version, so `8.2.0-in1` is the first TAMSin release targeting TAMS
 8.2. A trailing `-rcM` marks the Mth release candidate for that version, for
 example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
 
+## Unreleased
+
+- Update Go module dependencies, including the AWS SDK for Go v2 1.47 with its
+  S3 GetObject deadlock fix.
+- Stop showing defaults for `--segment-duration`, `--segment-format` and
+  `--essence-storage` in help and the references: the required profile
+  supplies them, and an explicit value overrides it. Describe
+  `--progress plain` as the same as `auto`.
+- List only the values TAMSin emits in the events reference. The diagnostic
+  severities `debug`, `info` and `warning`, the cancellation reasons
+  `output_closed` and `internal`, the `uploaded` Object disposition and the
+  `media.failed` failure code were documented but never emitted.
+
 ## [8.2.0-in2] - 2026-09-08
 
 - Measure each rendered Object's presentation bounds instead of extrapolating

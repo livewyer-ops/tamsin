@@ -17,7 +17,7 @@ func AccumulateObjectSummary(summary *ObjectSummary, object ObjectResult) {
 		summary.Retracted++
 	case ObjectDispositionStranded, ObjectDispositionRegistrationIndeterminate:
 		summary.Stranded++
-	case ObjectDispositionUnattempted, ObjectDispositionPlanned, ObjectDispositionUploaded, ObjectDispositionRegistered:
+	case ObjectDispositionUnattempted, ObjectDispositionPlanned, ObjectDispositionRegistered:
 		summary.Unattempted++
 	}
 	if object.Verification == ObjectVerificationVerified {

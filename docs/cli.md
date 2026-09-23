@@ -34,9 +34,9 @@ Use the explicit form in scripts. `tamsin --version` prints the version.
 | `-j`, `--concurrency` | CPU count, at most 8 | Inputs ingested concurrently; 1 to 256 |
 | `--transfers` | `--concurrency` | Uploads and verifications in flight across the run; 0 to 256, where `0` follows `--concurrency` |
 | `--probe-concurrency` | `2` | Queued FFprobe measurements; 0 to 256; active media processes stay capped at two |
-| `-d`, `--segment-duration` | `10s` | Target Flow Segment duration; `0` disables segmentation |
-| `--segment-format` | `source` | Segment container: `source` or `mpegts` |
-| `--essence-storage` | `independent` | `independent` (one Flow per essence) or `muxed` (keep the multiplex) |
+| `-d`, `--segment-duration` | profile | Overrides the profile's target Flow Segment duration; `0` disables segmentation |
+| `--segment-format` | profile | Overrides the profile's Segment container: `source` or `mpegts` |
+| `--essence-storage` | profile | Overrides the profile's storage: `independent` (one Flow per essence) or `muxed` (keep the multiplex) |
 | `--start` | `0:0` | Flow start as a TAMS timestamp |
 | `--verify` | `auto` | Object integrity policy: `auto`, `readback` or `none` |
 | `--storage-id` | | Target TAMS storage backend UUID |
@@ -75,7 +75,7 @@ Accepted by every command.
 | `-o`, `--endpoint` | | TAMS API endpoint |
 | `--config` | `$XDG_CONFIG_HOME/tamsin/config.yaml` | Configuration file |
 | `--format` | `human` | Result format: `human` or NDJSON `json` |
-| `--progress` | `auto` | Progress reporting: `auto`, `plain` or `none` |
+| `--progress` | `auto` | Progress reporting: `auto` or `none`; `plain` is the same as `auto` |
 | `--log-level` | `info` | Diagnostic level: `debug`, `info`, `warn` or `error` |
 | `--log-format` | `text` | Diagnostic log format: `text` or `json` |
 | `--color` | `auto` | Colour output: `auto`, `always` or `never` |
