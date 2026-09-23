@@ -49,16 +49,12 @@ type IdleWatch struct {
 }
 
 // NewIdleWatch derives a cancellable request context and starts its no-progress
-// clock. A non-positive duration disables the clock while retaining the same
-// API, which is useful to lower-level callers; Tamsin's product configuration
-// always supplies a positive default.
+// clock. The duration must be positive.
 func NewIdleWatch(parent context.Context, duration time.Duration) *IdleWatch {
 	ctx, cancel := context.WithCancelCause(parent)
 	watch := &IdleWatch{ctx: ctx, cancel: cancel, duration: duration}
-	if duration > 0 {
-		watch.deadline = time.Now().Add(duration)
-		watch.timer = time.AfterFunc(duration, watch.expire)
-	}
+	watch.deadline = time.Now().Add(duration)
+	watch.timer = time.AfterFunc(duration, watch.expire)
 	return watch
 }
 
@@ -70,9 +66,6 @@ func (w *IdleWatch) Context() context.Context { return w.ctx }
 // an HTTP transport may read a request body while another goroutine is handling
 // cancellation.
 func (w *IdleWatch) Progress() {
-	if w.duration <= 0 {
-		return
-	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.stopped {
@@ -112,9 +105,7 @@ func (w *IdleWatch) Pause() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.paused = true
-	if w.timer != nil {
-		w.timer.Stop()
-	}
+	w.timer.Stop()
 }
 
 // Error replaces the transport's context-cancellation symptom with its actual
@@ -143,9 +134,7 @@ func (w *IdleWatch) Stop() {
 		return
 	}
 	w.stopped = true
-	if w.timer != nil {
-		w.timer.Stop()
-	}
+	w.timer.Stop()
 	w.mu.Unlock()
 	w.cancel(nil)
 }

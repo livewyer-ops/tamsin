@@ -20,22 +20,11 @@ type TAMSClient interface {
 	Flow(context.Context, string) (tams.Flow, error)
 	PutFlow(context.Context, string, tams.Flow) (tams.Flow, error)
 	AllocateStorage(context.Context, string, tams.StorageRequest) (tams.StorageResponse, error)
-	RegisterSegment(context.Context, string, tams.SegmentRequest) error
 	RegisterSegments(context.Context, string, []tams.SegmentRequest) error
 	DeleteSegments(context.Context, string, tams.SegmentDeleteOptions) error
 	ListSegments(context.Context, string, tams.SegmentListOptions) ([]tams.Segment, error)
 	UploadFile(context.Context, tams.PresignedURL, string) (tams.UploadReceipt, error)
 	DownloadDigest(context.Context, tams.PresignedURL, int64) (int64, string, error)
-}
-
-// collectedFlow is a mono-essence Flow with its assigned identifier, ready to
-// register ahead of the multi-essence Flow that collects it.
-type collectedFlow struct {
-	id               string
-	sourceID         string
-	role             string
-	flow             tams.Flow
-	containerMapping map[string]any
 }
 
 // graphFlow describes one member of the complete empty Flow graph which must
@@ -75,12 +64,7 @@ type Config struct {
 	Profile           string
 	ProfileVersion    string
 	LifecycleObserver LifecycleObserver
-	// RetainObjectResults opts direct library callers into an in-memory copy of
-	// every terminal Object. The default retains only action-required recovery
-	// identifiers; process consumers use lifecycle events
-	// for clean per-Object detail.
-	RetainObjectResults bool
-	Concurrency         int
+	Concurrency       int
 	// Transfers bounds Media Object uploads and verification downloads in
 	// flight across the whole run, not per input. A single large input and a
 	// thousand small ones should both saturate the same budget, which is why
@@ -123,7 +107,6 @@ type Config struct {
 
 type Pipeline struct {
 	config Config
-	runID  string
 	// reporter presents progress to an operator. It is Discard unless the CLI
 	// decided a terminal is watching, so the pipeline itself stays unaware of
 	// whether anything is being rendered.
@@ -151,7 +134,8 @@ type Pipeline struct {
 	graphLocksMu sync.Mutex
 	graphLocks   map[string]*graphLock
 	// limits are what the store says about how long the things it hands out
-	// last. Set once before any work starts, then only read.
+	// last. They start at the specification's minimums and are replaced once by
+	// the startup preflight before any work starts, then only read.
 	limits               tams.ServiceLimits
 	apiVersion           tams.APIVersion
 	profileAssignments   []flowProfileAssignment
@@ -168,13 +152,11 @@ type Pipeline struct {
 	toolchainVersion     string
 	toolchainFingerprint string
 	toolchainErr         error
-	// One deadline covers recovery of an entire ambiguous bulk registration;
-	// it is not renewed for each Object in the batch.
-	registrationRecoveryTimeout time.Duration
-	// One deadline covers retraction after ordinary verification failures. It
-	// starts at the first failure and is shared by every Object in that batch,
-	// so a stalled service cannot multiply shutdown time by Object count.
-	verificationRecoveryTimeout time.Duration
+	// One deadline covers recovery of an entire ambiguous bulk registration, or
+	// retraction after ordinary verification failures from the first failure
+	// on. It is shared by every Object in the batch rather than renewed for
+	// each, so a stalled service cannot multiply shutdown time by Object count.
+	recoveryTimeout time.Duration
 	// staging is initialised at Run time so free-space preflight sees the
 	// filesystem the job will actually use.
 	staging *stagingManager
@@ -196,7 +178,6 @@ type ObjectDisposition string
 
 const (
 	ObjectDispositionPlanned                   ObjectDisposition = "planned"
-	ObjectDispositionUploaded                  ObjectDisposition = "uploaded"
 	ObjectDispositionRegistrationIndeterminate ObjectDisposition = "registration_indeterminate"
 	ObjectDispositionRegistered                ObjectDisposition = "registered"
 	ObjectDispositionRejected                  ObjectDisposition = "rejected"
@@ -302,43 +283,34 @@ type Failure struct {
 }
 
 type Result struct {
-	Input          string             `json:"input"`
-	Profile        string             `json:"profile"`
-	ProfileVersion string             `json:"profile_version"`
-	FFmpegVersion  string             `json:"ffmpeg_version,omitempty"`
-	MediaToolchain string             `json:"media_toolchain,omitempty"`
-	RootFlowID     string             `json:"root_flow_id,omitempty"`
-	Bytes          int64              `json:"bytes,omitempty"`
-	SHA256         string             `json:"sha256,omitempty"`
-	Status         ResultStatus       `json:"status"`
-	Verification   VerificationStatus `json:"verification"`
-	Flows          []FlowResult       `json:"flows"`
-	Failure        *Failure           `json:"failure,omitempty"`
+	Input          string
+	Profile        string
+	ProfileVersion string
+	FFmpegVersion  string
+	MediaToolchain string
+	RootFlowID     string
+	Bytes          int64
+	SHA256         string
+	Status         ResultStatus
+	Verification   VerificationStatus
+	Flows          []FlowResult
+	Failure        *Failure
 	// Error retains detailed in-process diagnostics for direct internal callers
 	// and tests. It is deliberately excluded from every serialized or rendered
 	// contract; external process consumers use Failure instead.
-	Error string `json:"-"`
-}
-
-func (r *Result) rootFlow() *FlowResult {
-	for index := range r.Flows {
-		if r.Flows[index].FlowID == r.RootFlowID {
-			return &r.Flows[index]
-		}
-	}
-	return nil
+	Error string
 }
 
 type BatchResult struct {
-	SchemaVersion  string   `json:"schema_version"`
-	ToolVersion    string   `json:"tool_version"`
-	ToolCommit     string   `json:"tool_commit"`
-	ToolBuildDate  string   `json:"tool_build_date,omitempty"`
-	ProfileVersion string   `json:"profile_version"`
-	RunID          string   `json:"run_id"`
-	Results        []Result `json:"results"`
-	Succeeded      int      `json:"succeeded"`
-	Failed         int      `json:"failed"`
+	SchemaVersion  string
+	ToolVersion    string
+	ToolCommit     string
+	ToolBuildDate  string
+	ProfileVersion string
+	RunID          string
+	Results        []Result
+	Succeeded      int
+	Failed         int
 }
 
 type ResultObserver func(index int, result Result) error

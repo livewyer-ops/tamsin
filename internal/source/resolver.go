@@ -77,13 +77,13 @@ type Config struct {
 	S3          S3Config
 	S3Client    S3API
 	// TransferIdleTimeout bounds time without byte-level progress in an HTTP
-	// or S3 media body. A non-positive value selects netio.DefaultIdleTimeout.
+	// or S3 media body.
 	TransferIdleTimeout time.Duration
 	// MetadataTimeout bounds S3 configuration, HeadObject, and ListObjectsV2
-	// calls. A non-positive value selects 30 seconds.
+	// calls.
 	MetadataTimeout time.Duration
 	// MaxInputs is the largest number of unique items one Resolve call may
-	// produce. A non-positive value selects DefaultMaxInputs.
+	// produce.
 	MaxInputs int
 	// Observability correlates source retries with the ingest which requested
 	// them. It is optional for direct package callers.
@@ -134,42 +134,22 @@ func withPublicError(message string, err error) error {
 }
 
 func New(config Config) *Resolver {
-	client := config.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
 	headers := config.HTTPHeaders.Clone()
-	client = HTTPClientWithSafeRedirects(client, headers)
-	stdin := config.Stdin
-	if stdin == nil {
-		stdin = os.Stdin
-	}
+	// --stdin-name may be empty, which filepath.Base would turn into ".".
 	name := config.StdinName
 	if name == "" {
 		name = "stdin.bin"
 	}
-	idleTimeout := config.TransferIdleTimeout
-	if idleTimeout <= 0 {
-		idleTimeout = netio.DefaultIdleTimeout
-	}
-	metadataTimeout := config.MetadataTimeout
-	if metadataTimeout <= 0 {
-		metadataTimeout = 30 * time.Second
-	}
-	maxInputs := config.MaxInputs
-	if maxInputs <= 0 {
-		maxInputs = DefaultMaxInputs
-	}
 	return &Resolver{
-		httpClient:          client,
+		httpClient:          HTTPClientWithSafeRedirects(config.HTTPClient, headers),
 		httpHeaders:         headers,
-		stdin:               stdin,
+		stdin:               config.Stdin,
 		stdinName:           name,
 		s3Config:            config.S3,
 		s3Client:            config.S3Client,
-		transferIdleTimeout: idleTimeout,
-		metadataTimeout:     metadataTimeout,
-		maxInputs:           maxInputs,
+		transferIdleTimeout: config.TransferIdleTimeout,
+		metadataTimeout:     config.MetadataTimeout,
+		maxInputs:           config.MaxInputs,
 		observability:       config.Observability,
 		seen:                make(map[string]struct{}),
 		manifests:           make(map[string]struct{}),

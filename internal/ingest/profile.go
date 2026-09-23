@@ -58,6 +58,10 @@ type ProfileDefinition struct {
 	ResourceNote         string
 }
 
+// Segmented profiles target Media Objects that are, in the words of TAMS
+// AppNote 0001, "typically short (on the order of seconds) and independently
+// decodable". Cuts land on keyframes, so a long GOP raises the floor and actual
+// Segments vary around the target.
 var builtInProfiles = []ProfileDefinition{
 	{
 		Name: ProfilePreserve, Version: "1",
@@ -179,12 +183,25 @@ func ValidateTreatment(profile Profile, ffmpegArgs []string) error {
 	if profile.SegmentDuration > 0 || profile.EssenceStorage == media.EssenceStorageIndependent {
 		return nil
 	}
+	return unusableMediaOptions(ffmpegArgs, profile.SegmentFormat)
+}
+
+// unusableMediaOptions refuses options that would silently do nothing.
+//
+// Without segmentation the staged file is uploaded as it stands. An FFmpeg
+// argument list or a chosen Segment container can then only be honoured by
+// re-encoding or remuxing the whole file, which is not what that path does.
+// Ignoring them quietly is the worst option, because both feed the derived Flow
+// identity: two ingests that differ only in an argument that had no effect
+// would land on different Flows, and an argument list also leaves generation
+// unset, implying a transcode that never happened.
+func unusableMediaOptions(ffmpegArgs []string, format media.SegmentFormat) error {
 	var unusable []string
 	if len(ffmpegArgs) > 0 {
 		unusable = append(unusable, "--ffmpeg-arg")
 	}
-	if profile.SegmentFormat.ContainerMIME() != "" {
-		unusable = append(unusable, "--segment-format "+string(profile.SegmentFormat))
+	if format.ContainerMIME() != "" {
+		unusable = append(unusable, "--segment-format "+string(format))
 	}
 	if len(unusable) == 0 {
 		return nil
@@ -199,9 +216,6 @@ func namedProfile(selection string) (Profile, error) {
 	name, version, versioned := strings.Cut(strings.ToLower(strings.TrimSpace(selection)), "@")
 	if name == "" {
 		return Profile{}, fmt.Errorf("ingest profile is required; use %s", availableProfileNames())
-	}
-	if versioned && version == "" {
-		return Profile{}, errors.New("ingest profile version cannot be empty")
 	}
 	version = strings.TrimPrefix(version, "v")
 	if versioned && version == "" {

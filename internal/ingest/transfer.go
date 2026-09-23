@@ -21,12 +21,8 @@ import (
 // microbatches so the shorter presigned-URL lifetime is honoured as well.
 //
 // Half the advertised lifetime is used, leaving the other half as margin for a
-// batch that turns out slower than the one before it. A store that advertises
-// no lifetime has not told us to divide the work, so it is not divided.
+// batch that turns out slower than the one before it.
 func (p *Pipeline) chunkSize(remaining []preparedObject, throughput float64) int {
-	if p.limits.ObjectRegistration <= 0 {
-		return len(remaining)
-	}
 	if throughput <= 0 {
 		throughput = assumedThroughput
 	}
@@ -82,10 +78,6 @@ func chunkTimerange(chunk []preparedObject) string {
 // can be sized from what this one achieved rather than from a guess.
 func (p *Pipeline) commitChunk(ctx context.Context, flowID string, chunk []preparedObject,
 	objectResults []ObjectResult, storageID string, throughput float64) (time.Duration, int64, error) {
-	if p.limits.PresignedURL <= 0 {
-		return p.commitReadyChunk(ctx, flowID, chunk, objectResults, storageID, throughput, nil)
-	}
-
 	// Storage allocation creates every PUT URL in its response. Reserve the
 	// workers that will consume them first, and ask for no more URLs than can
 	// begin immediately. Each microbatch completes registration and verification
@@ -100,7 +92,7 @@ func (p *Pipeline) commitChunk(ctx context.Context, flowID string, chunk []prepa
 			return 0, 0, fmt.Errorf("wait for an upload worker: %w", err)
 		}
 		ready := remaining[:min(len(remaining), reservation.count)]
-		_, bytes, err := p.commitReadyChunk(
+		bytes, err := p.commitReadyChunk(
 			ctx, flowID, ready, objectResults, storageID, throughput, reservation)
 		if err != nil {
 			return 0, 0, err
@@ -112,15 +104,11 @@ func (p *Pipeline) commitChunk(ctx context.Context, flowID string, chunk []prepa
 }
 
 // commitReadyChunk consumes one batch whose upload workers are already
-// reserved. A nil reservation retains the defensive fallback for tests and
-// clients that have no advertised presigned-URL lifetime.
+// reserved.
 func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []preparedObject,
 	objectResults []ObjectResult, storageID string, throughput float64,
-	reservation *transferReservation) (time.Duration, int64, error) {
-	started := time.Now()
-	if reservation != nil {
-		defer reservation.releaseAll()
-	}
+	reservation *transferReservation) (int64, error) {
+	defer reservation.releaseAll()
 	var transferred int64
 	objectIDs := make([]string, 0, len(chunk))
 	for _, object := range chunk {
@@ -132,16 +120,13 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []
 		ObjectIDs: objectIDs, StorageID: storageID,
 	})
 	if err != nil {
-		return 0, 0, fmt.Errorf("allocate storage for %d objects: %w", len(chunk), err)
+		return 0, fmt.Errorf("allocate storage for %d objects: %w", len(chunk), err)
 	}
 	destinations := make(map[string]tams.PresignedURL, len(allocation.MediaObjects))
-	var uploadStartBefore time.Time
-	if p.limits.PresignedURL > 0 {
-		// The service exposes a minimum duration, not an absolute expiry. Measure
-		// it from response receipt; the schema asks services to leave grace for
-		// URL generation and response latency.
-		uploadStartBefore = time.Now().Add(p.limits.PresignedURL)
-	}
+	// The service exposes a minimum duration, not an absolute expiry. Measure it
+	// from response receipt; the schema asks services to leave grace for URL
+	// generation and response latency.
+	uploadStartBefore := time.Now().Add(p.limits.PresignedURL)
 	for _, allocated := range allocation.MediaObjects {
 		// Before 8.2 the allocation response did not identify presigned URLs.
 		if !p.apiVersion.AtLeast(8, 2) || allocated.Presigned != nil && *allocated.Presigned {
@@ -155,7 +140,7 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []
 	for _, object := range chunk {
 		destination, ok := destinations[object.id]
 		if !ok || destination.URL == "" {
-			return 0, 0, fmt.Errorf("storage allocation omitted object %s", object.id)
+			return 0, fmt.Errorf("storage allocation omitted object %s", object.id)
 		}
 	}
 
@@ -171,28 +156,14 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []
 
 	uploads, uploadCtx := errgroup.WithContext(ctx)
 	// The limit bounds how many goroutines exist, not just how many are doing
-	// something. Without it every Object in the batch got one immediately and
-	// then queued on the transfer budget, so the goroutine count followed the
-	// size of the job rather than the size of the allowance. The budget itself
-	// is still taken inside, because it is shared across concurrent Flows while
-	// this limit only governs one batch.
-	uploadLimit := max(p.config.Transfers, 1)
-	if reservation != nil {
-		uploadLimit = reservation.count
-	}
-	uploads.SetLimit(uploadLimit)
+	// something: one per reserved transfer slot, so the goroutine count follows
+	// the size of the allowance rather than the size of the job.
+	uploads.SetLimit(reservation.count)
 	receipts := make(map[string]tams.UploadReceipt, len(chunk))
 	var receiptsMu sync.Mutex
 	for _, object := range chunk {
 		destination := destinations[object.id]
 		uploads.Go(func() error {
-			if reservation == nil {
-				release, err := p.acquireTransfer(uploadCtx)
-				if err != nil {
-					return err
-				}
-				defer release()
-			}
 			p.logger.Info("uploading object", "flow_id", flowID, "object_id", object.id, "bytes", object.size)
 			receipt, err := p.client.UploadFile(uploadCtx, destination, object.path)
 			if err != nil {
@@ -216,15 +187,9 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []
 		})
 	}
 	if err := uploads.Wait(); err != nil {
-		return 0, 0, err
+		return 0, err
 	}
-	if reservation != nil {
-		reservation.releaseAll()
-	}
-	records := registrationRecords(chunk)
-	for _, record := range records {
-		setObjectDisposition(objectResults, record.object.id, ObjectDispositionUploaded)
-	}
+	reservation.releaseAll()
 
 	requests := make([]tams.SegmentRequest, 0, len(chunk))
 	for _, object := range chunk {
@@ -232,87 +197,53 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []
 			ObjectID: object.id, Timerange: object.timerange,
 			ObjectTimerange: object.objectTimerange, TSOffset: object.tsOffset,
 		})
-	}
-	for _, record := range records {
-		setObjectDisposition(objectResults, record.object.id, ObjectDispositionRegistrationIndeterminate)
+		setObjectDisposition(objectResults, object.id, ObjectDispositionRegistrationIndeterminate)
 	}
 	registrationRecovered := false
 	if err := p.client.RegisterSegments(ctx, flowID, requests); err != nil {
-		if resolveErr := p.reconcileRegistrationError(ctx, flowID, records, objectResults, err); resolveErr != nil {
-			return 0, 0, fmt.Errorf("register segments: %w", errors.Join(err, resolveErr))
+		if resolveErr := p.reconcileRegistrationError(ctx, flowID, chunk, objectResults, err); resolveErr != nil {
+			return 0, fmt.Errorf("register segments: %w", errors.Join(err, resolveErr))
 		}
 		// A complete readback (and verification, when enabled) proved that the
 		// bulk POST committed before its response was lost.
 		registrationRecovered = true
 	} else {
-		for _, record := range records {
-			setObjectDisposition(objectResults, record.object.id, ObjectDispositionRegistered)
+		for _, object := range chunk {
+			setObjectDisposition(objectResults, object.id, ObjectDispositionRegistered)
 		}
 	}
 
 	// TAMS requires GET /objects/{objectId} to answer 404 until the Object is
 	// registered against a Flow Segment, so uploaded bytes cannot be read back
-	// before registration. With an advertised URL lifetime, verification takes
-	// a transfer slot and then fetches one exact, fresh URL in verifyOne. The
-	// per-record state machine still resolves every listing failure or omission
-	// by retracting that known-registered Segment.
+	// before registration. Verification takes a transfer slot and then fetches
+	// one exact, fresh URL in verifyOneWithRetraction. The per-record state
+	// machine still resolves every listing failure or omission by retracting
+	// that known-registered Segment.
 	if p.config.VerificationMode != VerificationNone && !registrationRecovered {
-		readback := records
+		readback := chunk
 		if p.config.VerificationMode == VerificationAuto {
-			readback = make([]*registrationRecord, 0, len(records))
-			for _, record := range records {
-				if receipts[record.object.id].StorageSHA256 == "" {
-					readback = append(readback, record)
+			readback = make([]preparedObject, 0, len(chunk))
+			for _, object := range chunk {
+				if receipts[object.id].StorageSHA256 == "" {
+					readback = append(readback, object)
 					continue
 				}
-				p.acceptStorageVerification(ctx, record, objectResults)
+				p.acceptStorageVerification(ctx, object, objectResults)
 			}
 		}
-		if len(readback) > 0 && p.limits.PresignedURL > 0 {
-			for _, record := range readback {
-				record.segment = tams.Segment{
-					ObjectID: record.object.id, Timerange: record.object.timerange,
-				}
-			}
-			if err := p.verifyRegistrationRecords(ctx, flowID, readback, objectResults); err != nil {
-				return 0, 0, err
-			}
-		} else if len(readback) > 0 {
-			registered, err := p.client.ListSegments(ctx, flowID,
-				tams.SegmentListOptions{Timerange: chunkTimerange(objectsFromRecords(readback)), IncludeDownloadURLs: true})
-			if err != nil {
-				return 0, 0, p.resolveRegisteredListingFailure(ctx, flowID, readback, objectResults, err)
-			}
-			visible := make([]*registrationRecord, 0, len(readback))
-			missing := make([]*registrationRecord, 0)
-			for _, record := range readback {
-				segment := matchingSegment(registered, record.object.id, record.object.timerange)
-				if segment == nil {
-					missing = append(missing, record)
-					continue
-				}
-				record.segment = *segment
-				visible = append(visible, record)
-			}
-			if len(missing) > 0 {
-				return 0, 0, p.resolveIncompleteRegisteredListing(ctx, flowID, visible, missing, objectResults)
-			}
-			if err := p.verifyRegistrationRecords(ctx, flowID, visible, objectResults); err != nil {
-				return 0, 0, err
-			}
+		if err := p.verifyAll(ctx, flowID, readback, objectResults, false); err != nil {
+			return 0, err
 		}
-	}
-	for _, object := range chunk {
-		setObjectDisposition(objectResults, object.id, ObjectDispositionIngested)
 	}
 	completed := make(map[string]struct{}, len(chunk))
 	for _, object := range chunk {
+		setObjectDisposition(objectResults, object.id, ObjectDispositionIngested)
 		completed[object.id] = struct{}{}
 	}
 	if err := p.observeObjectBatch(ctx, flowID, objectResults, completed); err != nil {
-		return 0, 0, err
+		return 0, err
 	}
-	return time.Since(started), transferred, nil
+	return transferred, nil
 }
 
 // applyBitRates records what a reader will actually have to pull off the wire.
@@ -433,18 +364,17 @@ func (p *Pipeline) reserveTransferBatch(ctx context.Context, desired int) (*tran
 	return &transferReservation{pipeline: p, count: reserved}, nil
 }
 
+// registerFlow brings one written Flow's Media Objects into the store:
+// allocate, upload, register, then verify and retract on mismatch. Independent
+// essence storage runs this once per essence, so it takes the Flow and the
+// Objects belonging to it rather than reading them off a single ingest.
 func (p *Pipeline) registerFlow(ctx context.Context, flowID string, objects []preparedObject, objectResults []ObjectResult, storageID string) error {
 	// One listing answers the resume question for every Object. Asking per
 	// Object cost a round trip each, which dominates on a high-latency link.
-	// Download URLs are only wanted if a resumed Object will be verified. When
-	// they are not, the service is spared signing one per Segment for a listing
-	// that is only being asked which Objects exist.
-	existing, err := p.client.ListSegments(ctx, flowID,
-		tams.SegmentListOptions{
-			// This first listing answers identity only. A verification worker asks
-			// for its own URL after it holds a transfer slot.
-			IncludeDownloadURLs: p.config.VerificationMode != VerificationNone && p.limits.PresignedURL <= 0,
-		})
+	// It answers identity only: a verification worker asks for its own URL
+	// after it holds a transfer slot, so the service is spared signing one per
+	// Segment for a listing that is only being asked which Objects exist.
+	existing, err := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{})
 	if err != nil {
 		return fmt.Errorf("list existing segments: %w", err)
 	}
@@ -455,8 +385,7 @@ func (p *Pipeline) registerFlow(ctx context.Context, flowID string, objects []pr
 func (p *Pipeline) registerRollingChunk(ctx context.Context, flowID string, objects []preparedObject,
 	objectResults []ObjectResult, storageID string, throughput *float64) error {
 	existing, err := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{
-		Timerange:           chunkTimerange(objects),
-		IncludeDownloadURLs: p.config.VerificationMode != VerificationNone && p.limits.PresignedURL <= 0,
+		Timerange: chunkTimerange(objects),
 	})
 	if err != nil {
 		return fmt.Errorf("list existing segments for rolling batch: %w", err)
@@ -466,12 +395,8 @@ func (p *Pipeline) registerRollingChunk(ctx context.Context, flowID string, obje
 
 func (p *Pipeline) registerPreparedObjects(ctx context.Context, flowID string, objects []preparedObject,
 	objectResults []ObjectResult, storageID string, existing []tams.Segment, throughput *float64) error {
-	if throughput == nil {
-		throughput = new(float64)
-	}
-
 	missing := make([]preparedObject, 0, len(objects))
-	var resumed []verificationTask
+	var resumed []preparedObject
 	for _, object := range objects {
 		segment := matchingSegment(existing, object.id, object.timerange)
 		if segment == nil {
@@ -482,39 +407,19 @@ func (p *Pipeline) registerPreparedObjects(ctx context.Context, flowID string, o
 		// verification is scheduled with the rest, so that unit is credited there.
 		p.advanceProgress(ctx, progress.PhaseStore, 1, object.size)
 		if p.config.VerificationMode != VerificationNone {
-			resumed = append(resumed, verificationTask{object: object, segment: *segment})
+			resumed = append(resumed, object)
 		}
 		setObjectDisposition(objectResults, object.id, ObjectDispositionResumed)
 	}
-	// Resumed Objects are checked before missing uploads. When URL lifetimes are
-	// advertised, the tasks intentionally carry no URL: verifyOne refreshes each
-	// only after its worker owns transfer capacity.
-	outcomes, verifyErr := p.verifyAllWithOutcomes(ctx, flowID, resumed)
-	for index, outcome := range outcomes {
-		if outcome == outcomeVerified {
-			setObjectVerification(objectResults, resumed[index].object.id,
-				ObjectVerificationVerified, VerificationMethodReadback)
-		}
-	}
-	if verifyErr != nil {
-		for index, outcome := range outcomes {
-			switch outcome {
-			case outcomeRetracted:
-				setObjectDisposition(objectResults, resumed[index].object.id, ObjectDispositionRetracted)
-				setObjectVerification(objectResults, resumed[index].object.id,
-					ObjectVerificationFailed, VerificationMethodReadback)
-			case outcomeRetractionFailed:
-				setObjectDisposition(objectResults, resumed[index].object.id, ObjectDispositionStranded)
-				setObjectVerification(objectResults, resumed[index].object.id,
-					ObjectVerificationFailed, VerificationMethodReadback)
-			}
-		}
-		return verifyErr
+	// Resumed Objects are checked before missing uploads. verifyOneWithRetraction
+	// refreshes each one's URL only after its worker owns transfer capacity.
+	if err := p.verifyAll(ctx, flowID, resumed, objectResults, false); err != nil {
+		return err
 	}
 	if len(resumed) > 0 {
 		completed := make(map[string]struct{}, len(resumed))
-		for _, task := range resumed {
-			completed[task.object.id] = struct{}{}
+		for _, object := range resumed {
+			completed[object.id] = struct{}{}
 		}
 		if err := p.observeObjectBatch(ctx, flowID, objectResults, completed); err != nil {
 			return err
@@ -544,10 +449,6 @@ func (p *Pipeline) registerPreparedObjects(ctx context.Context, flowID string, o
 			*throughput = float64(transferred) / elapsed.Seconds()
 		}
 		offset += len(chunk)
-	}
-
-	for _, object := range missing {
-		setObjectDisposition(objectResults, object.id, ObjectDispositionIngested)
 	}
 	return nil
 }

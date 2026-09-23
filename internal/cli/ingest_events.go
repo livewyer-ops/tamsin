@@ -69,7 +69,7 @@ type ingestEventOutput struct {
 
 	declared        map[int]string
 	startedInputs   map[int]bool
-	terminal        map[int]ingestevent.InputStatus
+	terminal        map[int]ingest.ResultStatus
 	plannedFlows    map[int]map[string]ingestevent.FlowPlanned
 	objectSummaries map[int]map[string]ingest.ObjectSummary
 	retries         uint64
@@ -94,7 +94,7 @@ func newIngestEventOutput(writer io.Writer, runID string, cancel context.CancelC
 	output := &ingestEventOutput{
 		cancel: cancel, done: make(chan struct{}), now: now, started: now(),
 		declared: make(map[int]string), startedInputs: make(map[int]bool),
-		terminal: make(map[int]ingestevent.InputStatus), plannedFlows: make(map[int]map[string]ingestevent.FlowPlanned),
+		terminal: make(map[int]ingest.ResultStatus), plannedFlows: make(map[int]map[string]ingestevent.FlowPlanned),
 		objectSummaries: make(map[int]map[string]ingest.ObjectSummary),
 		progress:        make(map[eventProgressKey]eventProgressState), pendingProgress: make(map[eventProgressKey]pendingProgressEvent),
 		progressStarted: make(map[int]bool), progressSealed: make(map[int]bool),
@@ -134,40 +134,27 @@ func (a *application) finishBootstrapEvents(ctx context.Context, cause error, ex
 		}
 		a.events = output
 	}
-	resolvedCode, err := a.events.Finish(cause, exitCode, nil, observability.Snapshot{}, ctx)
-	if err == nil {
-		a.ingestTerminalFrozen = true
-	}
-	return resolvedCode, err
+	return a.events.Finish(cause, exitCode, nil, observability.Snapshot{}, ctx)
 }
 
-func (o *ingestEventOutput) Start(options *ingestFlagValues) error {
+func (o *ingestEventOutput) Start(options *ingestOptions) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.startLocked(options)
 }
 
-func (o *ingestEventOutput) startLocked(options *ingestFlagValues) error {
+func (o *ingestEventOutput) startLocked(options *ingestOptions) error {
 	if o.runStarted {
 		return nil
 	}
 	event := ingestevent.RunStarted{StartedAt: o.started.UTC()}
 	if options != nil {
+		concurrency, transfers, inputs := uint64(options.concurrency), uint64(options.transfers), uint64(len(options.inputs))
 		event.Profile = options.profile
 		event.ProfileVersion = options.profileVersion
 		event.DryRunMode = options.dryRun
 		event.VerificationMode = options.verify
-		if options.concurrency > 0 {
-			event.Concurrency = ingestevent.KnownSetting(uint64(options.concurrency))
-		}
-		transfers := options.transfers
-		if transfers <= 0 {
-			transfers = options.concurrency
-		}
-		if transfers > 0 {
-			event.Transfers = ingestevent.KnownSetting(uint64(transfers))
-		}
-		event.RequestedInputs = ingestevent.KnownInputCount(uint64(len(options.inputs)))
+		event.Concurrency, event.Transfers, event.RequestedInputs = &concurrency, &transfers, &inputs
 	}
 	if err := o.emitLocked(nil, event); err != nil {
 		return err
@@ -222,9 +209,8 @@ func (o *ingestEventOutput) FlowPlanned(index int, plan ingest.FlowPlan) error {
 	if err := o.ensureInputStartedLocked(index); err != nil {
 		return err
 	}
-	kind := ingestevent.FlowKind(plan.Kind)
 	event := ingestevent.FlowPlanned{
-		FlowID: plan.FlowID, SourceID: plan.SourceID, Kind: kind, Role: plan.Role,
+		FlowID: plan.FlowID, SourceID: plan.SourceID, Kind: plan.Kind, Role: plan.Role,
 		Root: plan.Root, ParentFlowID: plan.ParentFlowID,
 		Format: plan.Format, Container: plan.Container, TAMSFlowProfileID: plan.TAMSFlowProfileID,
 	}
@@ -268,9 +254,7 @@ func (o *ingestEventOutput) objectsCompletedLocked(index int, flowID string, obj
 		}
 		if err := o.emitLocked(ingestevent.ObjectScope(index, flowID, object.ObjectID), ingestevent.ObjectResult{
 			ObjectID: object.ObjectID, Timerange: object.Timerange, Bytes: uint64(object.Bytes), SHA256: object.SHA256,
-			Disposition:        ingestevent.ObjectDisposition(object.Disposition),
-			Verification:       ingestevent.ObjectVerificationStatus(object.Verification),
-			VerificationMethod: ingestevent.VerificationMethod(object.VerificationMethod),
+			Disposition: object.Disposition, Verification: object.Verification, VerificationMethod: object.VerificationMethod,
 		}); err != nil {
 			return err
 		}
@@ -285,21 +269,12 @@ func (o *ingestEventOutput) objectsCompletedLocked(index int, flowID string, obj
 // the operation context; RunObserved then enters its normal reconciliation
 // path and the CLI reports the output failure as the primary error.
 func (o *ingestEventOutput) Report(snapshot progress.Snapshot) {
-	if err := snapshot.Validate(); err != nil {
+	if snapshot.Hidden() {
 		return
 	}
 	o.progressMu.Lock()
 	index := snapshot.Scope.InputIndex
 	if o.progressStopped || o.progressSealed[index] || !o.progressStarted[index] {
-		o.progressMu.Unlock()
-		return
-	}
-
-	// The initial verify tracker is an implementation detail. Store's matching
-	// zero snapshot already tells a UI that analysis is under way; the first
-	// sealed verify total is the useful verification event.
-	if snapshot.Phase == progress.PhaseVerify && !snapshot.TotalsFinal &&
-		snapshot.CompletedObjects == 0 && snapshot.CompletedBytes == 0 {
 		o.progressMu.Unlock()
 		return
 	}
@@ -317,12 +292,8 @@ func (o *ingestEventOutput) Report(snapshot progress.Snapshot) {
 		o.progressMu.Unlock()
 		return
 	}
-	phase := ingestevent.ProgressStore
-	if snapshot.Phase == progress.PhaseVerify {
-		phase = ingestevent.ProgressVerify
-	}
 	event := ingestevent.ProgressSnapshot{
-		Revision: snapshot.Revision, Phase: phase, TotalsFinal: snapshot.TotalsFinal,
+		Revision: snapshot.Revision, Phase: snapshot.Phase, TotalsFinal: snapshot.TotalsFinal,
 		CompletedObjects: uint64(snapshot.CompletedObjects), TotalObjects: uint64(snapshot.TotalObjects),
 		CompletedBytes: uint64(snapshot.CompletedBytes), TotalBytes: uint64(snapshot.TotalBytes),
 		ElapsedMS: durationMilliseconds(now.Sub(o.started)),
@@ -385,49 +356,36 @@ func (o *ingestEventOutput) resultLocked(index int, result ingest.Result) error 
 	}
 	for _, flow := range result.Flows {
 		planned, wasPlanned := o.plannedFlows[index][flow.FlowID]
-		kind, role := eventFlowKind(result.RootFlowID, flow)
 		if !wasPlanned {
 			// A failure may produce terminal recovery handles before a complete
 			// validated Flow plan existed. Report those terminal records without
 			// inventing a flow.planned event after the fact.
-			planned = ingestevent.FlowPlanned{Kind: kind, Role: role}
+			planned = ingestevent.FlowPlanned{Kind: flow.Kind, Role: strings.TrimSpace(flow.Role)}
 		}
-		emitted := o.objectSummaries[index][flow.FlowID]
-		// Result can be called directly by library tests and older adapters. In
-		// production, ObjectsCompleted has already streamed every Object before
-		// this terminal projection, keeping output state proportional to Flows.
-		if emitted.Total == 0 && flow.ObjectSummary.Total > 0 && len(flow.Objects) > 0 {
-			if err := o.objectsCompletedLocked(index, flow.FlowID, flow.Objects); err != nil {
-				return err
-			}
-			emitted = o.objectSummaries[index][flow.FlowID]
-		}
-		if emitted != flow.ObjectSummary {
+		if o.objectSummaries[index][flow.FlowID] != flow.ObjectSummary {
 			return o.failLocked(fmt.Errorf("flow %s terminal Object summary does not match streamed Object results", flow.FlowID))
 		}
 		if err := o.emitLocked(ingestevent.FlowScope(index, flow.FlowID), ingestevent.FlowResult{
 			FlowID: flow.FlowID, SourceID: flow.SourceID, Kind: planned.Kind, Role: planned.Role,
 			TAMSFlowProfileID: flow.TAMSFlowProfileID,
-			Disposition:       ingestevent.FlowDisposition(flow.Disposition), ObjectSummary: eventObjectSummary(flow.ObjectSummary),
+			Disposition:       flow.Disposition, ObjectSummary: flow.ObjectSummary,
 		}); err != nil {
 			return err
 		}
 	}
 
-	status := ingestevent.InputStatus(result.Status)
 	finished := ingestevent.InputFinished{
 		Input: input, Profile: result.Profile, ProfileVersion: result.ProfileVersion,
 		FFmpegVersion: result.FFmpegVersion, MediaToolchain: result.MediaToolchain,
-		RootFlowID: result.RootFlowID, SHA256: result.SHA256, Status: status,
-		Verification: ingestevent.VerificationStatus(result.Verification),
-		FlowCount:    uint64(len(result.Flows)), ObjectCount: uint64(resultObjectCount(result)),
+		RootFlowID: result.RootFlowID, SHA256: result.SHA256, Status: result.Status, Verification: result.Verification,
+		FlowCount: uint64(len(result.Flows)), ObjectCount: uint64(resultObjectCount(result)),
 	}
 	if result.Bytes > 0 {
 		finished.Bytes = uint64(result.Bytes)
 	}
-	if status == ingestevent.InputFailed {
+	if result.Status == ingest.ResultStatusFailed {
 		code, message, action := inputFailure(result)
-		diagnostic, err := ingestevent.NewDiagnostic(ingestevent.SeverityError, code, message, "", action)
+		diagnostic, err := ingestevent.NewDiagnostic(code, message, "", action)
 		if err != nil {
 			return o.failLocked(err)
 		}
@@ -440,22 +398,12 @@ func (o *ingestEventOutput) resultLocked(index int, result ingest.Result) error 
 	if err := o.emitLocked(ingestevent.InputScope(index), finished); err != nil {
 		return err
 	}
-	o.terminal[index] = status
+	o.terminal[index] = result.Status
 	return nil
 }
 
-func eventObjectSummary(summary ingest.ObjectSummary) ingestevent.ObjectSummary {
-	return ingestevent.ObjectSummary{
-		Total: uint64(summary.Total), Bytes: nonnegativeUint64(summary.Bytes),
-		Ingested: uint64(summary.Ingested), Resumed: uint64(summary.Resumed), Rejected: uint64(summary.Rejected),
-		Retracted: uint64(summary.Retracted), Stranded: uint64(summary.Stranded), Unattempted: uint64(summary.Unattempted),
-		Verified: uint64(summary.Verified), StorageVerified: uint64(summary.StorageVerified),
-		ReadbackVerified: uint64(summary.ReadbackVerified),
-	}
-}
-
 func (o *ingestEventOutput) Finish(cause error, exitCode int,
-	options *ingestFlagValues, metrics observability.Snapshot, ctx context.Context) (int, error) {
+	options *ingestOptions, metrics observability.Snapshot, ctx context.Context) (int, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	defer o.stopProgressLocked()
@@ -466,9 +414,8 @@ func (o *ingestEventOutput) Finish(cause error, exitCode int,
 		return ExitGeneral, o.err
 	}
 	decision := o.freezeTerminalLocked(ctx)
-	// Once cancellation is observed before the freeze point it owns the terminal
-	// classification, even if another operation returned a more specific error
-	// at the same time. Every later projection consumes this frozen decision.
+	// Cancellation observed before the freeze decides the outcome, even if
+	// another operation returned a more specific error at the same time.
 	if decision.interrupted {
 		exitCode = ExitInterrupted
 		cause = decision.cause
@@ -488,11 +435,11 @@ func (o *ingestEventOutput) Finish(cause error, exitCode int,
 	}
 
 	profile, profileVersion := ingest.ProfileUnresolved, ingest.UnresolvedProfileVersion
-	verification := ingestevent.VerificationNotReached
+	verification := ingest.VerificationNotReached
 	if options != nil {
 		profile, profileVersion = options.profile, options.profileVersion
 		if ingest.VerificationMode(options.verify) == ingest.VerificationNone {
-			verification = ingestevent.VerificationNotRequested
+			verification = ingest.VerificationNotRequested
 		}
 	}
 	// Declare creates contiguous indexes in source order. Synthesize terminal
@@ -506,7 +453,7 @@ func (o *ingestEventOutput) Finish(cause error, exitCode int,
 		code, message, action := runFailure(exitCode)
 		result := ingest.Result{
 			Input: input, Profile: profile, ProfileVersion: profileVersion, Status: ingest.ResultStatusFailed,
-			Verification: ingest.VerificationStatus(verification), Flows: []ingest.FlowResult{},
+			Verification: verification, Flows: []ingest.FlowResult{},
 			Failure: &ingest.Failure{Code: code, Message: message, ActionRequired: action}, Error: message,
 		}
 		if code == ingest.FailureCodeInterrupted {
@@ -520,8 +467,7 @@ func (o *ingestEventOutput) Finish(cause error, exitCode int,
 
 	if cause != nil {
 		code, message, action := runFailure(exitCode)
-		diagnostic, err := ingestevent.NewDiagnostic(
-			ingestevent.SeverityError, code, message, diagnosticHintFor(cause), action)
+		diagnostic, err := ingestevent.NewDiagnostic(code, message, diagnosticHintFor(cause), action)
 		if err != nil {
 			return ExitGeneral, o.failLocked(err)
 		}
@@ -532,7 +478,7 @@ func (o *ingestEventOutput) Finish(cause error, exitCode int,
 
 	var succeeded, failed uint64
 	for _, status := range o.terminal {
-		if status == ingestevent.InputFailed {
+		if status == ingest.ResultStatusFailed {
 			failed++
 		} else {
 			succeeded++
@@ -673,7 +619,7 @@ func (o *ingestEventOutput) emitLocked(scope *ingestevent.Scope, event ingesteve
 	if o.err != nil {
 		return o.err
 	}
-	if _, err := o.encoder.Emit(scope, event); err != nil {
+	if err := o.encoder.Emit(scope, event); err != nil {
 		return o.failLocked(err)
 	}
 	return nil
@@ -714,20 +660,6 @@ func (o *ingestEventOutput) Err() error {
 	return o.err
 }
 
-func eventFlowKind(rootFlowID string, flow ingest.FlowResult) (ingestevent.FlowKind, string) {
-	role := strings.TrimSpace(flow.Role)
-	if flow.Kind != "" {
-		return ingestevent.FlowKind(flow.Kind), role
-	}
-	if flow.FlowID == rootFlowID && flow.ObjectSummary.Total == 0 {
-		return ingestevent.FlowKindCollection, ""
-	}
-	if role == "" || strings.EqualFold(role, "multi") {
-		return ingestevent.FlowKindMuxed, ""
-	}
-	return ingestevent.FlowKindEssence, role
-}
-
 func resultObjectCount(result ingest.Result) int {
 	count := 0
 	for _, flow := range result.Flows {
@@ -759,8 +691,6 @@ func runFailure(exitCode int) (code, message string, action bool) {
 		return ingest.FailureCodeInputFailed, ingest.FailureMessageInputFailed, false
 	case ExitSource:
 		return ingest.FailureCodeSourceFailed, ingest.FailureMessageSourceFailed, true
-	case ExitMedia:
-		return ingest.FailureCodeMediaFailed, ingest.FailureMessageMediaFailed, true
 	case ExitRemote:
 		return ingest.FailureCodeTAMSFailed, ingest.FailureMessageTAMSFailed, true
 	case ExitInterrupted:

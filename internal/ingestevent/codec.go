@@ -37,24 +37,13 @@ type Encoder struct {
 }
 
 func NewEncoder(sink io.Writer, runID string) (*Encoder, error) {
-	return newEncoder(sink, runID, time.Now)
-}
-
-func newEncoder(sink io.Writer, runID string, now func() time.Time) (*Encoder, error) {
 	if sink == nil {
 		return nil, errors.New("ingest event sink is required")
 	}
 	if _, err := uuid.Parse(runID); err != nil {
 		return nil, fmt.Errorf("ingest event run ID must be a UUID: %w", err)
 	}
-	if now == nil {
-		return nil, errors.New("ingest event clock is required")
-	}
-	started := now()
-	if started.IsZero() {
-		return nil, errors.New("ingest event clock returned a zero time")
-	}
-	encoder := &Encoder{sink: sink, runID: runID, now: now, started: started}
+	encoder := &Encoder{sink: sink, runID: runID, now: time.Now, started: time.Now()}
 	if flusher, ok := sink.(flushWriter); ok {
 		encoder.flusher = flusher
 	}
@@ -64,33 +53,33 @@ func newEncoder(sink io.Writer, runID string, now func() time.Time) (*Encoder, e
 // Emit writes and flushes one event record. Ordering beyond the process-level
 // hello and terminal boundaries belongs to the CLI state machine that produces
 // the events.
-func (e *Encoder) Emit(scope *Scope, event Event) (Envelope, error) {
+func (e *Encoder) Emit(scope *Scope, event Event) error {
 	if e == nil {
-		return Envelope{}, errors.New("nil ingest event encoder")
+		return errors.New("nil ingest event encoder")
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.final {
-		return Envelope{}, errors.New("ingest event encoder is finalised")
+		return errors.New("ingest event encoder is finalised")
 	}
 	if e.finished {
-		return Envelope{}, errors.New("ingest event follows run.finished")
+		return errors.New("ingest event follows run.finished")
 	}
 	if e.failed != nil {
-		return Envelope{}, fmt.Errorf("ingest event encoder previously failed: %w", e.failed)
+		return fmt.Errorf("ingest event encoder previously failed: %w", e.failed)
 	}
 	if event == nil {
-		return Envelope{}, errors.New("ingest event payload is required")
+		return errors.New("ingest event payload is required")
 	}
 	if e.nextSequence == 0 && event.EventType() != TypeHello {
-		return Envelope{}, errors.New("first ingest event must be hello")
+		return errors.New("first ingest event must be hello")
 	}
 	if e.nextSequence > 0 && event.EventType() == TypeHello {
-		return Envelope{}, errors.New("hello may only be the first ingest event")
+		return errors.New("hello may only be the first ingest event")
 	}
 	payload, err := json.Marshal(event)
 	if err != nil {
-		return Envelope{}, fmt.Errorf("marshal %s payload: %w", event.EventType(), err)
+		return fmt.Errorf("marshal %s payload: %w", event.EventType(), err)
 	}
 	emittedAt := e.now()
 	elapsed := emittedAt.Sub(e.started)
@@ -110,34 +99,35 @@ func (e *Encoder) Emit(scope *Scope, event Event) (Envelope, error) {
 	jsonEncoder := json.NewEncoder(&line)
 	jsonEncoder.SetEscapeHTML(false)
 	if err := jsonEncoder.Encode(envelope); err != nil {
-		return Envelope{}, fmt.Errorf("marshal %s envelope: %w", envelope.Type, err)
+		return fmt.Errorf("marshal %s envelope: %w", envelope.Type, err)
 	}
 	limit := e.maxEventBytes
-	if hello, ok := helloPayload(event); ok {
+	hello, isHello := event.(Hello)
+	if isHello {
 		limit = hello.MaxEventBytes
 	}
 	if limit > 0 && uint64(line.Len()) > limit {
-		return Envelope{}, fmt.Errorf("%w: sequence %d is %d bytes, limit is %d", ErrEventTooLarge, envelope.Seq, line.Len(), limit)
+		return fmt.Errorf("%w: sequence %d is %d bytes, limit is %d", ErrEventTooLarge, envelope.Seq, line.Len(), limit)
 	}
 	if err := writeAll(e.sink, line.Bytes()); err != nil {
 		e.failed = fmt.Errorf("write event sequence %d: %w", envelope.Seq, err)
-		return Envelope{}, e.failed
+		return e.failed
 	}
 	if e.flusher != nil {
 		if err := e.flusher.Flush(); err != nil {
 			e.failed = fmt.Errorf("flush event sequence %d: %w", envelope.Seq, err)
-			return Envelope{}, e.failed
+			return e.failed
 		}
 	}
 	e.nextSequence++
 	e.lastElapsedMS = elapsedMS
-	if hello, ok := helloPayload(event); ok {
+	if isHello {
 		e.maxEventBytes = hello.MaxEventBytes
 	}
 	if event.EventType() == TypeRunFinished {
 		e.finished = true
 	}
-	return envelope, nil
+	return nil
 }
 
 // Finalize checks that the producer emitted the terminal record. It never
@@ -159,18 +149,6 @@ func (e *Encoder) Finalize() error {
 		e.finalErr = errors.New("ingest event stream ended before run.finished")
 	}
 	return e.finalErr
-}
-
-func helloPayload(event Event) (Hello, bool) {
-	switch value := event.(type) {
-	case Hello:
-		return value, true
-	case *Hello:
-		if value != nil {
-			return *value, true
-		}
-	}
-	return Hello{}, false
 }
 
 func writeAll(writer io.Writer, data []byte) error {

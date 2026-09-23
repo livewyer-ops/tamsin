@@ -4,10 +4,6 @@ package ingest
 // Keeping this projection in one place prevents human and event
 // pipeline result paths from assigning different meanings to a disposition.
 func AccumulateObjectSummary(summary *ObjectSummary, object ObjectResult) {
-	if summary == nil {
-		return
-	}
-	finalizeObjectResult(&object)
 	summary.Total++
 	summary.Bytes += object.Bytes
 	switch object.Disposition {
@@ -21,7 +17,7 @@ func AccumulateObjectSummary(summary *ObjectSummary, object ObjectResult) {
 		summary.Retracted++
 	case ObjectDispositionStranded, ObjectDispositionRegistrationIndeterminate:
 		summary.Stranded++
-	case ObjectDispositionUnattempted, ObjectDispositionPlanned, ObjectDispositionUploaded, ObjectDispositionRegistered:
+	case ObjectDispositionUnattempted, ObjectDispositionPlanned, ObjectDispositionRegistered:
 		summary.Unattempted++
 	}
 	if object.Verification == ObjectVerificationVerified {

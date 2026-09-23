@@ -92,14 +92,14 @@ they still identify inputs and TAMS entities.
 | --- | --- |
 | `flow.planned.kind`, `flow.result.kind` | `essence`, `collection`, `muxed` |
 | `progress.snapshot.phase` | `store`, `verify` |
-| `diagnostic.severity` | `debug`, `info`, `warning`, `error` |
-| `object.result.disposition` | `planned`, `uploaded`, `registration_indeterminate`, `registered`, `rejected`, `ingested`, `resumed`, `retracted`, `stranded`, `unattempted` |
+| `diagnostic.severity` | `error` |
+| `object.result.disposition` | `planned`, `registration_indeterminate`, `registered`, `rejected`, `ingested`, `resumed`, `retracted`, `stranded`, `unattempted` |
 | `object.result.verification_status` | `verified`, `not_requested`, `not_reached`, `failed` |
 | `object.result.verification_method` | `none`, `storage`, `readback` |
 | `flow.result.disposition` | `planned`, `unchanged`, `written`, `indeterminate`, `unattempted` |
 | `input.finished.status` | `planned`, `ingested`, `resumed`, `failed` |
 | `input.finished.verification` | `verified`, `not_requested`, `not_reached`, `failed_retracted`, `failed_stranded` |
-| `run.cancellation_requested.reason` | `signal`, `parent`, `deadline`, `output_closed`, `internal` |
+| `run.cancellation_requested.reason` | `signal`, `parent`, `deadline` |
 | `run.finished.outcome` | `succeeded`, `failed`, `partial`, `interrupted` |
 
 ## Failure codes
@@ -121,7 +121,6 @@ operator must inspect.
 | `source.changed` | The input changed while it was being ingested. |
 | `source.stream_unavailable` | The input cannot be streamed as requested; use --input-mode=auto or stage. |
 | `staging.capacity` | The input could not reserve enough staging capacity. |
-| `media.failed` | Media analysis or transformation did not complete successfully. |
 | `media.analysis_failed` | Media analysis did not complete successfully.<br>The input container could not be identified.<br>The input could not be described as a valid Flow.<br>The media interpretation identity could not be derived. |
 | `media.unsupported` | The input codecs are not supported by the MPEG-TS segment policy. |
 | `media.options_invalid` | The FFmpeg options conflict with the selected media treatment. |
@@ -147,27 +146,14 @@ operator must inspect.
 
 ## Exit codes
 
-| Code | Meaning |
-| ---: | --- |
-| `0` | Every input succeeded, resumed, or completed its dry run |
-| `1` | Internal or output failure |
-| `2` | Invalid arguments, configuration, environment variable or value |
-| `3` | Authentication failed or credentials are unsafe for the transport |
-| `4` | A batch completed with at least one failed input |
-| `5` | Input discovery or reading failed |
-| `6` | `doctor` only: FFprobe or FFmpeg is missing, fails its version check or is unsupported |
-| `7` | TAMS preflight, mutation, transfer or verification failed |
-| `8` | The run was interrupted or its parent context ended |
-| `130` | A second SIGINT or SIGTERM forced exit before cleanup finished |
-
+The process exit codes are listed in the [CLI reference](cli.md#exit-codes).
 Ingest reports media failures as `4` or `7`. For `--format json`, a complete
 run repeats the code in `run.finished.payload.exit_code`; input and diagnostic
 events carry the failure codes above.
 
 The process code classifies the run; inspect terminal events for the affected
 input, Flow and Object UUIDs. In particular, exit `4` can include both
-successful and failed inputs. EOF without `run.finished` is incomplete and may
-not have a trustworthy exit record.
+successful and failed inputs.
 
 SIGINT and SIGTERM request graceful cancellation. TAMSin stops scheduling new
 work, completes one terminal event for each declared input where possible, and

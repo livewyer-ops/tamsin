@@ -7,7 +7,6 @@
 package presentation
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -38,9 +37,6 @@ type HumanOptions struct {
 // full. Structured output is a separate protocol and must not be derived by
 // parsing this presentation.
 func WriteHuman(writer io.Writer, batch ingest.BatchResult, metrics observability.Snapshot, options HumanOptions) error {
-	if writer == nil {
-		return errors.New("human output writer is nil")
-	}
 	output := &humanWriter{writer: writer, color: options.Color}
 
 	type visibleResult struct {
@@ -119,7 +115,7 @@ func inspectResult(result ingest.Result) resultState {
 		case ingest.FlowUnattempted:
 			state.unattemptedFlows = append(state.unattemptedFlows, flow)
 		}
-		state.totalObjects += flowObjectCount(flow)
+		state.totalObjects += flow.ObjectSummary.Total
 		for _, object := range flow.Objects {
 			entry := objectState{flow: flow, object: object}
 			switch object.Disposition {
@@ -161,7 +157,7 @@ func writeResult(output *humanWriter, result ingest.Result, state resultState, l
 
 	if len(result.Flows) > 0 {
 		for _, flow := range orderedFlows(result) {
-			writeFlow(output, result.RootFlowID, flow, verbose)
+			writeFlow(output, flow, verbose)
 		}
 	} else {
 		output.line(2, "no Flow was committed")
@@ -266,8 +262,8 @@ func orderedFlows(result ingest.Result) []ingest.FlowResult {
 	return ordered
 }
 
-func writeFlow(output *humanWriter, rootFlowID string, flow ingest.FlowResult, verbose bool) {
-	objects := flowObjectCount(flow)
+func writeFlow(output *humanWriter, flow ingest.FlowResult, verbose bool) {
+	objects := flow.ObjectSummary.Total
 	label := strings.TrimSpace(flow.Role)
 	switch flow.Kind {
 	case ingest.FlowKindCollection:
@@ -275,13 +271,7 @@ func writeFlow(output *humanWriter, rootFlowID string, flow ingest.FlowResult, v
 	case ingest.FlowKindMuxed:
 		label = "multiplex"
 	}
-	if flow.FlowID == rootFlowID && flow.Kind == "" {
-		if objects == 0 {
-			label = "collection"
-		} else if label == "" {
-			label = "flow"
-		}
-	} else if label == "" {
+	if label == "" {
 		label = "flow"
 	}
 	if label == "multi" && objects == 0 {
@@ -319,13 +309,6 @@ func writeFlow(output *humanWriter, rootFlowID string, flow ingest.FlowResult, v
 			output.keyValue(4, objectLabel(object)+" object", object.ObjectID)
 		}
 	}
-}
-
-func flowObjectCount(flow ingest.FlowResult) int {
-	if flow.ObjectSummary.Total > 0 || len(flow.Objects) == 0 {
-		return flow.ObjectSummary.Total
-	}
-	return len(flow.Objects)
 }
 
 func objectLabel(object ingest.ObjectResult) string {
@@ -400,7 +383,7 @@ func objectOutcomeSummary(result ingest.Result, state resultState) string {
 }
 
 func writeBatchFooter(output *humanWriter, batch ingest.BatchResult, metrics observability.Snapshot, hasWarning, verbose bool) {
-	succeeded, failed := batchCounts(batch)
+	succeeded, failed := batch.Succeeded, batch.Failed
 	total := succeeded + failed
 	heading := "COMPLETE"
 	level := severitySuccess
@@ -468,21 +451,6 @@ func writeBatchFooter(output *humanWriter, batch ingest.BatchResult, metrics obs
 			output.keyValue(2, "profile contract", batch.ProfileVersion)
 		}
 	}
-}
-
-func batchCounts(batch ingest.BatchResult) (int, int) {
-	if batch.Succeeded >= 0 && batch.Failed >= 0 && batch.Succeeded+batch.Failed == len(batch.Results) {
-		return batch.Succeeded, batch.Failed
-	}
-	var succeeded, failed int
-	for _, result := range batch.Results {
-		if result.Status == ingest.ResultStatusFailed {
-			failed++
-		} else {
-			succeeded++
-		}
-	}
-	return succeeded, failed
 }
 
 func inputLabel(input string) string {
@@ -575,29 +543,29 @@ func (w *humanWriter) blank() {
 }
 
 func (w *humanWriter) line(indent int, text string) {
-	if w.err != nil {
-		return
-	}
+	w.indented(indent, strings.TrimSpace(sanitizeHumanText(text)))
+}
+
+// indented writes text that is already sanitised and trimmed.
+func (w *humanWriter) indented(indent int, text string) {
 	indent = min(max(indent, 0), 32)
-	w.writePhysical(strings.Repeat(" ", indent) + strings.TrimSpace(sanitizeHumanText(text)))
+	w.writePhysical(strings.Repeat(" ", indent) + text)
 }
 
 func (w *humanWriter) keyValue(indent int, key, value string) {
 	key = strings.TrimSpace(sanitizeHumanText(key))
 	value = strings.TrimSpace(sanitizeHumanText(value))
-	if key == "" {
-		w.line(indent, value)
-		return
+	switch {
+	case key == "":
+		w.indented(indent, value)
+	case value == "":
+		w.indented(indent, key)
+	default:
+		w.indented(indent, key+" "+value)
 	}
-	if value == "" {
-		w.line(indent, key)
-		return
-	}
-	w.line(indent, key+" "+value)
 }
 
 func (w *humanWriter) flow(label, id, objects string) {
-	label, id, objects = sanitizeHumanText(label), sanitizeHumanText(id), sanitizeHumanText(objects)
 	parts := []string{label}
 	if id != "" {
 		parts = append(parts, id)
@@ -609,7 +577,6 @@ func (w *humanWriter) flow(label, id, objects string) {
 }
 
 func (w *humanWriter) resultHeading(heading, input, duration string, level severity) {
-	heading, input, duration = sanitizeHumanText(heading), sanitizeHumanText(input), sanitizeHumanText(duration)
 	suffix := ""
 	if input != "" {
 		suffix += "  " + input
@@ -621,7 +588,6 @@ func (w *humanWriter) resultHeading(heading, input, duration string, level sever
 }
 
 func (w *humanWriter) footerHeading(heading, summary string, level severity) {
-	heading, summary = sanitizeHumanText(heading), sanitizeHumanText(summary)
 	suffix := ""
 	if summary != "" {
 		suffix = "  " + summary

@@ -109,11 +109,6 @@ func (c *countingClient) AllocateStorage(ctx context.Context, flowID string, req
 	return c.inner.AllocateStorage(ctx, flowID, request)
 }
 
-func (c *countingClient) RegisterSegment(ctx context.Context, flowID string, request tams.SegmentRequest) error {
-	defer c.record("RegisterSegment")()
-	return c.inner.RegisterSegment(ctx, flowID, request)
-}
-
 func (c *countingClient) RegisterSegments(ctx context.Context, flowID string, requests []tams.SegmentRequest) error {
 	defer c.record("RegisterSegments")()
 	return c.inner.RegisterSegments(ctx, flowID, requests)
@@ -287,7 +282,6 @@ func TestRoundTripsPerObject(t *testing.T) {
 		"Segments":         client.count("Segments"),
 		"AllocateStorage":  client.count("AllocateStorage"),
 		"UploadFile":       client.count("UploadFile"),
-		"RegisterSegment":  client.count("RegisterSegment"),
 		"RegisterSegments": client.count("RegisterSegments"),
 		"Object":           client.count("Object"),
 		"DownloadDigest":   client.count("DownloadDigest"),
@@ -450,6 +444,14 @@ func (p *countingProber) Probe(_ context.Context, _ string) (media.Probe, error)
 
 func (p *countingProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 test", nil
+}
+
+func (p *countingProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (*countingProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
 }
 
 // TestMediaProcessBudgetIsGlobalAcrossInputs covers a bound that multiplied

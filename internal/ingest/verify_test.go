@@ -119,8 +119,7 @@ func TestCancellationRetractsRegisteredSegments(t *testing.T) {
 	client.onDownload = func() { cancel() }
 
 	pipeline, err := New(Config{
-		RetainObjectResults: true,
-		Concurrency:         1, Transfers: 1, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
+		Concurrency: 1, Transfers: 1, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: 8}, discardLogger(), nil)
 	if err != nil {
@@ -136,38 +135,35 @@ func TestCancellationRetractsRegisteredSegments(t *testing.T) {
 func TestVerificationCleanupUsesOneSharedDeadline(t *testing.T) {
 	client := newFakeClient()
 	client.blockDeleteUntilDone = true
-	pipeline, objects, _ := registrationFixture(t, client, 8, 1, true)
-	pipeline.verificationRecoveryTimeout = 50 * time.Millisecond
-	tasks := make([]verificationTask, len(objects))
-	for index, object := range objects {
-		tasks[index] = verificationTask{object: object}
-	}
+	pipeline, objects, results := registrationFixture(t, client, 8, 1, true)
+	pipeline.recoveryTimeout = 50 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	outcomes, err := pipeline.verifyAllWithOutcomes(ctx, "flow", tasks)
+	err := pipeline.verifyAll(ctx, "flow", objects, results, false)
 	if err == nil {
 		t.Fatal("deadline-bound cleanup unexpectedly succeeded")
 	}
 	var verificationErr *VerificationError
-	if !errors.As(err, &verificationErr) || verificationErr.Stranded != len(tasks) {
-		t.Fatalf("verification error = %#v, want %d stranded Objects", err, len(tasks))
+	if !errors.As(err, &verificationErr) || verificationErr.Stranded != len(objects) {
+		t.Fatalf("verification error = %#v, want %d stranded Objects", err, len(objects))
 	}
 	client.lock.Lock()
 	deletions := len(client.deletedTimeranges)
 	deadlines := append([]time.Time(nil), client.deleteDeadlines...)
 	client.lock.Unlock()
-	if deletions != len(tasks) {
-		t.Fatalf("attempted %d of %d cleanups under the shared deadline", deletions, len(tasks))
+	if deletions != len(objects) {
+		t.Fatalf("attempted %d of %d cleanups under the shared deadline", deletions, len(objects))
 	}
 	for index, deadline := range deadlines {
 		if deadline.IsZero() || !deadline.Equal(deadlines[0]) {
 			t.Fatalf("cleanup %d deadline = %s, want one shared deadline %s", index, deadline, deadlines[0])
 		}
 	}
-	for index, outcome := range outcomes {
-		if outcome != outcomeRetractionFailed {
-			t.Fatalf("outcome %d = %d, want retraction failure", index, outcome)
+	for _, result := range results {
+		if result.Disposition != ObjectDispositionStranded || result.Verification != ObjectVerificationFailed {
+			t.Fatalf("object %s = %s/%s, want stranded after a failed verification", result.ObjectID,
+				result.Disposition, result.Verification)
 		}
 	}
 }
@@ -187,8 +183,7 @@ func TestResumeVerificationUsesTransferBudget(t *testing.T) {
 	// next begins and a peak of one would be legitimate.
 	client := newCountingClient(2 * time.Millisecond)
 	config := Config{
-		RetainObjectResults: true,
-		Concurrency:         1, Transfers: 4, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
+		Concurrency: 1, Transfers: 4, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}
 	pipeline, err := New(config, client, fakeProber{}, countingSegmenter{objects: 16}, discardLogger(), nil)
@@ -210,8 +205,8 @@ func TestResumeVerificationUsesTransferBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if batch.Results[0].rootFlow().Objects[0].Disposition != ObjectDispositionResumed {
-		t.Fatalf("expected a resume, got %q", batch.Results[0].rootFlow().Objects[0].Disposition)
+	if summary := batch.Results[0].rootFlow().ObjectSummary; summary.Total == 0 || summary.Resumed != summary.Total {
+		t.Fatalf("expected a resume, got %#v", summary)
 	}
 	assertBatchResultSchema(t, batch)
 

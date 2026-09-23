@@ -311,6 +311,9 @@ func TestContainerProfilePolicy(t *testing.T) {
 		{name: "mp4 without presentation", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "mp42"}}, streamType: "data", want: "application/mp4", supported: true},
 		{name: "unknown iso brand is not mp4", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "avif"}}, streamType: "video", detected: "image/avif", want: "application/octet-stream"},
 		{name: "unknown ffprobe format ignores plausible sniff", format: Format{Name: "mystery"}, streamType: "video", detected: "video/mp4", want: "application/octet-stream"},
+		{name: "mpeg elementary video", format: Format{Name: "mpegvideo"}, streamType: "video", want: "video/mpeg", supported: true},
+		{name: "ogg audio", format: Format{Name: "ogg"}, streamType: "audio", want: "audio/ogg", supported: true},
+		{name: "ogg without essence", format: Format{Name: "ogg"}, streamType: "data", want: "application/octet-stream"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
@@ -400,6 +403,10 @@ func TestSourceSegmentationProfileComesFromProbe(t *testing.T) {
 		{name: "mp4 compatible brand", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "new1", "compatible_brands": "new1isom"}}, want: SegmentContainer{Muxer: "mp4", Extension: ".mp4"}},
 		{name: "unknown", format: Format{Name: "proprietary"}},
 		{name: "mj2 is storable but not safely remuxed", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "mjp2"}}},
+		{name: "aac remuxes as adts", format: Format{Name: "aac"}, want: SegmentContainer{Muxer: "adts", Extension: ".aac"}},
+		{name: "mpeg elementary video is storable but not remuxed", format: Format{Name: "mpegvideo"}},
+		{name: "image sequence follows content", format: Format{Name: "image2"}, detected: "image/png", want: SegmentContainer{Muxer: "image2", Extension: ".png"}},
+		{name: "image sequence without a remux suffix", format: Format{Name: "image2"}, detected: "image/jp2"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()

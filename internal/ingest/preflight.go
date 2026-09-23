@@ -9,106 +9,62 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/tams"
 )
 
-// startupState carries what the startup phases below read from and write to.
-// The phases run in a fixed order and each depends on what the previous one
-// left behind, so the order in runStartupPreflight is load-bearing.
-type startupState struct {
-	service     map[string]any
-	serviceErr  error
-	backends    []tams.StorageBackend
-	backendsErr error
-	storageID   string
-}
-
 // runStartupPreflight resolves everything that must hold before any Flow or
 // Object is mutated, so an unusable service or a mistyped backend is a startup
 // error rather than a partially applied ingest.
 func (p *Pipeline) runStartupPreflight(ctx context.Context) (string, error) {
-	state := &startupState{storageID: p.config.StorageID}
-	if err := issueStartupRequests(ctx, p, state); err != nil {
-		return "", err
-	}
-	// Check both request outcomes before interpreting either response. A
-	// transport failure is the primary fact; validating a concurrently returned
-	// document first can hide it behind a secondary compatibility error.
-	if err := checkServiceRequest(state); err != nil {
-		return "", err
-	}
-	if err := checkStorageBackends(state); err != nil {
-		return "", err
-	}
-	if err := checkServiceCompatibility(p, state); err != nil {
-		return "", err
-	}
-	if err := checkServiceLifetimes(p, state); err != nil {
-		return "", err
-	}
-	if err := selectStorage(state); err != nil {
-		return "", err
-	}
-	return state.storageID, nil
-}
-
-func issueStartupRequests(ctx context.Context, p *Pipeline, state *startupState) error {
-	var startup sync.WaitGroup
+	var (
+		startup     sync.WaitGroup
+		service     map[string]any
+		serviceErr  error
+		backends    []tams.StorageBackend
+		backendsErr error
+	)
 	startup.Add(2)
 	go func() {
 		defer startup.Done()
-		state.service, state.serviceErr = p.client.Service(ctx)
+		service, serviceErr = p.client.Service(ctx)
 	}()
 	go func() {
 		defer startup.Done()
-		state.backends, state.backendsErr = p.client.StorageBackends(ctx)
+		backends, backendsErr = p.client.StorageBackends(ctx)
 	}()
 	startup.Wait()
 	// A parent cancellation is a run interruption. Per-request client
 	// deadlines below remain typed TAMS preflight failures while the parent
 	// context is live; do not conflate those two timeout domains.
-	return ctx.Err()
-}
-
-func checkServiceRequest(state *startupState) error {
-	if state.serviceErr != nil {
-		return withFailure(FailureCodePreflightFailed, FailureMessagePreflightFailed, true,
-			fmt.Errorf("read TAMS service information: %w", state.serviceErr))
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
-	return nil
-}
-
-func checkServiceCompatibility(p *Pipeline, state *startupState) error {
-	if err := p.checkAPIVersion(state.service); err != nil {
-		return withFailure(FailureCodePreflightFailed, FailureMessagePreflightIncompatible, true, err)
+	// Check both request outcomes before interpreting either response. A
+	// transport failure is the primary fact; validating a concurrently returned
+	// document first can hide it behind a secondary compatibility error.
+	if serviceErr != nil {
+		return "", withFailure(FailureCodePreflightFailed, FailureMessagePreflightFailed, true,
+			fmt.Errorf("read TAMS service information: %w", serviceErr))
 	}
-	return nil
-}
-
-func checkServiceLifetimes(p *Pipeline, state *startupState) error {
-	limits, err := tams.ParseServiceLimits(state.service)
+	if backendsErr != nil {
+		return "", withFailure(FailureCodePreflightFailed, FailureMessagePreflightFailed, true,
+			fmt.Errorf("read TAMS storage backends: %w", backendsErr))
+	}
+	// Compatibility is checked before lifetimes so an unreadable or wrong-major
+	// service is reported as such, rather than as a missing lifetime field.
+	if err := p.checkAPIVersion(service); err != nil {
+		return "", withFailure(FailureCodePreflightFailed, FailureMessagePreflightIncompatible, true, err)
+	}
+	limits, err := tams.ParseServiceLimits(service)
 	if err != nil {
-		return withFailure(FailureCodePreflightFailed, FailureMessageTransferLifetimeInvalid, true,
+		return "", withFailure(FailureCodePreflightFailed, FailureMessageTransferLifetimeInvalid, true,
 			fmt.Errorf("validate TAMS service lifetimes: %w", err))
 	}
 	p.limits = limits
 	p.logger.Debug("store lifetimes",
 		"object_registration", p.limits.ObjectRegistration, "presigned_url", p.limits.PresignedURL)
-	return nil
-}
-
-func checkStorageBackends(state *startupState) error {
-	if state.backendsErr != nil {
-		return withFailure(FailureCodePreflightFailed, FailureMessagePreflightFailed, true,
-			fmt.Errorf("read TAMS storage backends: %w", state.backendsErr))
-	}
-	return nil
-}
-
-func selectStorage(state *startupState) error {
-	selection, err := ResolveStorageBackend(state.backends, state.storageID)
+	selection, err := ResolveStorageBackend(backends, p.config.StorageID)
 	if err != nil {
-		return withFailure(FailureCodeStorageUnavailable, FailureMessageStorageUnavailable, true, err)
+		return "", withFailure(FailureCodeStorageUnavailable, FailureMessageStorageUnavailable, true, err)
 	}
-	state.storageID = selection.Backend.ID
-	return nil
+	return selection.Backend.ID, nil
 }
 
 // APICompatibility is the result of comparing a service document with the

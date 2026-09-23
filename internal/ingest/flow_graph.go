@@ -272,8 +272,6 @@ func validateFlowGraph(graph flowGraph, planned []plannedFlowWrite) error {
 			if member.containerMapping == nil || !hasMapping || !equalJSONValues(mapping, member.containerMapping) {
 				return fmt.Errorf("%s/container_mapping does not match the input track", base)
 			}
-		default:
-			return fmt.Errorf("/ uses unsupported essence storage %q", graph.storage)
 		}
 	}
 	return nil

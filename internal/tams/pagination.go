@@ -90,20 +90,20 @@ func listPages[T any](ctx context.Context, c *Client, requestPath, description s
 		seen[pageKey] = struct{}{}
 
 		var page []T
-		headers, pageBytes, err := c.doJSONHeaders(ctx, http.MethodGet, requestPath, nil, &page, http.StatusOK)
+		response, err := c.doJSONResponse(ctx, http.MethodGet, requestPath, nil, &page, http.StatusOK)
 		if err != nil {
 			return nil, err
 		}
-		if pageBytes > c.segmentByteLimit-responseBytes {
+		if response.BodyBytes > c.segmentByteLimit-responseBytes {
 			return nil, fmt.Errorf("listing %s exceeded %d response bytes", description, c.segmentByteLimit)
 		}
-		responseBytes += pageBytes
+		responseBytes += response.BodyBytes
 		if len(page) > c.segmentCountLimit-len(items) {
 			return nil, fmt.Errorf("listing %s exceeded %d entries", description, c.segmentCountLimit)
 		}
 		items = append(items, page...)
 
-		next, hasNext, err := c.pageReference(requestURL, headers.Values("Link"))
+		next, hasNext, err := c.pageReference(requestURL, response.Header.Values("Link"))
 		if err != nil {
 			return nil, err
 		}

@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/livewyer-ops/tamsin/internal/cli"
+	"github.com/livewyer-ops/tamsin/internal/ingest"
 	"github.com/livewyer-ops/tamsin/internal/ingestevent"
 	"github.com/rogpeppe/go-internal/testscript"
 )
@@ -191,7 +192,7 @@ func checkEvents(ts *testscript.TestScript, neg bool, args []string) {
 		if len(statuses) > 0 && string(input.finished.Status) != statuses[index] {
 			ts.Fatalf("input %d status is %q, want %q", index, input.finished.Status, statuses[index])
 		}
-		if input.finished.Status != ingestevent.InputFailed {
+		if input.finished.Status != ingest.ResultStatusFailed {
 			if !input.started {
 				ts.Fatalf("successful input %d has no input.started lifecycle event", index)
 			}

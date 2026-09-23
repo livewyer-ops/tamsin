@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -124,31 +123,6 @@ func (c Config) Validate(mode Mode) error {
 	return c.validateCredentialEndpoints(mode)
 }
 
-// RedactionValues returns configured secret representations that a peer might
-// echo in an error response. This includes the wire forms that differ from the
-// configured value, notably HTTP Basic's base64 payload and URL encoding.
-// OAuth access tokens are acquired dynamically, so callers must still suppress
-// untrusted TAMS response bodies while using an OAuth mode.
-func (c Config) RedactionValues() []string {
-	values := []string{
-		c.Password,
-		c.BearerToken,
-		c.URLToken,
-		c.ClientSecret,
-		c.OAuthCode,
-		c.PKCEVerifier,
-	}
-	if c.Username != "" && c.Password != "" {
-		values = append(values, base64.StdEncoding.EncodeToString([]byte(c.Username+":"+c.Password)))
-	}
-	for _, value := range append([]string(nil), values...) {
-		if escaped := url.QueryEscape(value); value != "" && escaped != value {
-			values = append(values, escaped)
-		}
-	}
-	return values
-}
-
 // NewRoundTripper constructs the transport for one TAMS session.
 func NewRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper) (http.RoundTripper, Mode, error) {
 	if base == nil {
@@ -170,20 +144,19 @@ func NewRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper) (h
 	case ModeNone:
 		return base, mode, nil
 	case ModeBasic:
-		return basicTransport{
-			base: base, username: cfg.Username, password: cfg.Password,
-			policy: policy,
-		}, mode, nil
+		return credentialTransport{base: base, policy: policy, apply: func(request *http.Request) {
+			request.SetBasicAuth(cfg.Username, cfg.Password)
+		}}, mode, nil
 	case ModeBearer:
-		return bearerTransport{
-			base: base, token: cfg.BearerToken,
-			policy: policy,
-		}, mode, nil
+		return credentialTransport{base: base, policy: policy, apply: func(request *http.Request) {
+			request.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
+		}}, mode, nil
 	case ModeURLToken:
-		return urlTokenTransport{
-			base: base, token: cfg.URLToken,
-			policy: policy,
-		}, mode, nil
+		return credentialTransport{base: base, policy: policy, apply: func(request *http.Request) {
+			query := request.URL.Query()
+			query.Set("access_token", cfg.URLToken)
+			request.URL.RawQuery = query.Encode()
+		}}, mode, nil
 	case ModeOAuthClient:
 		tokenContext := oauthHTTPContext(ctx, cfg.Timeout, base)
 		source := (&clientcredentials.Config{
@@ -216,70 +189,27 @@ func NewRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper) (h
 	}
 }
 
-type basicTransport struct {
-	base               http.RoundTripper
-	username, password string
-	policy             credentialPolicy
-}
-
-func (t basicTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	if err := t.policy.validateRequest(request); err != nil {
-		return nil, err
-	}
-	clone := request.Clone(request.Context())
-	clone.Header = request.Header.Clone()
-	clone.SetBasicAuth(t.username, t.password)
-	return t.base.RoundTrip(clone)
-}
-
-type bearerTransport struct {
-	base   http.RoundTripper
-	token  string
-	policy credentialPolicy
-}
-
-func (t bearerTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	if err := t.policy.validateRequest(request); err != nil {
-		return nil, err
-	}
-	clone := request.Clone(request.Context())
-	clone.Header = request.Header.Clone()
-	clone.Header.Set("Authorization", "Bearer "+t.token)
-	return t.base.RoundTrip(clone)
-}
-
-type urlTokenTransport struct {
-	base   http.RoundTripper
-	token  string
-	policy credentialPolicy
-}
-
-func (t urlTokenTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	if err := t.policy.validateRequest(request); err != nil {
-		return nil, err
-	}
-	clone := request.Clone(request.Context())
-	clone.URL = cloneURL(request.URL)
-	query := clone.URL.Query()
-	query.Set("access_token", t.token)
-	clone.URL.RawQuery = query.Encode()
-	return t.base.RoundTrip(clone)
-}
-
-// credentialTransport guards transports such as oauth2.Transport that inject
-// their own Authorization header. The check is outside that transport so a
-// rejected request cannot trigger token refresh before its destination has
-// been found safe.
+// credentialTransport checks every request against the credential policy
+// before apply adds credentials to a copy of it. A nil apply suits transports
+// such as oauth2.Transport that inject their own Authorization header. The
+// check is outside that transport so a rejected request cannot trigger token
+// refresh before its destination has been found safe.
 type credentialTransport struct {
 	base   http.RoundTripper
 	policy credentialPolicy
+	apply  func(*http.Request)
 }
 
 func (t credentialTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if err := t.policy.validateRequest(request); err != nil {
 		return nil, err
 	}
-	return t.base.RoundTrip(request)
+	if t.apply == nil {
+		return t.base.RoundTrip(request)
+	}
+	clone := request.Clone(request.Context())
+	t.apply(clone)
+	return t.base.RoundTrip(clone)
 }
 
 func (c Config) validateCredentialEndpoints(mode Mode) error {
@@ -319,7 +249,7 @@ func newCredentialPolicy(config Config, mode Mode) (credentialPolicy, error) {
 		return credentialPolicy{}, errors.New("TAMS endpoint is not a valid absolute URL")
 	}
 	return credentialPolicy{
-		origin: credentialOrigin(parsed), allowInsecureLoopback: config.AllowInsecureLoopback,
+		origin: Origin(parsed), allowInsecureLoopback: config.AllowInsecureLoopback,
 	}, nil
 }
 
@@ -330,7 +260,7 @@ func (p credentialPolicy) validateRequest(request *http.Request) error {
 	if err := validateParsedCredentialURL("authenticated request", request.URL, p.allowInsecureLoopback); err != nil {
 		return err
 	}
-	if credentialOrigin(request.URL) != p.origin {
+	if Origin(request.URL) != p.origin {
 		return errors.New("authenticated request must remain on the configured TAMS origin")
 	}
 	return nil
@@ -375,7 +305,9 @@ func validateOAuthRedirectURL(rawURL string) error {
 	return errors.New("OAuth redirect URL must use HTTPS or HTTP on localhost or a literal loopback IP")
 }
 
-func credentialOrigin(value *url.URL) string {
+// Origin is the scheme, host, and non-default port that credentials are
+// scoped to.
+func Origin(value *url.URL) string {
 	scheme := strings.ToLower(value.Scheme)
 	host := strings.ToLower(value.Hostname())
 	port := value.Port()
@@ -396,11 +328,6 @@ func isLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
-}
-
-func cloneURL(input *url.URL) *url.URL {
-	clone := *input
-	return &clone
 }
 
 // ExtractURLToken removes a TAMS access_token query parameter so it cannot be
@@ -444,11 +371,8 @@ func oauthAuthorizationConfig(cfg Config) *oauth2.Config {
 	}
 }
 func oauthHTTPContext(ctx context.Context, timeout time.Duration, base http.RoundTripper) context.Context {
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
 	return context.WithValue(ctx, oauth2.HTTPClient, &http.Client{
-		Transport: base, Timeout: timeout, CheckRedirect: rejectRedirect,
+		Transport: base, Timeout: timeout, CheckRedirect: RejectRedirect,
 	})
 }
 
@@ -458,18 +382,23 @@ func oauthTokenError(action string, err error) error {
 		// The HTTP reason phrase is peer-controlled and may echo a submitted
 		// client secret or authorization code. Report only the numeric status and
 		// Go's canonical text rather than the raw response.Status string.
-		return fmt.Errorf("%s: token endpoint returned %s", action, safeHTTPStatus(retrieveError.Response.StatusCode))
+		return fmt.Errorf("%s: token endpoint returned %s", action, SafeHTTPStatus(retrieveError.Response.StatusCode))
 	}
 	return fmt.Errorf("%s: token endpoint request failed", action)
 }
 
-func safeHTTPStatus(code int) string {
+// SafeHTTPStatus reports a status from its code alone. A peer's reason phrase
+// may echo submitted credentials, so it is never used.
+func SafeHTTPStatus(code int) string {
 	if text := http.StatusText(code); text != "" {
 		return fmt.Sprintf("%d %s", code, text)
 	}
 	return fmt.Sprintf("%d", code)
 }
-func rejectRedirect(*http.Request, []*http.Request) error {
+
+// RejectRedirect makes an http.Client return a redirect response rather than
+// follow it to a destination that was never validated.
+func RejectRedirect(*http.Request, []*http.Request) error {
 	return http.ErrUseLastResponse
 }
 

@@ -38,6 +38,17 @@ func (s stagedFile) identityKey() string {
 	return s.sha256
 }
 
+// matches compares a fresh measurement of a local input with the one taken
+// when it was staged.
+func (s stagedFile) matches(size int64, checksum string) error {
+	if size == s.size && checksum == s.sha256 {
+		return nil
+	}
+	return fmt.Errorf(
+		"local input changed after staging: expected %d bytes with SHA-256 %s, got %d bytes with SHA-256 %s",
+		s.size, s.sha256, size, checksum)
+}
+
 func stage(ctx context.Context, item source.Item, tempRoot string, retries int, lease *stagingLease,
 	run *observability.Run) (stagedFile, error) {
 	if item.Open == nil {

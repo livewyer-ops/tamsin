@@ -97,8 +97,11 @@ func TestConfigurationPrecedence(t *testing.T) {
 
 func TestInputModeConfigurationPrecedence(t *testing.T) {
 	app := &application{v: newSettings()}
-	command := app.ingestCommand()
-	get := func() string { return app.configString(command, "input-mode", "ingest.input_mode") }
+	command, _, err := app.rootCommand().Find([]string{"ingest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func() string { return app.v.forCommand(command).GetString("ingest.input_mode") }
 	if get() != "auto" {
 		t.Fatal("input mode did not default to auto")
 	}
@@ -118,6 +121,16 @@ func TestInputModeConfigurationPrecedence(t *testing.T) {
 	}
 	if err := ingest.InputMode("pipe").Validate(); err == nil {
 		t.Fatal("unknown input mode was accepted")
+	}
+}
+
+func TestEveryConfigurationKeyHasARootFlag(t *testing.T) {
+	t.Parallel()
+	root := (&application{v: newSettings()}).rootCommand()
+	for _, definition := range configDefinitions() {
+		if root.PersistentFlags().Lookup(definition.flag) == nil && root.Flags().Lookup(definition.flag) == nil {
+			t.Errorf("configuration key %q names unknown flag %q", definition.key, definition.flag)
+		}
 	}
 }
 
@@ -197,7 +210,7 @@ func TestProfileConfigurationKeepsFFmpegPassThrough(t *testing.T) {
 		"ingest.essence_storage":  "independent",
 		"ingest.segment_duration": 10 * time.Second,
 	}
-	profile, err := app.resolvedConfigProfile(nil)
+	profile, err := app.v.treatment()
 	if err != nil {
 		t.Fatal(err)
 	}

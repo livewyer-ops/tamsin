@@ -156,7 +156,7 @@ func TestBatchResultCarriesRunMetadata(t *testing.T) {
 	}
 	if batch.SchemaVersion != ResultSchemaVersion || batch.ToolVersion != version.Version ||
 		batch.ToolCommit != version.SourceCommit() || batch.ToolBuildDate != version.BuildDate() ||
-		batch.ProfileVersion != "1" || batch.RunID != pipeline.runID {
+		batch.ProfileVersion != "1" || batch.RunID != pipeline.observability.RunID() {
 		t.Fatalf("run metadata was not propagated: %#v", batch)
 	}
 	if batch.Results[0].Verification != VerificationNotReached {

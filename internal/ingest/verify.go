@@ -26,12 +26,6 @@ const (
 	outcomeRetractionFailed
 )
 
-// verificationTask pairs an Object with the Segment registered for it.
-type verificationTask struct {
-	object  preparedObject
-	segment tams.Segment
-}
-
 // VerificationError preserves the safety-relevant terminal state of a failed
 // verification. Callers must not have to parse prose to distinguish media that
 // was withdrawn from media which is still referenced by a Flow and needs an
@@ -46,6 +40,9 @@ type VerificationError struct {
 
 func (e *VerificationError) Error() string {
 	failed := e.Retracted + e.Stranded
+	// A Segment that could not be retracted needs an operator, so it is named
+	// first: the difference between "we cleaned up" and "you must" is the whole
+	// point of tracking terminal state.
 	if e.Stranded > 0 {
 		return fmt.Sprintf("%d of %d segments failed verification and %d could not be retracted from flow %s: %v",
 			failed, e.Total, e.Stranded, e.FlowID, e.Err)
@@ -56,51 +53,46 @@ func (e *VerificationError) Error() string {
 
 func (e *VerificationError) Unwrap() error { return e.Err }
 
-// verifyAllWithOutcomes checks every registered Object and attempts retraction
-// for each that fails verification. Failures must not cancel sibling cleanup.
-// Retraction shares a deadline detached from parent cancellation. Each returned
-// outcome reports whether the Object verified, was retracted, or was stranded.
-func (p *Pipeline) verifyAllWithOutcomes(ctx context.Context, flowID string, tasks []verificationTask) ([]verificationOutcome, error) {
-	var (
-		once        sync.Once
-		recoveryCtx context.Context
-		cancel      context.CancelFunc
-	)
-	recovery := func() context.Context {
-		once.Do(func() {
-			recoveryCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), p.verificationRecoveryTimeout)
-		})
-		return recoveryCtx
+// verifyAll checks every registered Object, attempts retraction for each that
+// fails verification, and records every terminal outcome in results. Failures
+// must not cancel sibling cleanup. Within recovery, verification and
+// retraction share the caller's recovery deadline rather than giving each
+// Object a fresh detached cleanup allowance. Otherwise retraction shares one
+// deadline, detached from parent cancellation, that starts at the first
+// failure.
+func (p *Pipeline) verifyAll(ctx context.Context, flowID string, objects []preparedObject,
+	results []ObjectResult, withinRecovery bool) error {
+	if len(objects) == 0 {
+		return nil
 	}
-	defer func() {
-		// Do not start a timer for a batch with no verification failures.
-		once.Do(func() {})
-		if cancel != nil {
-			cancel()
+	recovery := func() context.Context { return ctx }
+	if !withinRecovery {
+		var (
+			once        sync.Once
+			recoveryCtx context.Context
+			cancel      context.CancelFunc
+		)
+		recovery = func() context.Context {
+			once.Do(func() {
+				recoveryCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), p.recoveryTimeout)
+			})
+			return recoveryCtx
 		}
-	}()
-	return p.verifyAllOutcomes(ctx, flowID, tasks, recovery)
-}
-
-// verifyAllWithinRecovery shares the caller's recovery deadline with both
-// verification and retraction. It must not give each Object a fresh detached
-// cleanup allowance.
-func (p *Pipeline) verifyAllWithinRecovery(ctx context.Context, flowID string, tasks []verificationTask) ([]verificationOutcome, error) {
-	return p.verifyAllOutcomes(ctx, flowID, tasks, func() context.Context { return ctx })
-}
-
-func (p *Pipeline) verifyAllOutcomes(ctx context.Context, flowID string, tasks []verificationTask,
-	recovery func() context.Context) ([]verificationOutcome, error) {
-	if len(tasks) == 0 {
-		return nil, nil
+		defer func() {
+			// Do not start a timer for a batch with no verification failures.
+			once.Do(func() {})
+			if cancel != nil {
+				cancel()
+			}
+		}()
 	}
 
-	outcomes := make([]verificationOutcome, len(tasks))
-	failures := make([]error, len(tasks))
+	outcomes := make([]verificationOutcome, len(objects))
+	failures := make([]error, len(objects))
 
 	// Bound goroutines by the transfer budget. Wait for every outcome without
 	// cancelling siblings on error: they may still need to retract Segments.
-	workers := min(max(p.config.Transfers, 1), len(tasks))
+	workers := min(max(p.config.Transfers, 1), len(objects))
 	pending := make(chan int)
 	var group sync.WaitGroup
 	group.Add(workers)
@@ -108,11 +100,11 @@ func (p *Pipeline) verifyAllOutcomes(ctx context.Context, flowID string, tasks [
 		go func() {
 			defer group.Done()
 			for index := range pending {
-				outcomes[index], failures[index] = p.verifyOneWithRetraction(ctx, recovery, flowID, tasks[index])
+				outcomes[index], failures[index] = p.verifyOneWithRetraction(ctx, recovery, flowID, objects[index])
 			}
 		}()
 	}
-	for index := range tasks {
+	for index := range objects {
 		pending <- index
 	}
 	close(pending)
@@ -125,13 +117,19 @@ func (p *Pipeline) verifyAllOutcomes(ctx context.Context, flowID string, tasks [
 		collected []error
 	)
 	for index, outcome := range outcomes {
+		objectID := objects[index].id
 		switch outcome {
 		case outcomeVerified:
 			verified++
+			setObjectVerification(results, objectID, ObjectVerificationVerified, VerificationMethodReadback)
 		case outcomeRetracted:
 			retracted++
+			setObjectDisposition(results, objectID, ObjectDispositionRetracted)
+			setObjectVerification(results, objectID, ObjectVerificationFailed, VerificationMethodReadback)
 		case outcomeRetractionFailed:
 			stranded++
+			setObjectDisposition(results, objectID, ObjectDispositionStranded)
+			setObjectVerification(results, objectID, ObjectVerificationFailed, VerificationMethodReadback)
 		}
 		if failures[index] != nil {
 			collected = append(collected, failures[index])
@@ -139,21 +137,12 @@ func (p *Pipeline) verifyAllOutcomes(ctx context.Context, flowID string, tasks [
 	}
 
 	if len(collected) == 0 {
-		return outcomes, nil
+		return nil
 	}
 	p.logger.Warn("verification did not complete for every object",
 		"flow_id", flowID, "verified", verified, "retracted", retracted, "stranded", stranded)
-	// A Segment that could not be retracted needs an operator, so it is named
-	// first: the difference between "we cleaned up" and "you must" is the whole
-	// point of tracking terminal state.
-	if stranded > 0 {
-		return outcomes, &VerificationError{
-			FlowID: flowID, Total: len(tasks), Retracted: retracted, Stranded: stranded,
-			Err: errors.Join(collected...),
-		}
-	}
-	return outcomes, &VerificationError{
-		FlowID: flowID, Total: len(tasks), Retracted: retracted,
+	return &VerificationError{
+		FlowID: flowID, Total: len(objects), Retracted: retracted, Stranded: stranded,
 		Err: errors.Join(collected...),
 	}
 }
@@ -165,11 +154,11 @@ func (p *Pipeline) verifyAllOutcomes(ctx context.Context, flowID string, tasks [
 // registered. Unchecked is indistinguishable from corrupt from the store's
 // point of view, and the safe reading is the pessimistic one.
 func (p *Pipeline) verifyOneWithRetraction(ctx context.Context, recovery func() context.Context,
-	flowID string, task verificationTask) (verificationOutcome, error) {
+	flowID string, object preparedObject) (verificationOutcome, error) {
 	release, err := p.acquireTransfer(ctx)
 	if err != nil {
-		cause := fmt.Errorf("object %s was registered but never verified: %w", task.object.id, err)
-		return p.resolveVerificationFailure(recovery(), flowID, task.object, cause)
+		cause := fmt.Errorf("object %s was registered but never verified: %w", object.id, err)
+		return p.retractWithinRecovery(recovery(), flowID, object, cause)
 	}
 	defer release()
 
@@ -177,39 +166,31 @@ func (p *Pipeline) verifyOneWithRetraction(ctx context.Context, recovery func() 
 	// workers can consume them. Hold this worker's global slot first, then ask
 	// for only this exact registered Segment. Nothing queues between issuance
 	// and DownloadDigest. A failed listing still requires retraction.
-	if p.limits.PresignedURL > 0 {
-		segments, listErr := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{
-			ObjectID: task.object.id, Timerange: task.object.timerange, IncludeDownloadURLs: true,
-		})
-		if listErr != nil {
-			cause := fmt.Errorf("refresh download URL for object %s: %w", task.object.id, listErr)
-			return p.resolveVerificationFailure(recovery(), flowID, task.object, cause)
-		}
-		segment := matchingSegment(segments, task.object.id, task.object.timerange)
-		if segment == nil {
-			cause := fmt.Errorf("registered segment %s was not returned by TAMS", task.object.id)
-			return p.resolveVerificationFailure(recovery(), flowID, task.object, cause)
-		}
-		task.segment = *segment
-		startBefore := time.Now().Add(p.limits.PresignedURL)
-		for index := range task.segment.GetURLs {
-			if task.segment.GetURLs[index].Presigned {
-				task.segment.GetURLs[index].StartBefore = startBefore
-			}
+	segments, listErr := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{
+		ObjectID: object.id, Timerange: object.timerange, IncludeDownloadURLs: true,
+	})
+	if listErr != nil {
+		cause := fmt.Errorf("refresh download URL for object %s: %w", object.id, listErr)
+		return p.retractWithinRecovery(recovery(), flowID, object, cause)
+	}
+	segment := matchingSegment(segments, object.id, object.timerange)
+	if segment == nil {
+		cause := fmt.Errorf("registered segment %s was not returned by TAMS", object.id)
+		return p.retractWithinRecovery(recovery(), flowID, object, cause)
+	}
+	startBefore := time.Now().Add(p.limits.PresignedURL)
+	for index := range segment.GetURLs {
+		if segment.GetURLs[index].Presigned {
+			segment.GetURLs[index].StartBefore = startBefore
 		}
 	}
 
-	if err := p.verifyObject(ctx, task.object, task.segment); err != nil {
-		return p.resolveVerificationFailure(recovery(), flowID, task.object, err)
+	if err := p.verifyObject(ctx, object, *segment); err != nil {
+		return p.retractWithinRecovery(recovery(), flowID, object, err)
 	}
-	p.observability.Verification(task.object.size, observability.OutcomeVerified)
-	p.advanceProgress(ctx, progress.PhaseVerify, 1, task.object.size)
+	p.observability.Verification(object.size, observability.OutcomeVerified)
+	p.advanceProgress(ctx, progress.PhaseVerify, 1, object.size)
 	return outcomeVerified, nil
-}
-
-func (p *Pipeline) resolveVerificationFailure(ctx context.Context, flowID string,
-	object preparedObject, cause error) (verificationOutcome, error) {
-	return p.retractWithinRecovery(ctx, flowID, object, cause)
 }
 
 func (p *Pipeline) retractWithinRecovery(ctx context.Context, flowID string, object preparedObject, cause error) (verificationOutcome, error) {

@@ -38,6 +38,10 @@ func (*presentationCountingProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1", nil
 }
 
+func (p *presentationCountingProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
 func (p *presentationCountingProber) ProbePresentation(context.Context, string, *media.Probe) error {
 	p.presentations.Add(1)
 	return nil
@@ -77,6 +81,14 @@ func (muxedProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 test", nil
 }
 
+func (p muxedProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (muxedProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
+}
+
 type multiAudioProber struct{}
 
 func (multiAudioProber) Probe(context.Context, string) (media.Probe, error) {
@@ -92,6 +104,14 @@ func (multiAudioProber) Probe(context.Context, string) (media.Probe, error) {
 
 func (multiAudioProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 test", nil
+}
+
+func (p multiAudioProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (multiAudioProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
 }
 
 type fourEssenceProber struct{}
@@ -112,8 +132,24 @@ func (fourEssenceProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 test", nil
 }
 
+func (p fourEssenceProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (fourEssenceProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
+}
+
 func (fakeProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 test", nil
+}
+
+func (p fakeProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (fakeProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
 }
 
 type oldVersionProber struct{ fakeProber }
@@ -135,6 +171,14 @@ func (unknownContainerProber) Probe(context.Context, string) (media.Probe, error
 
 func (unknownContainerProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 test", nil
+}
+
+func (p unknownContainerProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (unknownContainerProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
 }
 
 type fakeSegmenter struct{}
@@ -235,7 +279,9 @@ type fakeClient struct {
 	backendReads    int
 	// flowReadErr fails the read that precedes a Flow write.
 	flowReadErr error
-	// backendsErr fails the startup storage backends request.
+	// serviceErr and backendsErr fail the startup service and storage backends
+	// requests.
+	serviceErr  error
 	backendsErr error
 	// putFlowErrAt fails the numbered Flow PUT, allowing graph-transaction tests
 	// to observe a prefix written before the collector.
@@ -286,6 +332,9 @@ func (c *fakeClient) Service(context.Context) (map[string]any, error) {
 	c.lock.Lock()
 	c.serviceReads++
 	c.lock.Unlock()
+	if c.serviceErr != nil {
+		return nil, c.serviceErr
+	}
 	if c.serviceDocument != nil {
 		return c.serviceDocument, nil
 	}
@@ -663,6 +712,14 @@ func (essenceBitRateProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 fake", nil
 }
 
+func (p essenceBitRateProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (essenceBitRateProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
+}
+
 type versionedCountingSegmenter struct {
 	countingSegmenter
 	version string
@@ -818,4 +875,38 @@ func assertFreshURLAges(t *testing.T, kind string, ages []time.Duration, count i
 			t.Fatalf("%s %d began with URL age %s against lifetime %s", kind, index, age, lifetime)
 		}
 	}
+}
+
+func (p *Pipeline) Run(ctx context.Context, items []source.Item) (BatchResult, error) {
+	return p.RunObserved(ctx, items, nil)
+}
+
+func (r *Result) rootFlow() *FlowResult {
+	for index := range r.Flows {
+		if r.Flows[index].FlowID == r.RootFlowID {
+			return &r.Flows[index]
+		}
+	}
+	return nil
+}
+
+// objectRecorder keeps every terminal Object a run publishes. A rolling Result
+// retains only the Objects that need an operator.
+type objectRecorder struct {
+	lock    sync.Mutex
+	objects map[string][]ObjectResult
+}
+
+func (*objectRecorder) InputStarted(int) error { return nil }
+
+func (*objectRecorder) FlowPlanned(int, FlowPlan) error { return nil }
+
+func (r *objectRecorder) ObjectsCompleted(_ int, flowID string, objects []ObjectResult) error {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+	if r.objects == nil {
+		r.objects = make(map[string][]ObjectResult)
+	}
+	r.objects[flowID] = append(r.objects[flowID], objects...)
+	return nil
 }

@@ -74,9 +74,9 @@ flag or variable only. See the [CLI reference](cli.md) for each flag's meaning.
 | `ingest.concurrency` | `-j`, `--concurrency` | `TAMSIN_INGEST_CONCURRENCY` | CPU count, at most 8; range 1 to 256 |
 | `ingest.transfers` | `--transfers` | `TAMSIN_INGEST_TRANSFERS` | `0` (follows concurrency); range 0 to 256 |
 | `ingest.probe_concurrency` | `--probe-concurrency` | `TAMSIN_INGEST_PROBE_CONCURRENCY` | `2`; range 0 to 256 |
-| `ingest.segment_duration` | `-d`, `--segment-duration` | `TAMSIN_INGEST_SEGMENT_DURATION` | `10s` |
-| `ingest.segment_format` | `--segment-format` | `TAMSIN_INGEST_SEGMENT_FORMAT` | `source` |
-| `ingest.essence_storage` | `--essence-storage` | `TAMSIN_INGEST_ESSENCE_STORAGE` | `independent` |
+| `ingest.segment_duration` | `-d`, `--segment-duration` | `TAMSIN_INGEST_SEGMENT_DURATION` | from `ingest.profile` |
+| `ingest.segment_format` | `--segment-format` | `TAMSIN_INGEST_SEGMENT_FORMAT` | from `ingest.profile` |
+| `ingest.essence_storage` | `--essence-storage` | `TAMSIN_INGEST_ESSENCE_STORAGE` | from `ingest.profile` |
 | `ingest.start` | `--start` | `TAMSIN_INGEST_START` | `0:0` |
 | `ingest.storage_id` | `--storage-id` | `TAMSIN_INGEST_STORAGE_ID` | |
 | `ingest.tams_flow_profiles` | `--tams-flow-profile` | `TAMSIN_INGEST_TAMS_FLOW_PROFILES` | |

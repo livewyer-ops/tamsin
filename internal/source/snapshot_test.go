@@ -34,7 +34,7 @@ func TestHTTPSnapshotAndPrivateBridge(t *testing.T) {
 		http.ServeContent(w, r, "media", time.Time{}, strings.NewReader("0123456789"))
 	}))
 	defer server.Close()
-	resolver := New(Config{HTTPHeaders: http.Header{"Authorization": {"Bearer input-secret"}}})
+	resolver := newResolver(Config{HTTPHeaders: http.Header{"Authorization": {"Bearer input-secret"}}})
 	items, err := resolver.Resolve(t.Context(), []string{server.URL + "/media?signature=secret"})
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +111,7 @@ func TestHTTPSnapshotRejectsUnsafeInitialResponses(t *testing.T) {
 			}))
 			defer server.Close()
 			target, _ := url.Parse(server.URL)
-			_, err := New(Config{}).httpSnapshot(t.Context(), target)
+			_, err := newResolver(Config{}).httpSnapshot(t.Context(), target)
 			var unavailable *StreamUnavailableError
 			if err == nil || errors.As(err, &unavailable) != tc.fallback {
 				t.Fatalf("snapshot error=%v, fallback=%v", err, tc.fallback)
@@ -135,7 +135,7 @@ func TestHTTPSnapshotRedirectStripsAllInputCredentials(t *testing.T) {
 	}))
 	defer origin.Close()
 	target, _ := url.Parse(origin.URL)
-	snapshot, err := New(Config{HTTPHeaders: http.Header{"Authorization": {"Bearer secret"}, "X-Private-Input": {"secret"}}}).httpSnapshot(t.Context(), target)
+	snapshot, err := newResolver(Config{HTTPHeaders: http.Header{"Authorization": {"Bearer secret"}, "X-Private-Input": {"secret"}}}).httpSnapshot(t.Context(), target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestS3SnapshotPinsVersionOrETag(t *testing.T) {
 	t.Parallel()
 	for _, version := range []string{"", "version-one"} {
 		client := &snapshotS3{version: version}
-		snapshot, err := New(Config{}).s3Snapshot(t.Context(), client, "bucket", "exact/key")
+		snapshot, err := newResolver(Config{}).s3Snapshot(t.Context(), client, "bucket", "exact/key")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -227,7 +227,7 @@ func TestBridgeRetriesTruncatedRangesWithoutChangingRevision(t *testing.T) {
 			}))
 			defer server.Close()
 			target, _ := url.Parse(server.URL)
-			snapshot, err := New(Config{}).httpSnapshot(t.Context(), target)
+			snapshot, err := newResolver(Config{}).httpSnapshot(t.Context(), target)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -281,7 +281,7 @@ func TestHTTPSnapshotRejectsChangedOrMalformedPinnedRange(t *testing.T) {
 			}))
 			defer server.Close()
 			target, _ := url.Parse(server.URL)
-			snapshot, err := New(Config{}).httpSnapshot(t.Context(), target)
+			snapshot, err := newResolver(Config{}).httpSnapshot(t.Context(), target)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -318,7 +318,7 @@ func TestBridgeRejectsInvalidRangeTerminator(t *testing.T) {
 			}))
 			defer server.Close()
 			target, _ := url.Parse(server.URL)
-			snapshot, err := New(Config{}).httpSnapshot(t.Context(), target)
+			snapshot, err := newResolver(Config{}).httpSnapshot(t.Context(), target)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -354,7 +354,7 @@ func TestBridgeCloseCancelsActiveUpstreamRead(t *testing.T) {
 	}))
 	defer server.Close()
 	target, _ := url.Parse(server.URL)
-	snapshot, err := New(Config{}).httpSnapshot(t.Context(), target)
+	snapshot, err := newResolver(Config{}).httpSnapshot(t.Context(), target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +393,7 @@ func TestHTTPSnapshotDoesNotTimeOutConsumerPause(t *testing.T) {
 	}))
 	defer server.Close()
 	target, _ := url.Parse(server.URL)
-	snapshot, err := New(Config{TransferIdleTimeout: 100 * time.Millisecond}).httpSnapshot(t.Context(), target)
+	snapshot, err := newResolver(Config{TransferIdleTimeout: 100 * time.Millisecond}).httpSnapshot(t.Context(), target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,7 +428,7 @@ func TestHTTPSnapshotPinsSignedRedirect(t *testing.T) {
 		http.ServeContent(w, r, "media", time.Time{}, strings.NewReader("0123456789"))
 	}))
 	defer server.Close()
-	items, err := New(Config{}).Resolve(t.Context(), []string{server.URL + "/media"})
+	items, err := newResolver(Config{}).Resolve(t.Context(), []string{server.URL + "/media"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +475,7 @@ func TestHTTPSnapshotDoesNotSwitchResourcesWithMatchingETags(t *testing.T) {
 			}))
 			defer server.Close()
 			target, _ := url.Parse(server.URL + "/input")
-			snapshot, err := New(Config{}).httpSnapshot(t.Context(), target)
+			snapshot, err := newResolver(Config{}).httpSnapshot(t.Context(), target)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -533,7 +533,7 @@ func TestBridgeRestoresRetryBudgetAfterSustainedProgress(t *testing.T) {
 	}))
 	defer server.Close()
 	target, _ := url.Parse(server.URL)
-	snapshot, err := New(Config{}).httpSnapshot(t.Context(), target)
+	snapshot, err := newResolver(Config{}).httpSnapshot(t.Context(), target)
 	if err != nil {
 		t.Fatal(err)
 	}

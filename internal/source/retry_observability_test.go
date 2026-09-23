@@ -86,7 +86,7 @@ func TestS3ObservabilityPreservesConfiguredAttemptLimit(t *testing.T) {
 			}))
 			defer server.Close()
 			run := observability.New("cd62f89d-eeca-4c40-8a3f-57a47702e996", nil)
-			resolver := New(Config{
+			resolver := newResolver(Config{
 				S3: S3Config{
 					Region: "us-east-1", Endpoint: server.URL, UsePathStyle: true, HTTPClient: server.Client(),
 				},

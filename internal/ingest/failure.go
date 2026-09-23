@@ -15,7 +15,6 @@ const (
 	FailureCodeAuthFailed             = "authentication.failed"
 	FailureCodeInputFailed            = "ingest.input_failures"
 	FailureCodeSourceFailed           = "source.failed"
-	FailureCodeMediaFailed            = "media.failed"
 	FailureCodeTAMSFailed             = "tams.failed"
 	FailureCodeInterrupted            = "run.interrupted"
 	FailureCodeRunFailed              = "run.failed"
@@ -48,7 +47,6 @@ const (
 	FailureMessageAuthFailed               = "Authentication did not complete successfully."
 	FailureMessageInputFailed              = "One or more inputs did not complete successfully."
 	FailureMessageSourceFailed             = "Input resolution or transfer did not complete successfully."
-	FailureMessageMediaFailed              = "Media analysis or transformation did not complete successfully."
 	FailureMessageTAMSFailed               = "The TAMS operation did not complete successfully."
 	FailureMessageInterrupted              = "The ingest was interrupted while cleanup was in progress."
 	FailureMessageRunFailed                = "The ingest run did not complete successfully."
@@ -191,11 +189,7 @@ func describeRunFailure(result Result, cause error, runCtx context.Context) *Fai
 		return &failure
 	}
 	if runCtx != nil && runCtx.Err() != nil {
-		return interruptedFailure()
+		return DescribeInputInterruptedFailure()
 	}
 	return DescribeFailure(result, cause)
-}
-
-func interruptedFailure() *Failure {
-	return DescribeInputInterruptedFailure()
 }

@@ -62,40 +62,19 @@ func (p *rollingObjectPreparer) prepare(ctx context.Context, record media.Segmen
 	if err != nil {
 		return preparedObject{}, err
 	}
-
-	timerange, err := media.TimeRange(p.flowPosition, duration)
+	object, next, err := placeObject(p.flowID, record.Path, objectMeasurement{
+		size: size, checksum: checksum, objectStart: objectStart, duration: duration,
+	}, p.flowPosition)
 	if err != nil {
 		return preparedObject{}, err
 	}
-	objectTimerange, err := media.TimeRange(objectStart, duration)
-	if err != nil {
-		return preparedObject{}, err
-	}
-	offset, err := media.TimestampOffset(p.flowPosition, objectStart)
-	if err != nil {
-		return preparedObject{}, err
-	}
-	object := preparedObject{
-		id: namedID("object", p.flowID, checksum, timerange), path: record.Path,
-		size: size, sha256: checksum, start: p.flowPosition, duration: duration,
-		timerange: timerange, objectTimerange: objectTimerange,
-	}
-	if offset != 0 {
-		object.tsOffset = media.Timestamp(offset)
-	}
-	p.flowPosition, err = media.TimestampShift(p.flowPosition, duration)
-	if err != nil {
-		return preparedObject{}, err
-	}
+	p.flowPosition = next
 	p.rates.Add(media.SegmentMeasurement{Bytes: size, Duration: duration})
 	return object, nil
 }
 
 func (p *Pipeline) probeObject(ctx context.Context, path string) (media.Probe, error) {
-	if prober, ok := p.prober.(media.ObjectProber); ok {
-		return prober.ProbeObject(ctx, path)
-	}
-	return p.prober.Probe(ctx, path)
+	return p.prober.ProbeObject(ctx, path)
 }
 
 type rollingFlowState struct {
@@ -234,7 +213,7 @@ func (e *rollingExecution) flush(state *rollingFlowState) error {
 	flowResult := &e.result.Flows[state.resultIndex]
 	for _, objectResult := range objectResults {
 		AccumulateObjectSummary(&flowResult.ObjectSummary, objectResult)
-		if e.pipeline.config.RetainObjectResults || actionRequiredObject(objectResult) {
+		if actionRequiredObject(objectResult) {
 			flowResult.Objects = append(flowResult.Objects, objectResult)
 		}
 	}
@@ -274,7 +253,7 @@ func (e *rollingExecution) finish() error {
 
 func (e *rollingExecution) publishTotals(final bool) {
 	tracker := progress.FromContext(e.ctx)
-	if tracker == nil || e.pipeline.config.DryRunMode != DryRunOff {
+	if tracker == nil {
 		return
 	}
 	set := func(phase progress.Phase) {
@@ -378,56 +357,17 @@ func applyRollingBitRates(flow tams.Flow, rates *media.SegmentBitRateAccumulator
 	flow["max_bit_rate"] = peak
 }
 
-func rollingResultStatus(result Result) ResultStatus {
-	total, resumed := 0, 0
-	for _, flow := range result.Flows {
-		total += flow.ObjectSummary.Total
-		resumed += flow.ObjectSummary.Resumed
-	}
-	if total > 0 && resumed == total {
-		return ResultStatusResumed
-	}
-	return ResultStatusIngested
-}
-
-func (p *Pipeline) ingestMuxedRolling(ctx context.Context, itemLabel string, staged stagedFile,
-	flow tams.Flow, flowInfo media.FlowInfo, flowID, sourceID, storageID string,
-	collected []collectedFlow, ffmpegVersion, toolchainFingerprint string) (result Result, returnErr error) {
-	result = Result{
-		Input: itemLabel, Profile: p.config.Profile, ProfileVersion: p.config.ProfileVersion,
-		FFmpegVersion: ffmpegVersion, MediaToolchain: toolchainFingerprint,
-		RootFlowID: flowID, Bytes: staged.size, SHA256: staged.sha256,
-		Status: ResultStatusPlanned, Verification: p.initialVerificationStatus(),
-		Flows: make([]FlowResult, 0, len(collected)+1),
-	}
-	graph := flowGraph{flows: make([]graphFlow, 0, len(collected)+1), storage: p.config.EssenceStorage}
-	for _, child := range collected {
-		result.Flows = append(result.Flows, FlowResult{
-			FlowID: child.id, SourceID: child.sourceID, Role: child.role,
-			Disposition: FlowPlanned, Kind: FlowKindEssence,
-		})
-		graph.flows = append(graph.flows, graphFlow{
-			id: child.id, role: child.role, flow: child.flow, containerMapping: child.containerMapping,
-		})
-	}
-	rootKind, rootRole, parentRole := FlowKindEssence, flowPlanRole(FlowKindEssence, "single", stringField(flow, "format")), "single"
-	if len(collected) > 0 {
-		rootKind, rootRole, parentRole = FlowKindMuxed, "", "multi"
-		graph.collectorID = flowID
-	}
-	rootIndex := len(result.Flows)
-	result.Flows = append(result.Flows, FlowResult{
-		FlowID: flowID, SourceID: sourceID, Role: rootRole, Disposition: FlowPlanned, Kind: rootKind,
-	})
-	graph.flows = append(graph.flows, graphFlow{id: flowID, role: parentRole, flow: flow, ownsMedia: true})
-	if !staged.owned {
-		if err := ensureStagedInputUnchanged(ctx, staged); err != nil {
-			return result, withFailure(FailureCodeSourceChanged, FailureMessageSourceChanged, true, err)
-		}
+// ingestMuxedRolling renders the planned muxed graph, whose root Flow is its
+// last member, committing Objects as FFmpeg writes them.
+func (p *Pipeline) ingestMuxedRolling(ctx context.Context, staged stagedFile, flowInfo media.FlowInfo,
+	storageID string, result Result, graph flowGraph) (_ Result, returnErr error) {
+	root := graph.flows[len(graph.flows)-1]
+	if err := ensureStagedInputUnchanged(ctx, staged); err != nil {
+		return result, err
 	}
 	state := &rollingFlowState{
-		flowID: flowID, resultIndex: rootIndex, flow: flow,
-		preparer: newRollingObjectPreparer(p, flowID, media.AllStreams, p.config.Start),
+		flowID: root.id, resultIndex: len(result.Flows) - 1, flow: root.flow,
+		preparer: newRollingObjectPreparer(p, root.id, media.AllStreams, p.config.Start),
 	}
 	window := p.rollingStagingWindow(staged)
 	execution := newRollingExecution(p, ctx, &result, storageID, window, state)
@@ -451,20 +391,11 @@ func (p *Pipeline) ingestMuxedRolling(ctx context.Context, itemLabel string, sta
 	if renderErr != nil || finishErr != nil {
 		return result, rollingExecutionError(renderErr, finishErr)
 	}
-	if !staged.owned {
-		if err := ensureStagedInputUnchanged(ctx, staged); err != nil {
-			return result, withFailure(FailureCodeSourceChanged, FailureMessageSourceChanged, true, err)
-		}
-	}
-	applyRollingBitRates(flow, state.preparer.rates)
-	if err := p.finishRollingFlowMetadata(ctx, graph, execution.planned); err != nil {
+	if err := ensureStagedInputUnchanged(ctx, staged); err != nil {
 		return result, err
 	}
-	if p.config.DryRunMode != DryRunOff {
-		return result, nil
-	}
-	result.Status = rollingResultStatus(result)
-	return result, nil
+	applyRollingBitRates(root.flow, state.preparer.rates)
+	return result, p.finishRollingFlowMetadata(ctx, graph, execution.planned)
 }
 
 func rollingExecutionError(renderErr, finishErr error) error {
@@ -486,59 +417,22 @@ func rollingExecutionError(renderErr, finishErr error) error {
 	return withFailure(FailureCodeMediaPrepareFailed, FailureMessageMediaPrepareFailed, true, joined)
 }
 
-func (p *Pipeline) ingestIndependentRolling(ctx context.Context, itemLabel string, staged stagedFile,
-	collector tams.Flow, flowInfo media.FlowInfo, collectorID, collectorSourceID, storageID string) (result Result, returnErr error) {
-	result = Result{
-		Input: itemLabel, Profile: p.config.Profile, ProfileVersion: p.config.ProfileVersion,
-		RootFlowID: collectorID, Bytes: staged.size, SHA256: staged.sha256,
-		Status: ResultStatusPlanned, Verification: p.initialVerificationStatus(),
-		Flows: []FlowResult{{
-			FlowID: collectorID, SourceID: collectorSourceID, Disposition: FlowPlanned, Kind: FlowKindCollection,
-		}},
-	}
-	graph := flowGraph{
-		flows:       make([]graphFlow, 0, len(flowInfo.Collected)+1),
-		collectorID: collectorID, storage: media.EssenceStorageIndependent,
-	}
-	collectionItems := make([]map[string]any, 0, len(flowInfo.Collected))
+func (p *Pipeline) ingestIndependentRolling(ctx context.Context, staged stagedFile, collector tams.Flow,
+	flowInfo media.FlowInfo, collectorSourceID, storageID string, result Result, graph flowGraph) (_ Result, returnErr error) {
 	states := make([]*rollingFlowState, 0, len(flowInfo.Collected))
 	for index, essence := range flowInfo.Collected {
-		position := fmt.Sprint(index)
-		flowID := generatedChildFlowID(collectorID, "essence", position)
-		sourceID := sourceIdentity(staged.identityKey(), "essence", position)
-		flow := essence.Flow
-		mergeFlow(flow, p.config.FlowMetadata)
-		flow["id"] = flowID
-		flow["source_id"] = sourceID
-		flow["segment_duration"] = durationRational(p.config.SegmentDuration)
-		if container := p.config.SegmentFormat.ContainerMIME(); container != "" {
-			flow["container"] = container
-		}
-		resultIndex := len(result.Flows)
-		result.Flows = append(result.Flows, FlowResult{
-			FlowID: flowID, SourceID: sourceID, Role: essence.Role,
-			Disposition: FlowPlanned, Kind: FlowKindEssence,
-		})
-		graph.flows = append(graph.flows, graphFlow{
-			id: flowID, role: essence.Role, flow: flow, ownsMedia: true,
-		})
-		collectionItems = append(collectionItems, map[string]any{"id": flowID, "role": essence.Role})
+		flowResult, member := p.essenceFlow(staged, graph.collectorID, index, essence)
 		states = append(states, &rollingFlowState{
-			flowID: flowID, resultIndex: resultIndex, flow: flow,
+			flowID: member.id, resultIndex: len(result.Flows), flow: member.flow,
 			preparer: newRollingObjectPreparer(
-				p, flowID, essence.StreamIndex, p.config.Start+essence.Offset),
+				p, member.id, essence.StreamIndex, p.config.Start+essence.Offset),
 		})
+		result.Flows = append(result.Flows, flowResult)
+		graph.flows = append(graph.flows, member)
 	}
-	mergeFlow(collector, p.config.FlowMetadata)
-	collector["id"] = collectorID
-	collector["source_id"] = collectorSourceID
-	collector["flow_collection"] = collectionItems
-	delete(collector, "container")
-	graph.flows = append(graph.flows, graphFlow{id: collectorID, role: "multi", flow: collector})
-	if !staged.owned {
-		if err := ensureStagedInputUnchanged(ctx, staged); err != nil {
-			return result, withFailure(FailureCodeSourceChanged, FailureMessageSourceChanged, true, err)
-		}
+	p.finishCollector(&graph, collector, collectorSourceID)
+	if err := ensureStagedInputUnchanged(ctx, staged); err != nil {
+		return result, err
 	}
 	window := p.rollingStagingWindow(staged)
 	execution := newRollingExecution(p, ctx, &result, storageID, window, states...)
@@ -590,22 +484,13 @@ func (p *Pipeline) ingestIndependentRolling(ctx context.Context, itemLabel strin
 	if renderErr != nil {
 		return result, renderErr
 	}
-	if !staged.owned {
-		if err := ensureStagedInputUnchanged(ctx, staged); err != nil {
-			return result, withFailure(FailureCodeSourceChanged, FailureMessageSourceChanged, true, err)
-		}
+	if err := ensureStagedInputUnchanged(ctx, staged); err != nil {
+		return result, err
 	}
 	for _, state := range states {
 		applyRollingBitRates(state.flow, state.preparer.rates)
 	}
-	if err := p.finishRollingFlowMetadata(ctx, graph, execution.planned); err != nil {
-		return result, err
-	}
-	if p.config.DryRunMode != DryRunOff {
-		return result, nil
-	}
-	result.Status = rollingResultStatus(result)
-	return result, nil
+	return result, p.finishRollingFlowMetadata(ctx, graph, execution.planned)
 }
 
 func canRenderRollingMultiOutput(states []*rollingFlowState, additionalArgs []string) bool {

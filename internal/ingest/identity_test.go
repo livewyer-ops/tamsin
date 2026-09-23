@@ -363,14 +363,15 @@ func TestExplicitRootStabilizesChildrenWithoutRotatingObjects(t *testing.T) {
 	if err := os.WriteFile(filename, []byte("explicit graph"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	run := func(rawURL string) ([]string, Result) {
+	run := func(rawURL string) ([]string, Result, []ObjectResult) {
 		t.Helper()
 		item := localSource(filename)
 		item.URI = rawURL
 		client := newFakeClient()
+		recorder := &objectRecorder{}
 		pipeline, err := New(Config{
-			RetainObjectResults: true,
-			Concurrency:         1, Transfers: 2, SegmentDuration: time.Second,
+			LifecycleObserver: recorder,
+			Concurrency:       1, Transfers: 2, SegmentDuration: time.Second,
 			EssenceStorage: media.EssenceStorageMuxed, FlowID: rootID, SourceID: sourceID,
 		}, client, muxedProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
 		if err != nil {
@@ -380,17 +381,17 @@ func TestExplicitRootStabilizesChildrenWithoutRotatingObjects(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return storedFlowIDs(client), batch.Results[0]
+		return storedFlowIDs(client), batch.Results[0], recorder.objects[rootID]
 	}
-	firstGraph, first := run("https://user:secret@media.test/programme.ts?sig=one")
-	secondGraph, second := run("https://media.test/programme.ts?sig=two")
+	firstGraph, first, firstObjects := run("https://user:secret@media.test/programme.ts?sig=one")
+	secondGraph, second, secondObjects := run("https://media.test/programme.ts?sig=two")
 	if !reflect.DeepEqual(firstGraph, secondGraph) || first.RootFlowID != rootID || second.RootFlowID != rootID {
 		t.Fatalf("explicit root did not anchor children: %v vs %v", firstGraph, secondGraph)
 	}
 	firstRoot := rootFlowResult(t, first)
 	secondRoot := rootFlowResult(t, second)
-	if firstRoot.SourceID != sourceID || secondRoot.SourceID != sourceID ||
-		!sameObjectIdentities(firstRoot.Objects, secondRoot.Objects) {
+	if firstRoot.SourceID != sourceID || secondRoot.SourceID != sourceID || len(firstObjects) == 0 ||
+		!sameObjectIdentities(firstObjects, secondObjects) {
 		t.Fatalf("explicit identities changed across locator refresh: %#v vs %#v", first, second)
 	}
 	if generatedChildFlowID(rootID, "collected", "0") == generatedChildFlowID(
@@ -535,6 +536,14 @@ func (filenameSensitiveProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 filename-sensitive test", nil
 }
 
+func (p filenameSensitiveProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (filenameSensitiveProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
+}
+
 type mutatingProber struct {
 	target      string
 	replacement []byte
@@ -554,4 +563,12 @@ func (p *mutatingProber) Probe(ctx context.Context, filename string) (media.Prob
 
 func (*mutatingProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 mutating test", nil
+}
+
+func (p *mutatingProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (*mutatingProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
 }
