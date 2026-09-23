@@ -11,6 +11,8 @@ example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
 
 ## Unreleased
 
+- Build release images on FFmpeg runtime `5.1.9-bookworm-r3`, which refreshes
+  the Debian bookworm base. FFmpeg stays at 5.1.9.
 - Update Go module dependencies, including the AWS SDK for Go v2 1.47 with its
   S3 GetObject deadlock fix.
 - Stop showing defaults for `--segment-duration`, `--segment-format` and
