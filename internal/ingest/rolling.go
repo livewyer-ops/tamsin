@@ -92,10 +92,7 @@ func (p *rollingObjectPreparer) prepare(ctx context.Context, record media.Segmen
 }
 
 func (p *Pipeline) probeObject(ctx context.Context, path string) (media.Probe, error) {
-	if prober, ok := p.prober.(media.ObjectProber); ok {
-		return prober.ProbeObject(ctx, path)
-	}
-	return p.prober.Probe(ctx, path)
+	return p.prober.ProbeObject(ctx, path)
 }
 
 type rollingFlowState struct {

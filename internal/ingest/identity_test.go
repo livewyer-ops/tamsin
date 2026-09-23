@@ -535,6 +535,14 @@ func (filenameSensitiveProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 filename-sensitive test", nil
 }
 
+func (p filenameSensitiveProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (filenameSensitiveProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
+}
+
 type mutatingProber struct {
 	target      string
 	replacement []byte
@@ -554,4 +562,12 @@ func (p *mutatingProber) Probe(ctx context.Context, filename string) (media.Prob
 
 func (*mutatingProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 mutating test", nil
+}
+
+func (p *mutatingProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (*mutatingProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
 }

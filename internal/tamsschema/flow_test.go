@@ -3,6 +3,8 @@ package tamsschema
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -18,6 +20,42 @@ func compileSchema(t *testing.T, name string) *jsonschema.Schema {
 func compileSchemaRevision(t *testing.T, revision schemaRevision, name string) *jsonschema.Schema {
 	t.Helper()
 	schema, err := (&schemaCache{revision: revision}).schema(name)
+	if err != nil {
+		t.Fatalf("compile schema %s: %v", name, err)
+	}
+	return schema
+}
+
+// compileRequestSchema compiles a TAMS 8.2 request schema that TAMSin never
+// validates at run time. These live in testdata so the binary does not embed
+// them, and resolve their references against the embedded schemas.
+func compileRequestSchema(t *testing.T, name string) *jsonschema.Schema {
+	t.Helper()
+	cache := &schemaCache{revision: revisions[2].revision}
+	cache.load()
+	if cache.err != nil {
+		t.Fatal(cache.err)
+	}
+	directory := filepath.Join("testdata", "v8.2")
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		file, err := os.Open(filepath.Join(directory, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		document, err := jsonschema.UnmarshalJSON(file)
+		_ = file.Close()
+		if err != nil {
+			t.Fatalf("decode test schema %s: %v", entry.Name(), err)
+		}
+		if err := cache.compiler.AddResource(cache.revision.base+entry.Name(), document); err != nil {
+			t.Fatalf("register test schema %s: %v", entry.Name(), err)
+		}
+	}
+	schema, err := cache.compiler.Compile(cache.revision.base + name)
 	if err != nil {
 		t.Fatalf("compile schema %s: %v", name, err)
 	}
@@ -457,7 +495,7 @@ func TestIndependentEssenceFlowsOwnTheirObjects(t *testing.T) {
 // /flows/{flowId}/segments.
 func TestSegmentRequestMatchesPinnedSchema(t *testing.T) {
 	t.Parallel()
-	schema := compileSchema(t, "flow-segment-post.json")
+	schema := compileRequestSchema(t, "flow-segment-post.json")
 
 	keyFrames := 1
 	for _, testCase := range []struct {
@@ -494,7 +532,7 @@ func TestSegmentRequestMatchesPinnedSchema(t *testing.T) {
 // /flows/{flowId}/storage.
 func TestStorageRequestMatchesPinnedSchema(t *testing.T) {
 	t.Parallel()
-	schema := compileSchema(t, "flow-storage-post.json")
+	schema := compileRequestSchema(t, "flow-storage-post.json")
 
 	for _, testCase := range []struct {
 		name    string

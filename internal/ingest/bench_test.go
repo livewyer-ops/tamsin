@@ -452,6 +452,14 @@ func (p *countingProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 test", nil
 }
 
+func (p *countingProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (*countingProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
+}
+
 // TestMediaProcessBudgetIsGlobalAcrossInputs covers a bound that multiplied
 // instead of holding. Media measurement was limited per Flow, while Run
 // prepares Concurrency Flows at once, so the effective ceiling was the product

@@ -17,7 +17,7 @@ func TestDescribeFailureDoesNotExposeUntrustedTAMSErrorDetails(t *testing.T) {
 	const toxic = "peer-response-top-secret"
 	cause := &tams.HTTPError{
 		Method: http.MethodGet, URL: "https://user:password@example.test/service?token=top-secret",
-		StatusCode: http.StatusInternalServerError, Status: "500 Provider top-secret reason", Body: toxic,
+		StatusCode: http.StatusInternalServerError, Status: "500 Provider top-secret reason",
 	}
 	result := Result{
 		Input: "file:///input.ts", Profile: ProfileEssenceSegments, ProfileVersion: "1",

@@ -12,7 +12,6 @@ import (
 	"io"
 	"math"
 	"math/rand/v2"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -45,14 +44,12 @@ type Config struct {
 	// TransferTimeout optionally bounds a Media Object upload or verification
 	// end to end. It defaults to none so it does not cap a large healthy body.
 	TransferTimeout time.Duration
-	// TransferIdleTimeout bounds only time without byte-level progress. It has
-	// a positive default because dial, TLS, and response-header deadlines do not
-	// cover a body that stalls after headers or a peer that stops reading a PUT.
+	// TransferIdleTimeout bounds only time without byte-level progress. Dial,
+	// TLS, and response-header deadlines do not cover a body that stalls after
+	// headers or a peer that stops reading a PUT.
 	TransferIdleTimeout time.Duration
 	Retries             int
 	UserAgent           string
-	RedactValues        []string
-	SuppressErrorBody   bool
 	Observability       *observability.Run
 }
 
@@ -81,8 +78,6 @@ type Client struct {
 	retries             int
 	userAgent           string
 	baseOrigin          string
-	redactValues        []string
-	suppressErrorBody   bool
 	observability       *observability.Run
 	deletePollInterval  time.Duration
 	segmentPageLimit    int
@@ -113,32 +108,6 @@ func New(config Config) (*Client, error) {
 	if base.RawQuery != "" || base.Fragment != "" {
 		return nil, errors.New("TAMS endpoint must not contain a query or fragment other than the extracted access_token")
 	}
-	if config.Timeout <= 0 {
-		config.Timeout = 30 * time.Second
-	}
-	if config.Retries < 0 || config.Retries > 20 {
-		return nil, errors.New("retry count must be between 0 and 20")
-	}
-	if config.TransferIdleTimeout <= 0 {
-		config.TransferIdleTimeout = netio.DefaultIdleTimeout
-	}
-	transport := config.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	externalTransport := config.ExternalTransport
-	if externalTransport == nil {
-		externalTransport = http.DefaultTransport
-	}
-	if config.UserAgent == "" {
-		config.UserAgent = "tamsin/dev"
-	}
-	redactValues := make([]string, 0, len(config.RedactValues))
-	for _, value := range config.RedactValues {
-		if value != "" {
-			redactValues = append(redactValues, value)
-		}
-	}
 
 	// The clients carry no absolute timeout. Metadata requests get a deadline
 	// from their context, and media transfers are deliberately uncapped unless
@@ -149,16 +118,14 @@ func New(config Config) (*Client, error) {
 		transferIdleTimeout: config.TransferIdleTimeout,
 		base:                base,
 		http: &http.Client{
-			Transport: transport, CheckRedirect: rejectRedirect,
+			Transport: config.Transport, CheckRedirect: auth.RejectRedirect,
 		},
 		external: &http.Client{
-			Transport: externalTransport, CheckRedirect: rejectRedirect,
+			Transport: config.ExternalTransport, CheckRedirect: auth.RejectRedirect,
 		},
 		retries:            config.Retries,
 		userAgent:          config.UserAgent,
-		baseOrigin:         origin(base),
-		redactValues:       redactValues,
-		suppressErrorBody:  config.SuppressErrorBody,
+		baseOrigin:         auth.Origin(base),
 		observability:      config.Observability,
 		deletePollInterval: 250 * time.Millisecond,
 		segmentPageLimit:   maxSegmentPages,
@@ -264,53 +231,51 @@ func (c *Client) transferContext(ctx context.Context) (context.Context, context.
 }
 
 func (c *Client) UploadFile(ctx context.Context, destination PresignedURL, filename string) (UploadReceipt, error) {
-	ctx, cancel := c.transferContext(ctx)
-	defer cancel()
-	parsed, err := url.Parse(destination.URL)
-	if err != nil {
-		return UploadReceipt{}, errors.New("TAMS upload URL is not valid")
-	}
-	client := c.external
-	if origin(parsed) == c.baseOrigin {
-		client = c.http
-	}
+	var receipt UploadReceipt
+	err := c.presignedTransfer(ctx, destination, "upload", observability.OperationObjectUpload,
+		func(ctx context.Context, client *http.Client, attempt int) (*transferRetry, error) {
+			file, err := os.Open(filename)
+			if err != nil {
+				return nil, fmt.Errorf("open upload file: %w", err)
+			}
+			info, err := file.Stat()
+			if err != nil {
+				_ = file.Close()
+				return nil, fmt.Errorf("stat upload file: %w", err)
+			}
+			hash := sha256.New()
+			watch := netio.NewIdleWatch(ctx, c.transferIdleTimeout)
+			request, err := http.NewRequestWithContext(
+				watch.Context(), http.MethodPut, destination.URL, watch.Reader(io.TeeReader(file, hash)))
+			if err != nil {
+				watch.Stop()
+				_ = file.Close()
+				return nil, fmt.Errorf("create upload request for %s", auth.RedactURL(destination.URL))
+			}
+			request.ContentLength = info.Size()
+			request.Header.Set("User-Agent", c.userAgent)
+			for name, value := range destination.Headers {
+				request.Header.Set(name, value)
+			}
+			if request.Header.Get("Content-Type") == "" {
+				request.Header.Set("Content-Type", "application/octet-stream")
+			}
+			if err := c.ensureURLAttemptCanStart(destination, "upload"); err != nil {
+				watch.Stop()
+				_ = file.Close()
+				return nil, err
+			}
 
-	for attempt := range c.retries + 1 {
-		file, openErr := os.Open(filename)
-		if openErr != nil {
-			return UploadReceipt{}, fmt.Errorf("open upload file: %w", openErr)
-		}
-		info, statErr := file.Stat()
-		if statErr != nil {
+			response, err := client.Do(request)
 			_ = file.Close()
-			return UploadReceipt{}, fmt.Errorf("stat upload file: %w", statErr)
-		}
-		hash := sha256.New()
-		watch := netio.NewIdleWatch(ctx, c.transferIdleTimeout)
-		request, requestErr := http.NewRequestWithContext(
-			watch.Context(), http.MethodPut, destination.URL, watch.Reader(io.TeeReader(file, hash)))
-		if requestErr != nil {
-			watch.Stop()
-			_ = file.Close()
-			return UploadReceipt{}, fmt.Errorf("create upload request for %s", auth.RedactURL(destination.URL))
-		}
-		request.ContentLength = info.Size()
-		request.Header.Set("User-Agent", c.userAgent)
-		for name, value := range destination.Headers {
-			request.Header.Set(name, value)
-		}
-		if request.Header.Get("Content-Type") == "" {
-			request.Header.Set("Content-Type", "application/octet-stream")
-		}
-		if err := c.ensureURLAttemptCanStart(destination, "upload"); err != nil {
-			watch.Stop()
-			_ = file.Close()
-			return UploadReceipt{}, err
-		}
-
-		response, requestErr := client.Do(request)
-		_ = file.Close()
-		if requestErr == nil {
+			if err != nil {
+				cause := transferRequestError(ctx, watch, http.MethodPut, destination.URL, err)
+				watch.Stop()
+				if attempt == c.retries || ctx.Err() != nil {
+					return nil, fmt.Errorf("upload failed after %d attempt(s): %w", attempt+1, cause)
+				}
+				return &transferRetry{cause: err}, nil
+			}
 			watch.Progress()
 			// The body is read before closing even though nothing wants it: a
 			// connection is only returned to the pool once its response has been
@@ -320,41 +285,21 @@ func (c *Client) UploadFile(ctx context.Context, destination PresignedURL, filen
 			_, _ = io.Copy(io.Discard, io.LimitReader(body, maxErrorBody))
 			_ = body.Close()
 			if response.StatusCode >= 200 && response.StatusCode < 300 {
-				storageSHA256, checksumErr := uploadStorageSHA256(response.Header)
-				if checksumErr != nil {
-					return UploadReceipt{}, fmt.Errorf("read upload checksum evidence: %w", checksumErr)
+				storageSHA256, err := uploadStorageSHA256(response.Header)
+				if err != nil {
+					return nil, fmt.Errorf("read upload checksum evidence: %w", err)
 				}
-				return UploadReceipt{
+				receipt = UploadReceipt{
 					Bytes: info.Size(), SHA256: hex.EncodeToString(hash.Sum(nil)), StorageSHA256: storageSHA256,
-				}, nil
+				}
+				return nil, nil
 			}
-		}
-		retryAfter := ""
-		if requestErr == nil {
-			retryAfter = response.Header.Get("Retry-After")
 			if !retryableStatus(response.StatusCode) || attempt == c.retries {
-				return UploadReceipt{}, &HTTPError{Method: http.MethodPut, URL: auth.RedactURL(destination.URL), StatusCode: response.StatusCode, Status: safeHTTPStatus(response.StatusCode)}
+				return nil, &HTTPError{Method: http.MethodPut, URL: auth.RedactURL(destination.URL), StatusCode: response.StatusCode, Status: auth.SafeHTTPStatus(response.StatusCode)}
 			}
-		} else {
-			cause := transferRequestError(ctx, watch, http.MethodPut, destination.URL, requestErr)
-			watch.Stop()
-			if attempt == c.retries || ctx.Err() != nil {
-				return UploadReceipt{}, fmt.Errorf("upload failed after %d attempt(s): %w", attempt+1, cause)
-			}
-		}
-		statusCode := 0
-		var retryCause error
-		if requestErr == nil {
-			statusCode = response.StatusCode
-		} else {
-			retryCause = requestErr
-		}
-		if err := c.sleepPresignedBackoff(ctx, attempt, c.retries+1, retryAfter, destination,
-			"upload", observability.OperationObjectUpload, statusCode, retryCause); err != nil {
-			return UploadReceipt{}, err
-		}
-	}
-	return UploadReceipt{}, errors.New("upload attempts exhausted")
+			return &transferRetry{retryAfter: response.Header.Get("Retry-After"), statusCode: response.StatusCode}, nil
+		})
+	return receipt, err
 }
 
 // uploadStorageSHA256 extracts only checksums whose semantics are SHA-256 over
@@ -445,86 +390,104 @@ func (c *Client) DownloadDigest(ctx context.Context, source PresignedURL, expect
 	if expectedBytes < 0 || expectedBytes == math.MaxInt64 {
 		return 0, "", errors.New("expected Object byte length must be between 0 and MaxInt64-1")
 	}
-	ctx, cancel := c.transferContext(ctx)
-	defer cancel()
-	parsed, err := url.Parse(source.URL)
-	if err != nil {
-		return 0, "", errors.New("TAMS download URL is not valid")
-	}
-	client := c.external
-	if origin(parsed) == c.baseOrigin {
-		client = c.http
-	}
-	for attempt := range c.retries + 1 {
-		watch := netio.NewIdleWatch(ctx, c.transferIdleTimeout)
-		request, requestErr := http.NewRequestWithContext(watch.Context(), http.MethodGet, source.URL, nil)
-		if requestErr != nil {
-			watch.Stop()
-			return 0, "", fmt.Errorf("create download request for %s", auth.RedactURL(source.URL))
-		}
-		request.Header.Set("User-Agent", c.userAgent)
-		for name, value := range source.Headers {
-			request.Header.Set(name, value)
-		}
-		if err := c.ensureURLAttemptCanStart(source, "download"); err != nil {
-			watch.Stop()
-			return 0, "", err
-		}
-		response, requestErr := client.Do(request)
-		if requestErr != nil {
-			cause := transferRequestError(ctx, watch, http.MethodGet, source.URL, requestErr)
-			watch.Stop()
-			if attempt == c.retries || ctx.Err() != nil {
-				return 0, "", fmt.Errorf("download failed after %d attempt(s): %w", attempt+1, cause)
+	var size int64
+	var digest string
+	err := c.presignedTransfer(ctx, source, "download", observability.OperationObjectVerification,
+		func(ctx context.Context, client *http.Client, attempt int) (*transferRetry, error) {
+			watch := netio.NewIdleWatch(ctx, c.transferIdleTimeout)
+			request, err := http.NewRequestWithContext(watch.Context(), http.MethodGet, source.URL, nil)
+			if err != nil {
+				watch.Stop()
+				return nil, fmt.Errorf("create download request for %s", auth.RedactURL(source.URL))
 			}
-			if err := c.sleepPresignedBackoff(ctx, attempt, c.retries+1, "", source,
-				"download", observability.OperationObjectVerification, 0, requestErr); err != nil {
-				return 0, "", err
+			request.Header.Set("User-Agent", c.userAgent)
+			for name, value := range source.Headers {
+				request.Header.Set(name, value)
 			}
-			continue
-		}
-		watch.Progress()
-		body := watch.Body(response.Body)
-		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			retryAfter := response.Header.Get("Retry-After")
-			_, _ = io.Copy(io.Discard, io.LimitReader(body, maxErrorBody))
-			_ = body.Close()
-			if !retryableStatus(response.StatusCode) || attempt == c.retries {
-				return 0, "", &HTTPError{Method: http.MethodGet, URL: auth.RedactURL(source.URL), StatusCode: response.StatusCode, Status: safeHTTPStatus(response.StatusCode)}
+			if err := c.ensureURLAttemptCanStart(source, "download"); err != nil {
+				watch.Stop()
+				return nil, err
 			}
-			if err := c.sleepPresignedBackoff(ctx, attempt, c.retries+1, retryAfter, source,
-				"download", observability.OperationObjectVerification, response.StatusCode, nil); err != nil {
-				return 0, "", err
+			response, err := client.Do(request)
+			if err != nil {
+				cause := transferRequestError(ctx, watch, http.MethodGet, source.URL, err)
+				watch.Stop()
+				if attempt == c.retries || ctx.Err() != nil {
+					return nil, fmt.Errorf("download failed after %d attempt(s): %w", attempt+1, cause)
+				}
+				return &transferRetry{cause: err}, nil
 			}
-			continue
-		}
-		if response.ContentLength > expectedBytes {
-			_ = body.Close()
-			return 0, "", &ObjectSizeError{
-				Expected: expectedBytes, Actual: response.ContentLength, AtLeast: true,
+			watch.Progress()
+			body := watch.Body(response.Body)
+			if response.StatusCode < 200 || response.StatusCode >= 300 {
+				_, _ = io.Copy(io.Discard, io.LimitReader(body, maxErrorBody))
+				_ = body.Close()
+				if !retryableStatus(response.StatusCode) || attempt == c.retries {
+					return nil, &HTTPError{Method: http.MethodGet, URL: auth.RedactURL(source.URL), StatusCode: response.StatusCode, Status: auth.SafeHTTPStatus(response.StatusCode)}
+				}
+				return &transferRetry{retryAfter: response.Header.Get("Retry-After"), statusCode: response.StatusCode}, nil
 			}
-		}
-		hash := sha256.New()
-		size, readErr := io.Copy(hash, io.LimitReader(body, expectedBytes+1))
-		_ = body.Close()
-		if readErr == nil {
-			if size != expectedBytes {
-				return 0, "", &ObjectSizeError{
-					Expected: expectedBytes, Actual: size, AtLeast: size > expectedBytes,
+			if response.ContentLength > expectedBytes {
+				_ = body.Close()
+				return nil, &ObjectSizeError{
+					Expected: expectedBytes, Actual: response.ContentLength, AtLeast: true,
 				}
 			}
-			return size, hex.EncodeToString(hash.Sum(nil)), nil
+			hash := sha256.New()
+			read, err := io.Copy(hash, io.LimitReader(body, expectedBytes+1))
+			_ = body.Close()
+			if err == nil {
+				if read != expectedBytes {
+					return nil, &ObjectSizeError{
+						Expected: expectedBytes, Actual: read, AtLeast: read > expectedBytes,
+					}
+				}
+				size, digest = read, hex.EncodeToString(hash.Sum(nil))
+				return nil, nil
+			}
+			if attempt == c.retries || ctx.Err() != nil {
+				return nil, fmt.Errorf("download failed after %d attempt(s), reading %s: %w",
+					attempt+1, auth.RedactURL(source.URL), err)
+			}
+			return &transferRetry{cause: err}, nil
+		})
+	return size, digest, err
+}
+
+// transferRetry is why a Media Object transfer attempt should be tried again.
+type transferRetry struct {
+	retryAfter string
+	statusCode int
+	cause      error
+}
+
+// presignedTransfer runs the attempts of one Media Object transfer. Each
+// attempt either finishes the transfer or returns a transferRetry, which is
+// honoured after a backoff that keeps within the presigned URL's start window.
+func (c *Client) presignedTransfer(ctx context.Context, presigned PresignedURL, operation string,
+	observedOperation observability.Operation,
+	attempt func(context.Context, *http.Client, int) (*transferRetry, error)) error {
+	ctx, cancel := c.transferContext(ctx)
+	defer cancel()
+	parsed, err := url.Parse(presigned.URL)
+	if err != nil {
+		return fmt.Errorf("TAMS %s URL is not valid", operation)
+	}
+	client := c.external
+	if auth.Origin(parsed) == c.baseOrigin {
+		client = c.http
+	}
+	for number := range c.retries + 1 {
+		retry, err := attempt(ctx, client, number)
+		if retry == nil {
+			return err
 		}
-		if attempt == c.retries || ctx.Err() != nil {
-			return 0, "", fmt.Errorf("download failed after %d attempt(s), reading %s: %w",
-				attempt+1, auth.RedactURL(source.URL), readErr)
-		}
-		if err := c.sleepPresignedBackoff(ctx, attempt, c.retries+1, "", source,
-			"download", observability.OperationObjectVerification, 0, readErr); err != nil {
-			return 0, "", err
+		if err := c.sleepPresignedBackoff(ctx, number, c.retries+1, retry.retryAfter, presigned,
+			operation, observedOperation, retry.statusCode, retry.cause); err != nil {
+			return err
 		}
 	}
-	return 0, "", errors.New("download attempts exhausted")
+	return fmt.Errorf("%s attempts exhausted", operation)
 }
 
 // ensureURLAttemptCanStart prevents a retry from presenting a signature after
@@ -558,14 +521,6 @@ func (c *Client) sleepPresignedBackoff(ctx context.Context, attempt, maxAttempts
 func (c *Client) doJSON(ctx context.Context, method, requestPath string, input, output any, expected ...int) error {
 	_, err := c.doJSONResponse(ctx, method, requestPath, input, output, expected...)
 	return err
-}
-
-// doJSONHeaders is doJSON that also reports the response headers, which paging
-// needs: the cursor for the next page arrives in a Link header rather than the
-// body.
-func (c *Client) doJSONHeaders(ctx context.Context, method, requestPath string, input, output any, expected ...int) (http.Header, int, error) {
-	response, err := c.doJSONResponse(ctx, method, requestPath, input, output, expected...)
-	return response.Header, response.BodyBytes, err
 }
 
 type jsonResponse struct {
@@ -647,12 +602,9 @@ func (c *Client) doJSONResponse(ctx context.Context, method, requestPath string,
 			result.AmbiguousMutation = ambiguousDeleteResponse(method, response.StatusCode, success)
 			return result, fmt.Errorf("read %s response: %w", method, readErr)
 		}
-		if len(responseBody) > int(limit) {
-			if success {
-				result.AmbiguousMutation = method == http.MethodDelete
-				return result, fmt.Errorf("%s response exceeds %d bytes", method, limit)
-			}
-			responseBody = append(responseBody[:maxErrorBody], []byte("\n[response truncated]")...)
+		if success && len(responseBody) > int(limit) {
+			result.AmbiguousMutation = method == http.MethodDelete
+			return result, fmt.Errorf("%s response exceeds %d bytes", method, limit)
 		}
 		if success {
 			if output == nil || len(bytes.TrimSpace(responseBody)) == 0 {
@@ -689,12 +641,8 @@ func (c *Client) doJSONResponse(ctx context.Context, method, requestPath string,
 			}
 			continue
 		}
-		errorBody := c.redact(string(responseBody))
-		if c.suppressErrorBody {
-			errorBody = ""
-		}
 		result.AmbiguousMutation = method == http.MethodDelete && retryableStatus(response.StatusCode)
-		return result, &HTTPError{Method: method, URL: auth.RedactURL(requestURL.String()), StatusCode: response.StatusCode, Status: safeHTTPStatus(response.StatusCode), Body: errorBody}
+		return result, &HTTPError{Method: method, URL: auth.RedactURL(requestURL.String()), StatusCode: response.StatusCode, Status: auth.SafeHTTPStatus(response.StatusCode)}
 	}
 	return jsonResponse{}, fmt.Errorf("%s request attempts exhausted", method)
 }
@@ -734,21 +682,6 @@ func escapeSegment(value string) string {
 	return url.PathEscape(value)
 }
 
-func origin(value *url.URL) string {
-	scheme := strings.ToLower(value.Scheme)
-	host := strings.ToLower(value.Hostname())
-	port := value.Port()
-	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
-		port = ""
-	}
-	if port != "" {
-		host = net.JoinHostPort(host, port)
-	} else if strings.Contains(host, ":") {
-		host = "[" + host + "]"
-	}
-	return scheme + "://" + host
-}
-
 func retryableMethod(method string) bool {
 	switch method {
 	case http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete:
@@ -765,13 +698,6 @@ func retryableStatus(status int) bool {
 	default:
 		return false
 	}
-}
-
-func safeHTTPStatus(code int) string {
-	if text := http.StatusText(code); text != "" {
-		return fmt.Sprintf("%d %s", code, text)
-	}
-	return strconv.Itoa(code)
 }
 
 func containsStatus(expected []int, actual int) bool {
@@ -856,22 +782,4 @@ func transferRequestError(ctx context.Context, watch *netio.IdleWatch, method, r
 	// contain signed URLs or credentials. Parent cancellation and the optional
 	// absolute transfer deadline are still preserved through ctx.
 	return requestError(ctx, method, rawURL, err)
-}
-func (c *Client) redact(value string) string {
-	for _, secret := range c.redactValues {
-		value = strings.ReplaceAll(value, secret, "REDACTED")
-	}
-	return value
-}
-
-func (c *Client) untrustedDetail(value string) string {
-	value = c.redact(value)
-	if len(value) <= maxErrorBody {
-		return value
-	}
-	return strings.ToValidUTF8(value[:maxErrorBody], "�") + "\n[detail truncated]"
-}
-
-func rejectRedirect(*http.Request, []*http.Request) error {
-	return http.ErrUseLastResponse
 }

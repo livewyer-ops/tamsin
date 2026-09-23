@@ -2,12 +2,10 @@ package auth
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -315,27 +313,6 @@ func TestExtractAndRedactURLToken(t *testing.T) {
 	redacted := RedactURL("https://user:password@example.test/object?X-Amz-Signature=secret&access_token=token")
 	if strings.Contains(redacted, "password") || strings.Contains(redacted, "=secret") || strings.Contains(redacted, "=token") {
 		t.Fatalf("RedactURL leaked a credential: %s", redacted)
-	}
-}
-
-func TestConfiguredSecretRedactionIncludesWireRepresentations(t *testing.T) {
-	t.Parallel()
-	config := Config{
-		Username: "basic-user", Password: "basic secret/with-symbols",
-		URLToken: "query secret/with-symbols",
-	}
-	values := strings.Join(config.RedactionValues(), "\n")
-	basicPayload := base64.StdEncoding.EncodeToString([]byte(config.Username + ":" + config.Password))
-	for _, expected := range []string{
-		config.Password,
-		basicPayload,
-		url.QueryEscape(config.Password),
-		config.URLToken,
-		url.QueryEscape(config.URLToken),
-	} {
-		if !strings.Contains(values, expected) {
-			t.Errorf("RedactionValues() omitted %q", expected)
-		}
 	}
 }
 

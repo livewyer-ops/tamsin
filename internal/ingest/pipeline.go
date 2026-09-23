@@ -1034,10 +1034,8 @@ func (p *Pipeline) probeInput(ctx context.Context, path string) (media.Probe, er
 	// particular describe their output explicitly rather than spending CPU to
 	// perfect metadata that belongs only to the input.
 	if _, overridden := p.config.FlowMetadata["essence_parameters"]; !overridden {
-		if presentation, ok := p.prober.(media.PresentationProber); ok {
-			if err := presentation.ProbePresentation(ctx, path, &probe); err != nil {
-				return media.Probe{}, err
-			}
+		if err := p.prober.ProbePresentation(ctx, path, &probe); err != nil {
+			return media.Probe{}, err
 		}
 	}
 	return probe, nil

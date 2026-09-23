@@ -621,74 +621,71 @@ func unsupportedContainer() containerDescription {
 	return containerDescription{mediaType: fallbackContainerMIME}
 }
 
+// sourceContainers maps FFprobe demuxer names outside the Matroska and ISO
+// BMFF families to the container TAMSin declares for a whole Object and the
+// FFmpeg muxer and suffix that remux it into Segments. The first row naming
+// one of the input's demuxers wins. audioType is set only where the format
+// registers separate video and audio types; mediaType is otherwise the
+// file-level type. A row without a muxer is described but not remuxed.
+var sourceContainers = []struct {
+	names                []string
+	mediaType, audioType string
+	muxer, extension     string
+}{
+	// MPEG-TS keeps this file-level type even when it carries audio only.
+	{names: []string{"mpegts"}, mediaType: "video/mp2t", muxer: "mpegts", extension: ".ts"},
+	{names: []string{"mxf"}, mediaType: "application/mxf", muxer: "mxf", extension: ".mxf"},
+	{names: []string{"mpeg"}, mediaType: "video/mpeg", muxer: "mpeg", extension: ".mpg"},
+	{names: []string{"mpegvideo"}, mediaType: "video/mpeg"},
+	{names: []string{"avi"}, mediaType: "video/x-msvideo", muxer: "avi", extension: ".avi"},
+	{names: []string{"asf"}, mediaType: "video/x-ms-asf", muxer: "asf", extension: ".asf"},
+	{names: []string{"wav"}, mediaType: "audio/wav", muxer: "wav", extension: ".wav"},
+	{names: []string{"aiff"}, mediaType: "audio/aiff", muxer: "aiff", extension: ".aiff"},
+	{names: []string{"flac"}, mediaType: "audio/flac", muxer: "flac", extension: ".flac"},
+	{names: []string{"mp3"}, mediaType: "audio/mpeg", muxer: "mp3", extension: ".mp3"},
+	{names: []string{"aac"}, mediaType: "audio/aac", muxer: "adts", extension: ".aac"},
+	{names: []string{"ac3"}, mediaType: "audio/ac3", muxer: "ac3", extension: ".ac3"},
+	{names: []string{"eac3"}, mediaType: "audio/eac3", muxer: "eac3", extension: ".eac3"},
+	{names: []string{"ogg"}, mediaType: "video/ogg", audioType: "audio/ogg", muxer: "ogg", extension: ".ogg"},
+	{names: []string{"jpeg_pipe", "mjpeg"}, mediaType: "image/jpeg", muxer: "image2", extension: ".jpg"},
+	{names: []string{"j2k_pipe", "jpeg2000"}, mediaType: "image/jp2", muxer: "image2", extension: ".jp2"},
+	{names: []string{"png_pipe"}, mediaType: "image/png", muxer: "image2", extension: ".png"},
+	{names: []string{"gif"}, mediaType: "image/gif", muxer: "image2", extension: ".gif"},
+	{names: []string{"webp_pipe"}, mediaType: "image/webp", muxer: "image2", extension: ".webp"},
+}
+
+// imageSequenceExtensions are the still-image types an image2 input may be
+// remuxed as, keyed by the content-derived media type.
+var imageSequenceExtensions = map[string]string{
+	"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp",
+}
+
 func describeContainer(format Format, streamType, detected string) containerDescription {
 	names := ffprobeFormatNames(format.Name)
-
-	// FFprobe uses the same demuxer name for both formats. Only content-derived
-	// WebM evidence identifies the constrained subtype of that family.
-	if names["webm"] && (!names["matroska"] || normalizeMIME(detected) == "video/webm" || normalizeMIME(detected) == "audio/webm") {
+	switch {
+	case isWebM(names, detected):
 		return essenceContainer(streamType, "video/webm", "audio/webm")
-	}
-	if names["matroska"] {
+	case names["matroska"]:
 		// Use the media types registered in RFC 9559.
 		return essenceContainer(streamType, "video/matroska", "audio/matroska")
-	}
-	if names["mov"] || names["mp4"] || names["m4a"] || names["3gp"] || names["3g2"] || names["mj2"] {
+	case isISOBMFF(names):
 		return isoBMFFContainer(format.Tags, streamType, detected)
 	}
-
-	switch {
-	case names["mpegts"]:
-		// MPEG-TS keeps this file-level type even when it carries audio only.
-		return supportedContainer("video/mp2t")
-	case names["mxf"]:
-		return supportedContainer("application/mxf")
-	case names["mpeg"] || names["mpegvideo"]:
-		return supportedContainer("video/mpeg")
-	case names["avi"]:
-		return supportedContainer("video/x-msvideo")
-	case names["asf"]:
-		return supportedContainer("video/x-ms-asf")
-	case names["wav"]:
-		return supportedContainer("audio/wav")
-	case names["aiff"]:
-		return supportedContainer("audio/aiff")
-	case names["flac"]:
-		return supportedContainer("audio/flac")
-	case names["mp3"]:
-		return supportedContainer("audio/mpeg")
-	case names["aac"]:
-		return supportedContainer("audio/aac")
-	case names["ac3"]:
-		return supportedContainer("audio/ac3")
-	case names["eac3"]:
-		return supportedContainer("audio/eac3")
-	case names["ogg"]:
-		return essenceContainer(streamType, "video/ogg", "audio/ogg")
-	case names["jpeg_pipe"] || names["mjpeg"]:
-		return supportedContainer("image/jpeg")
-	case names["j2k_pipe"] || names["jpeg2000"]:
-		return supportedContainer("image/jp2")
-	case names["png_pipe"]:
-		return supportedContainer("image/png")
-	case names["gif"]:
-		return supportedContainer("image/gif")
-	case names["webp_pipe"]:
-		return supportedContainer("image/webp")
-	case names["image2"] || names["image2pipe"]:
+	for _, container := range sourceContainers {
+		if !namesAny(names, container.names) {
+			continue
+		}
+		if container.audioType != "" {
+			return essenceContainer(streamType, container.mediaType, container.audioType)
+		}
+		return supportedContainer(container.mediaType)
+	}
+	if names["image2"] || names["image2pipe"] {
 		if mediaType := normalizeMIME(detected); strings.HasPrefix(mediaType, "image/") {
 			return supportedContainer(mediaType)
 		}
 	}
 	return unsupportedContainer()
-}
-
-func ffprobeFormatNames(value string) map[string]bool {
-	names := make(map[string]bool)
-	for _, name := range strings.Split(strings.ToLower(value), ",") {
-		names[strings.TrimSpace(name)] = true
-	}
-	return names
 }
 
 // SourceSegmentContainer is intentionally narrower than describeContainer. A
@@ -697,13 +694,12 @@ func ffprobeFormatNames(value string) map[string]bool {
 // that unsupported treatment fail before TAMS is mutated.
 func SourceSegmentContainer(format Format, detected string) SegmentContainer {
 	names := ffprobeFormatNames(format.Name)
-	if names["webm"] || names["matroska"] {
-		if describeContainer(format, "video", detected).mediaType == "video/webm" {
-			return SegmentContainer{Muxer: "webm", Extension: ".webm"}
-		}
+	switch {
+	case isWebM(names, detected):
+		return SegmentContainer{Muxer: "webm", Extension: ".webm"}
+	case names["matroska"]:
 		return SegmentContainer{Muxer: "matroska", Extension: ".mkv"}
-	}
-	if names["mov"] || names["mp4"] || names["m4a"] || names["3gp"] || names["3g2"] || names["mj2"] {
+	case isISOBMFF(names):
 		switch isoBMFFContainer(format.Tags, "video", detected).mediaType {
 		case "video/quicktime":
 			return SegmentContainer{Muxer: "mov", Extension: ".mov"}
@@ -716,57 +712,46 @@ func SourceSegmentContainer(format Format, detected string) SegmentContainer {
 		}
 		return SegmentContainer{}
 	}
-
-	switch {
-	case names["mpegts"]:
-		return SegmentContainer{Muxer: "mpegts", Extension: ".ts"}
-	case names["mxf"]:
-		return SegmentContainer{Muxer: "mxf", Extension: ".mxf"}
-	case names["mpeg"]:
-		return SegmentContainer{Muxer: "mpeg", Extension: ".mpg"}
-	case names["avi"]:
-		return SegmentContainer{Muxer: "avi", Extension: ".avi"}
-	case names["asf"]:
-		return SegmentContainer{Muxer: "asf", Extension: ".asf"}
-	case names["wav"]:
-		return SegmentContainer{Muxer: "wav", Extension: ".wav"}
-	case names["aiff"]:
-		return SegmentContainer{Muxer: "aiff", Extension: ".aiff"}
-	case names["flac"]:
-		return SegmentContainer{Muxer: "flac", Extension: ".flac"}
-	case names["mp3"]:
-		return SegmentContainer{Muxer: "mp3", Extension: ".mp3"}
-	case names["aac"]:
-		return SegmentContainer{Muxer: "adts", Extension: ".aac"}
-	case names["ac3"]:
-		return SegmentContainer{Muxer: "ac3", Extension: ".ac3"}
-	case names["eac3"]:
-		return SegmentContainer{Muxer: "eac3", Extension: ".eac3"}
-	case names["ogg"]:
-		return SegmentContainer{Muxer: "ogg", Extension: ".ogg"}
-	case names["jpeg_pipe"] || names["mjpeg"]:
-		return SegmentContainer{Muxer: "image2", Extension: ".jpg"}
-	case names["j2k_pipe"] || names["jpeg2000"]:
-		return SegmentContainer{Muxer: "image2", Extension: ".jp2"}
-	case names["png_pipe"]:
-		return SegmentContainer{Muxer: "image2", Extension: ".png"}
-	case names["gif"]:
-		return SegmentContainer{Muxer: "image2", Extension: ".gif"}
-	case names["webp_pipe"]:
-		return SegmentContainer{Muxer: "image2", Extension: ".webp"}
-	case names["image2"] || names["image2pipe"]:
-		switch normalizeMIME(detected) {
-		case "image/jpeg":
-			return SegmentContainer{Muxer: "image2", Extension: ".jpg"}
-		case "image/png":
-			return SegmentContainer{Muxer: "image2", Extension: ".png"}
-		case "image/gif":
-			return SegmentContainer{Muxer: "image2", Extension: ".gif"}
-		case "image/webp":
-			return SegmentContainer{Muxer: "image2", Extension: ".webp"}
+	for _, container := range sourceContainers {
+		if container.muxer != "" && namesAny(names, container.names) {
+			return SegmentContainer{Muxer: container.muxer, Extension: container.extension}
+		}
+	}
+	if names["image2"] || names["image2pipe"] {
+		if extension := imageSequenceExtensions[normalizeMIME(detected)]; extension != "" {
+			return SegmentContainer{Muxer: "image2", Extension: extension}
 		}
 	}
 	return SegmentContainer{}
+}
+
+// isWebM reports the constrained WebM subtype of the Matroska family. FFprobe
+// uses the same demuxer name for both formats, so only content-derived WebM
+// evidence identifies it when both names are present.
+func isWebM(names map[string]bool, detected string) bool {
+	detected = normalizeMIME(detected)
+	return names["webm"] && (!names["matroska"] || detected == "video/webm" || detected == "audio/webm")
+}
+
+func isISOBMFF(names map[string]bool) bool {
+	return namesAny(names, []string{"mov", "mp4", "m4a", "3gp", "3g2", "mj2"})
+}
+
+func namesAny(names map[string]bool, candidates []string) bool {
+	for _, candidate := range candidates {
+		if names[candidate] {
+			return true
+		}
+	}
+	return false
+}
+
+func ffprobeFormatNames(value string) map[string]bool {
+	names := make(map[string]bool)
+	for _, name := range strings.Split(strings.ToLower(value), ",") {
+		names[strings.TrimSpace(name)] = true
+	}
+	return names
 }
 
 func essenceContainer(streamType, videoType, audioType string) containerDescription {

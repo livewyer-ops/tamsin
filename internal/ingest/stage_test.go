@@ -197,7 +197,7 @@ func TestStagingResumesTwiceAgainstARealServer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resolver := source.New(source.Config{})
+	resolver := newResolver(source.Config{})
 	items, err := resolver.Resolve(context.Background(), []string{server.URL + "/programme.ts"})
 	if err != nil {
 		t.Fatal(err)

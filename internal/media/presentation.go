@@ -20,8 +20,8 @@ type CadenceEvidence uint8
 
 const (
 	// CadenceUnexamined is retained for callers that supply Probe values
-	// directly. The production pipeline always asks a PresentationProber to
-	// inspect video before building its Flow.
+	// directly. The production pipeline always asks its Prober to inspect
+	// video before building its Flow.
 	CadenceUnexamined CadenceEvidence = iota
 	// CadenceUnknown means the scan ran but the input did not expose enough
 	// usable presentation timestamps to make either claim.
@@ -115,27 +115,20 @@ func (p FFprobe) probePresentationMode(ctx context.Context, filename string, pro
 		"-of", "compact=p=0:nk=0",
 		filename,
 	)
-	command := toolCommand(ctx, executable, arguments...)
-	stdout, err := command.StdoutPipe()
+	step, stderr, err := streamTool(ctx, executable, arguments, func(stdout io.Reader) error {
+		return scanPresentationTimestamps(stdout, states, timestampField)
+	})
 	if err != nil {
-		return false, fmt.Errorf("open presentation probe output: %w", err)
-	}
-	var stderr limitedBuffer
-	command.Stderr = &stderr
-	if err := command.Start(); err != nil {
-		return false, fmt.Errorf("start presentation probe %q: %w", filename, err)
-	}
-
-	scanErr := scanPresentationTimestamps(stdout, states, timestampField)
-	if scanErr != nil && command.Process != nil {
-		_ = command.Process.Kill()
-	}
-	waitErr := command.Wait()
-	if scanErr != nil {
-		return false, fmt.Errorf("read presentation probe %q: %w", filename, scanErr)
-	}
-	if waitErr != nil {
-		return false, fmt.Errorf("probe presentation %q: %w: %s", filename, waitErr, strings.TrimSpace(string(stderr.Bytes())))
+		switch step {
+		case toolStepPipe:
+			return false, fmt.Errorf("open presentation probe output: %w", err)
+		case toolStepStart:
+			return false, fmt.Errorf("start presentation probe %q: %w", filename, err)
+		case toolStepScan:
+			return false, fmt.Errorf("read presentation probe %q: %w", filename, err)
+		default:
+			return false, fmt.Errorf("probe presentation %q: %w: %s", filename, err, strings.TrimSpace(string(stderr)))
+		}
 	}
 
 	complete := true

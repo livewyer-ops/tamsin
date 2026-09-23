@@ -68,7 +68,7 @@ func TestUploadRequestChecksumDoesNotSuppressReadback(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := New(Config{
-		Endpoint: "https://tams.example.test", ExternalTransport: server.Client().Transport,
+		Endpoint: "https://tams.example.test", ExternalTransport: server.Client().Transport, TransferIdleTimeout: time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +110,7 @@ func TestDownloadDigestStopsOneBytePastExpectedSize(t *testing.T) {
 		}, nil
 	})
 	client, err := New(Config{
-		Endpoint: "https://tams.example.test", ExternalTransport: transport, Retries: 3,
+		Endpoint: "https://tams.example.test", ExternalTransport: transport, TransferIdleTimeout: time.Minute, Retries: 3,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func TestDownloadDigestRejectsShortAndInvalidExpectedSizes(t *testing.T) {
 		_, _ = io.WriteString(writer, "short")
 	}))
 	defer server.Close()
-	client, err := New(Config{Endpoint: "https://tams.example.test"})
+	client, err := New(Config{Endpoint: "https://tams.example.test", TransferIdleTimeout: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +341,7 @@ func TestClientIngestOperations(t *testing.T) {
 	baseURL = server.URL
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL + "/v8.1", Timeout: 5 * time.Second, Retries: 1})
+	client, err := New(Config{Endpoint: server.URL + "/v8.1", Timeout: 5 * time.Second, TransferIdleTimeout: time.Minute, Retries: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,6 +448,7 @@ func TestClientRetriesObjectDownload(t *testing.T) {
 	defer server.Close()
 	client, err := New(Config{
 		Endpoint: "https://tams.example.test", Retries: 1, Timeout: time.Second, Observability: run,
+		TransferIdleTimeout: time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -483,6 +484,7 @@ func TestRetryDiagnosticDoesNotExposePresignedRequest(t *testing.T) {
 	run := observability.New("b8572ea7-4b41-48fe-81cc-30e562607a2f", logger)
 	client, err := New(Config{
 		Endpoint: "https://tams.example.test", ExternalTransport: transport, Retries: 1, Observability: run,
+		TransferIdleTimeout: time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -535,7 +537,7 @@ func TestPresignedTransfersDoNotRetryAfterTheirStartDeadline(t *testing.T) {
 			})
 			client, err := New(Config{
 				Endpoint: "https://tams.example.test", Transport: transport,
-				ExternalTransport: transport, Retries: 1, Observability: run,
+				ExternalTransport: transport, TransferIdleTimeout: time.Minute, Retries: 1, Observability: run,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -591,7 +593,7 @@ func TestPresignedTransfersStillRetryWithinTheirStartDeadline(t *testing.T) {
 			})
 			client, err := New(Config{
 				Endpoint: "https://tams.example.test", Transport: transport,
-				ExternalTransport: transport, Retries: 1,
+				ExternalTransport: transport, TransferIdleTimeout: time.Minute, Retries: 1,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -632,7 +634,7 @@ func TestPresignedTransferMayFinishAfterItsStartDeadline(t *testing.T) {
 		}, nil
 	})
 	client, err := New(Config{
-		Endpoint: "https://tams.example.test", ExternalTransport: transport,
+		Endpoint: "https://tams.example.test", ExternalTransport: transport, TransferIdleTimeout: time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -713,31 +715,13 @@ func TestClientNetworkErrorsDoNotLeakTransportCredentials(t *testing.T) {
 		t.Fatalf("network error leaked credentials: %v", err)
 	}
 }
-func TestClientResponseErrorsRedactConfiguredCredentials(t *testing.T) {
-	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		http.Error(writer, "credential top-secret was rejected", http.StatusUnauthorized)
-	}))
-	defer server.Close()
-	client, err := New(Config{Endpoint: server.URL, RedactValues: []string{"top-secret"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = client.Service(context.Background())
-	if err == nil {
-		t.Fatal("Service() unexpectedly succeeded")
-	}
-	if strings.Contains(err.Error(), "top-secret") || !strings.Contains(err.Error(), "REDACTED") {
-		t.Fatalf("response error was not redacted: %v", err)
-	}
-}
-func TestClientCanSuppressOAuthResponseBodies(t *testing.T) {
+func TestClientWithholdsResponseBodies(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		http.Error(writer, "dynamic-access-token", http.StatusUnauthorized)
 	}))
 	defer server.Close()
-	client, err := New(Config{Endpoint: server.URL, SuppressErrorBody: true})
+	client, err := New(Config{Endpoint: server.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -791,7 +775,7 @@ func TestCrossOriginStorageDoesNotReceiveTAMSCredentials(t *testing.T) {
 		clone.Header.Set("Authorization", "Bearer TAMS-secret")
 		return http.DefaultTransport.RoundTrip(clone)
 	})
-	client, err := New(Config{Endpoint: apiServer.URL, Transport: authenticated})
+	client, err := New(Config{Endpoint: apiServer.URL, Transport: authenticated, TransferIdleTimeout: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1077,7 +1061,7 @@ func TestUploadReusesConnections(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL, Timeout: 5 * time.Second, Retries: 1})
+	client, err := New(Config{Endpoint: server.URL, Timeout: 5 * time.Second, TransferIdleTimeout: time.Minute, Retries: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

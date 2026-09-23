@@ -625,7 +625,7 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 		inputHeaders,
 	)
 	awsHTTPClient := &http.Client{
-		Transport: transport, Timeout: a.v.GetDuration("http.transfer_timeout"), CheckRedirect: rejectRedirect,
+		Transport: transport, Timeout: a.v.GetDuration("http.transfer_timeout"), CheckRedirect: auth.RejectRedirect,
 	}
 	resolver := source.New(source.Config{
 		HTTPClient: inputHTTPClient, HTTPHeaders: inputHeaders, Stdin: a.stdin, StdinName: options.stdinName,
@@ -839,9 +839,7 @@ func (a *application) tamsClient(ctx context.Context, endpoint string, base *htt
 		Endpoint: cleanEndpoint, Transport: transport, ExternalTransport: base,
 		Timeout: a.v.GetDuration("http.timeout"), TransferTimeout: a.v.GetDuration("http.transfer_timeout"), TransferIdleTimeout: a.v.GetDuration("http.transfer_idle_timeout"),
 		Retries: a.v.GetInt("http.retries"), UserAgent: "tamsin/" + version.Version,
-		RedactValues:      config.RedactionValues(),
-		SuppressErrorBody: true,
-		Observability:     run,
+		Observability: run,
 	})
 	if err != nil {
 		return nil, "", err
@@ -1061,8 +1059,4 @@ func boolOption(flags *pflag.FlagSet, name string, flagValue, configured bool) b
 		return flagValue
 	}
 	return configured
-}
-
-func rejectRedirect(*http.Request, []*http.Request) error {
-	return http.ErrUseLastResponse
 }

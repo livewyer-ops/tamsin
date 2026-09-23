@@ -233,10 +233,10 @@ func TestDeleteSegmentsRejectsUntrustworthyAcceptedRequests(t *testing.T) {
 		{name: "cross-origin location", location: "https://attacker.example/request", body: `{}`, want: "not the configured endpoint"},
 		{name: "outside API path", location: "/outside/request", body: `{}`, want: "outside the configured API path"},
 		{name: "missing request ID", location: "/v8.1/flow-delete-requests/request", body: `{"flow_id":"` + flowID + `","timerange_to_delete":"[0:0_1:0)","delete_flow":false,"status":"done"}`, want: "has no ID"},
-		{name: "wrong flow", location: "/v8.1/flow-delete-requests/request", body: `{"id":"request","flow_id":"wrong","timerange_to_delete":"[0:0_1:0)","delete_flow":false,"status":"done"}`, want: "targets flow"},
-		{name: "wrong timerange", location: "/v8.1/flow-delete-requests/request", body: `{"id":"request","flow_id":"` + flowID + `","timerange_to_delete":"[1:0_2:0)","delete_flow":false,"status":"done"}`, want: "targets timerange"},
+		{name: "wrong flow", location: "/v8.1/flow-delete-requests/request", body: `{"id":"request","flow_id":"wrong","timerange_to_delete":"[0:0_1:0)","delete_flow":false,"status":"done"}`, want: "targets an unexpected flow"},
+		{name: "wrong timerange", location: "/v8.1/flow-delete-requests/request", body: `{"id":"request","flow_id":"` + flowID + `","timerange_to_delete":"[1:0_2:0)","delete_flow":false,"status":"done"}`, want: "targets an unexpected timerange"},
 		{name: "deletes flow", location: "/v8.1/flow-delete-requests/request", body: `{"id":"request","flow_id":"` + flowID + `","timerange_to_delete":"[0:0_1:0)","delete_flow":true,"status":"done"}`, want: "unexpectedly deletes"},
-		{name: "error status", location: "/v8.1/flow-delete-requests/request", body: `{"id":"request","flow_id":"` + flowID + `","timerange_to_delete":"[0:0_1:0)","delete_flow":false,"status":"error","error":{"summary":"storage failed"}}`, want: "storage failed"},
+		{name: "error status", location: "/v8.1/flow-delete-requests/request", body: `{"id":"request","flow_id":"` + flowID + `","timerange_to_delete":"[0:0_1:0)","delete_flow":false,"status":"error","error":{"summary":"storage failed"}}`, want: "request failed"},
 		{name: "unknown status", location: "/v8.1/flow-delete-requests/request", body: `{"id":"request","flow_id":"` + flowID + `","timerange_to_delete":"[0:0_1:0)","delete_flow":false,"status":"mystery"}`, want: "unknown status"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -273,7 +273,6 @@ func TestDeleteSegmentsRejectsUntrustworthyAcceptedRequests(t *testing.T) {
 func TestDeletionRequestSuppressesUntrustedDetails(t *testing.T) {
 	t.Parallel()
 	const secret = "peer-secret"
-	client := &Client{suppressErrorBody: true}
 	requests := []DeletionRequest{
 		{ID: "request", FlowID: secret, TimerangeToDelete: "[0:0_1:0)", Status: "done"},
 		{ID: "request", FlowID: "flow", TimerangeToDelete: secret, Status: "done"},
@@ -281,31 +280,13 @@ func TestDeletionRequestSuppressesUntrustedDetails(t *testing.T) {
 		{ID: "request", FlowID: "flow", TimerangeToDelete: "[0:0_1:0)", Status: "error", Error: json.RawMessage(`{"detail":"peer-secret"}`)},
 	}
 	for _, request := range requests {
-		_, err := client.validateDeletionRequest(request, "flow", "[0:0_1:0)")
+		_, err := validateDeletionRequest(request, "flow", "[0:0_1:0)")
 		if err == nil {
 			t.Fatalf("validateDeletionRequest(%#v) unexpectedly succeeded", request)
 		}
 		if strings.Contains(err.Error(), secret) {
-			t.Fatalf("suppressed deletion error leaked peer detail: %v", err)
+			t.Fatalf("deletion error leaked peer detail: %v", err)
 		}
-	}
-}
-
-func TestDeletionRequestRedactsAndBoundsUnsuppressedDetail(t *testing.T) {
-	t.Parallel()
-	const secret = "peer-secret"
-	client := &Client{redactValues: []string{secret}}
-	detail := `{"detail":"` + secret + strings.Repeat("x", maxErrorBody) + `"}`
-	_, err := client.validateDeletionRequest(DeletionRequest{
-		ID: "request", FlowID: "flow", TimerangeToDelete: "[0:0_1:0)",
-		Status: "error", Error: json.RawMessage(detail),
-	}, "flow", "[0:0_1:0)")
-	if err == nil {
-		t.Fatal("validateDeletionRequest() unexpectedly succeeded")
-	}
-	if strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "REDACTED") ||
-		!strings.Contains(err.Error(), "[detail truncated]") || len(err.Error()) > maxErrorBody+256 {
-		t.Fatalf("unsafe or unbounded deletion detail: length=%d, error=%v", len(err.Error()), err)
 	}
 }
 

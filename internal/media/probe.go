@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -95,8 +96,15 @@ type Probe struct {
 	Format  Format   `json:"format"`
 }
 
+// Prober measures media. Probe reads container and stream headers.
+// ProbeObject measures the presentation timeline of emitted media, rather than
+// treating container header durations or segment-list DTS as sample bounds.
+// ProbePresentation adds the cadence evidence that needs a walk of the media
+// timeline.
 type Prober interface {
 	Probe(context.Context, string) (Probe, error)
+	ProbeObject(context.Context, string) (Probe, error)
+	ProbePresentation(context.Context, string, *Probe) error
 	Version(context.Context) (string, error)
 }
 
@@ -168,15 +176,6 @@ func ValidateToolVersion(report, tool string) error {
 	return nil
 }
 
-// PresentationProber augments a container/stream probe with evidence that
-// requires walking the media timeline. Keeping it separate from Prober avoids
-// decoding every generated Segment when the ingest pipeline only needs its
-// start and duration; presentation metadata is established once, from the
-// staged input.
-type PresentationProber interface {
-	ProbePresentation(context.Context, string, *Probe) error
-}
-
 func runTool(ctx context.Context, executable string, arguments ...string) ([]byte, []byte, error) {
 	if executable == "" {
 		return nil, nil, errors.New("tool executable is empty")
@@ -187,6 +186,42 @@ func runTool(ctx context.Context, executable string, arguments ...string) ([]byt
 	command.Stderr = &stderr
 	err := command.Run()
 	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+// toolStep names the part of a streamed tool run that failed.
+type toolStep uint8
+
+const (
+	toolStepPipe toolStep = iota
+	toolStepStart
+	toolStepScan
+	toolStepWait
+)
+
+// streamTool passes a tool's stdout to scan while the tool runs, so a long
+// packet or frame listing is never held in memory. A scan failure kills the
+// tool. The returned step lets each caller keep its own diagnostics.
+func streamTool(ctx context.Context, executable string, arguments []string,
+	scan func(io.Reader) error) (toolStep, []byte, error) {
+	command := toolCommand(ctx, executable, arguments...)
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return toolStepPipe, nil, err
+	}
+	var stderr limitedBuffer
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		return toolStepStart, nil, err
+	}
+	scanErr := scan(stdout)
+	if scanErr != nil {
+		_ = command.Process.Kill()
+	}
+	waitErr := command.Wait()
+	if scanErr != nil {
+		return toolStepScan, nil, scanErr
+	}
+	return toolStepWait, stderr.Bytes(), waitErr
 }
 
 // toolCommand gives every FFmpeg-family process the same cancellation

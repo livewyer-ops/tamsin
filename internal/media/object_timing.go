@@ -11,12 +11,6 @@ import (
 	"strings"
 )
 
-// ObjectProber measures the presentation timeline of emitted media, rather
-// than treating container header durations or segment-list DTS as sample bounds.
-type ObjectProber interface {
-	ProbeObject(context.Context, string) (Probe, error)
-}
-
 func (p FFprobe) ProbeObject(ctx context.Context, filename string) (Probe, error) {
 	probe, err := p.Probe(ctx, filename)
 	if err != nil {
@@ -30,24 +24,13 @@ func (p FFprobe) ProbeObject(ctx context.Context, filename string) (Probe, error
 	arguments = append(arguments, "-show_packets", "-show_entries",
 		"packet=stream_index,pts,duration,flags:packet_side_data=skip_samples,discard_padding",
 		"-of", "json", filename)
-	command := toolCommand(ctx, executable, arguments...)
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		return Probe{}, err
+	step, stderr, err := streamTool(ctx, executable, arguments, func(stdout io.Reader) error {
+		return measureObjectPackets(stdout, &probe)
+	})
+	if step == toolStepWait && err != nil {
+		err = fmt.Errorf("probe object timing: %w: %s", err, strings.TrimSpace(string(stderr)))
 	}
-	var stderr limitedBuffer
-	command.Stderr = &stderr
-	if err := command.Start(); err != nil {
-		return Probe{}, err
-	}
-	scanErr := measureObjectPackets(stdout, &probe)
-	if scanErr != nil {
-		_ = command.Process.Kill()
-	}
-	if err := command.Wait(); scanErr == nil && err != nil {
-		scanErr = fmt.Errorf("probe object timing: %w: %s", err, strings.TrimSpace(string(stderr.Bytes())))
-	}
-	return probe, scanErr
+	return probe, err
 }
 
 type objectPacket struct {

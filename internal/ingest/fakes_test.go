@@ -38,6 +38,10 @@ func (*presentationCountingProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1", nil
 }
 
+func (p *presentationCountingProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
 func (p *presentationCountingProber) ProbePresentation(context.Context, string, *media.Probe) error {
 	p.presentations.Add(1)
 	return nil
@@ -77,6 +81,14 @@ func (muxedProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 test", nil
 }
 
+func (p muxedProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (muxedProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
+}
+
 type multiAudioProber struct{}
 
 func (multiAudioProber) Probe(context.Context, string) (media.Probe, error) {
@@ -92,6 +104,14 @@ func (multiAudioProber) Probe(context.Context, string) (media.Probe, error) {
 
 func (multiAudioProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 test", nil
+}
+
+func (p multiAudioProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (multiAudioProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
 }
 
 type fourEssenceProber struct{}
@@ -112,8 +132,24 @@ func (fourEssenceProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 test", nil
 }
 
+func (p fourEssenceProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (fourEssenceProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
+}
+
 func (fakeProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 test", nil
+}
+
+func (p fakeProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (fakeProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
 }
 
 type oldVersionProber struct{ fakeProber }
@@ -135,6 +171,14 @@ func (unknownContainerProber) Probe(context.Context, string) (media.Probe, error
 
 func (unknownContainerProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 test", nil
+}
+
+func (p unknownContainerProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (unknownContainerProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
 }
 
 type fakeSegmenter struct{}
@@ -661,6 +705,14 @@ func (essenceBitRateProber) Probe(context.Context, string) (media.Probe, error) 
 
 func (essenceBitRateProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 fake", nil
+}
+
+func (p essenceBitRateProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (essenceBitRateProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
 }
 
 type versionedCountingSegmenter struct {

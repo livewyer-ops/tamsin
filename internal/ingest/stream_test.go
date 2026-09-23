@@ -73,11 +73,20 @@ func serveStreamFixture(tb testing.TB, filename string, delay time.Duration) (so
 		http.ServeContent(w, r, filename, time.Time{}, countedSourceReader{file, &read, delay})
 	}))
 	tb.Cleanup(server.Close)
-	items, err := source.New(source.Config{}).Resolve(tb.Context(), []string{server.URL + "/media" + filepath.Ext(filename)})
+	items, err := newResolver(source.Config{}).Resolve(tb.Context(), []string{server.URL + "/media" + filepath.Ext(filename)})
 	if err != nil {
 		tb.Fatal(err)
 	}
 	return items[0], &read
+}
+
+// newResolver supplies the source settings the CLI always passes.
+func newResolver(config source.Config) *source.Resolver {
+	config.HTTPClient = http.DefaultClient
+	config.TransferIdleTimeout = time.Minute
+	config.MetadataTimeout = time.Minute
+	config.MaxInputs = source.DefaultMaxInputs
+	return source.New(config)
 }
 
 func TestStreamedContainersAndEssenceLayouts(t *testing.T) {
@@ -140,7 +149,7 @@ func TestStreamingRegistersBeforeReadingWholeInputLargerThanBudget(t *testing.T)
 					options.BaseEndpoint = aws.String(endpoint)
 					options.UsePathStyle = true
 				})
-				items, err := source.New(source.Config{S3Client: client, S3: source.S3Config{Endpoint: endpoint}}).Resolve(t.Context(), []string{"s3://bucket/media.wav"})
+				items, err := newResolver(source.Config{S3Client: client, S3: source.S3Config{Endpoint: endpoint}}).Resolve(t.Context(), []string{"s3://bucket/media.wav"})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -174,7 +183,7 @@ func TestStreamModeFallbackAndPassthrough(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "media") }))
 	defer server.Close()
-	items, err := source.New(source.Config{}).Resolve(t.Context(), []string{server.URL})
+	items, err := newResolver(source.Config{}).Resolve(t.Context(), []string{server.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,6 +324,10 @@ func (unavailableAfterReadProber) Probe(_ context.Context, path string) (media.P
 	return media.Probe{}, insufficientStreamEvidence()
 }
 
+func (p unavailableAfterReadProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
 func TestStreamFallbackCannotHideAnUpstreamFailure(t *testing.T) {
 	t.Parallel()
 	var staged atomic.Bool
@@ -400,6 +413,10 @@ func (p cadenceGapProber) Probe(ctx context.Context, filename string) (media.Pro
 	return probe, nil
 }
 
+func (p cadenceGapProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
 // A later segment without cadence evidence is not a contradiction of the
 // written plan: the declaration stands and the run completes.
 func TestStreamedSegmentWithoutCadenceEvidenceKeepsTheDeclaredPlan(t *testing.T) {
@@ -466,6 +483,10 @@ func (p unsupportedCodecProber) Probe(ctx context.Context, filename string) (med
 		}
 	}
 	return probe, nil
+}
+
+func (p unsupportedCodecProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
 }
 
 // An operator override that supplies what the media tools cannot derive is

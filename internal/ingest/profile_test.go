@@ -23,6 +23,14 @@ func (profilePolicyProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 test", nil
 }
 
+func (p profilePolicyProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+func (profilePolicyProber) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
+}
+
 func TestNamedProfilesAreVersionedMediaContracts(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {

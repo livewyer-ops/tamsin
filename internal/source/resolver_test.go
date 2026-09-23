@@ -23,6 +23,24 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/netio"
 )
 
+// newResolver supplies the values the CLI always passes, so each test sets
+// only what it exercises.
+func newResolver(config Config) *Resolver {
+	if config.HTTPClient == nil {
+		config.HTTPClient = http.DefaultClient
+	}
+	if config.TransferIdleTimeout == 0 {
+		config.TransferIdleTimeout = netio.DefaultIdleTimeout
+	}
+	if config.MetadataTimeout == 0 {
+		config.MetadataTimeout = 30 * time.Second
+	}
+	if config.MaxInputs == 0 {
+		config.MaxInputs = DefaultMaxInputs
+	}
+	return New(config)
+}
+
 func TestResolveDirectoryAndManifestDeterministically(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
@@ -43,7 +61,7 @@ func TestResolveDirectoryAndManifestDeterministically(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	items, err := New(Config{}).Resolve(context.Background(), []string{manifest})
+	items, err := newResolver(Config{}).Resolve(context.Background(), []string{manifest})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +72,7 @@ func TestResolveDirectoryAndManifestDeterministically(t *testing.T) {
 		t.Fatalf("manifest order was not preserved: %q, %q", items[0].Name, items[1].Name)
 	}
 
-	directoryItems, err := New(Config{}).Resolve(context.Background(), []string{secondDirectory, first})
+	directoryItems, err := newResolver(Config{}).Resolve(context.Background(), []string{secondDirectory, first})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +113,7 @@ func TestResolveEnforcesMaxInputsAcrossEveryExpansionPath(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := New(Config{MaxInputs: 2, S3Client: testCase.client}).Resolve(context.Background(), testCase.inputs)
+			_, err := newResolver(Config{MaxInputs: 2, S3Client: testCase.client}).Resolve(context.Background(), testCase.inputs)
 			if err == nil {
 				t.Fatal("three unique inputs unexpectedly passed a limit of two")
 			}
@@ -112,7 +130,7 @@ func TestResolveMaxInputsCountsUniqueItems(t *testing.T) {
 	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	items, err := New(Config{MaxInputs: 1}).Resolve(context.Background(), []string{filename, filename})
+	items, err := newResolver(Config{MaxInputs: 1}).Resolve(context.Background(), []string{filename, filename})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +138,7 @@ func TestResolveMaxInputsCountsUniqueItems(t *testing.T) {
 		t.Fatalf("resolved %d items, want one unique item", len(items))
 	}
 	client := &fakeS3{objects: map[string][]byte{"day/asset.ts": []byte("media")}}
-	s3Items, err := New(Config{MaxInputs: 1, S3Client: client}).Resolve(context.Background(), []string{
+	s3Items, err := newResolver(Config{MaxInputs: 1, S3Client: client}).Resolve(context.Background(), []string{
 		"s3://media/day/asset.ts", "s3://media/day/",
 	})
 	if err != nil {
@@ -132,7 +150,7 @@ func TestResolveMaxInputsCountsUniqueItems(t *testing.T) {
 }
 func TestResolveEmptyDirectoryFails(t *testing.T) {
 	t.Parallel()
-	if _, err := New(Config{}).Resolve(context.Background(), []string{t.TempDir()}); err == nil {
+	if _, err := newResolver(Config{}).Resolve(context.Background(), []string{t.TempDir()}); err == nil {
 		t.Fatal("empty directory unexpectedly resolved")
 	}
 }
@@ -147,7 +165,7 @@ func TestResolveDeduplicatesDirectFileSymlinks(t *testing.T) {
 	if err := os.Symlink(target, alias); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	items, err := New(Config{}).Resolve(context.Background(), []string{target, alias})
+	items, err := newResolver(Config{}).Resolve(context.Background(), []string{target, alias})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +190,7 @@ func TestResolveFileURIDecodesPathExactlyOnce(t *testing.T) {
 				t.Fatal(err)
 			}
 			input := (&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()
-			items, err := New(Config{}).Resolve(context.Background(), []string{input})
+			items, err := newResolver(Config{}).Resolve(context.Background(), []string{input})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -189,7 +207,7 @@ func TestResolverStateIsScopedToEachResolveCall(t *testing.T) {
 	if err := os.WriteFile(path, []byte("media"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	resolver := New(Config{})
+	resolver := newResolver(Config{})
 	for call := range 2 {
 		items, err := resolver.Resolve(context.Background(), []string{path})
 		if err != nil {
@@ -212,7 +230,7 @@ func TestResolveManifestCycle(t *testing.T) {
 	if err := os.WriteFile(second, []byte("first.txt\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(Config{}).Resolve(context.Background(), []string{first}); err == nil {
+	if _, err := newResolver(Config{}).Resolve(context.Background(), []string{first}); err == nil {
 		t.Fatal("manifest cycle unexpectedly succeeded")
 	}
 }
@@ -227,7 +245,7 @@ func TestResolveManifestCycleThroughSymlink(t *testing.T) {
 	if err := os.Symlink(manifest, alias); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if _, err := New(Config{}).Resolve(context.Background(), []string{manifest}); err == nil {
+	if _, err := newResolver(Config{}).Resolve(context.Background(), []string{manifest}); err == nil {
 		t.Fatal("symlinked manifest cycle unexpectedly succeeded")
 	}
 }
@@ -237,7 +255,7 @@ func TestResolveManifestRejectsInvalidUTF8(t *testing.T) {
 	if err := os.WriteFile(manifest, []byte{0xff, '\n'}, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(Config{}).Resolve(context.Background(), []string{manifest}); err == nil || !strings.Contains(err.Error(), "UTF-8") {
+	if _, err := newResolver(Config{}).Resolve(context.Background(), []string{manifest}); err == nil || !strings.Contains(err.Error(), "UTF-8") {
 		t.Fatalf("Resolve() error = %v, want UTF-8 validation error", err)
 	}
 }
@@ -252,7 +270,7 @@ func TestResolveHTTPAndStdin(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resolver := New(Config{
+	resolver := newResolver(Config{
 		Stdin: bytes.NewBufferString("stdin"), StdinName: "/drop/customer-secret/event.ts",
 		HTTPHeaders: http.Header{"X-Input": []string{"allowed"}},
 	})
@@ -297,7 +315,7 @@ func TestHTTPSourceStripsConfiguredHeadersOnCrossOriginRedirect(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	items, err := New(Config{HTTPHeaders: http.Header{"X-Input-Secret": []string{"secret"}}}).
+	items, err := newResolver(Config{HTTPHeaders: http.Header{"X-Input-Secret": []string{"secret"}}}).
 		Resolve(context.Background(), []string{redirector.URL + "/asset.mp4"})
 	if err != nil {
 		t.Fatal(err)
@@ -331,7 +349,7 @@ func TestHTTPSourcePreservesConfiguredHeadersOnSameOriginRedirect(t *testing.T) 
 	}))
 	defer server.Close()
 
-	items, err := New(Config{HTTPHeaders: http.Header{"X-Input-Secret": []string{"secret"}}}).
+	items, err := newResolver(Config{HTTPHeaders: http.Header{"X-Input-Secret": []string{"secret"}}}).
 		Resolve(context.Background(), []string{server.URL + "/redirect"})
 	if err != nil {
 		t.Fatal(err)
@@ -349,7 +367,7 @@ func TestHTTPSourcePreservesConfiguredHeadersOnSameOriginRedirect(t *testing.T) 
 
 func TestResolveHTTPRejectsUserinfo(t *testing.T) {
 	t.Parallel()
-	_, err := New(Config{}).Resolve(context.Background(), []string{"https://user:secret@example.test/asset.mp4"})
+	_, err := newResolver(Config{}).Resolve(context.Background(), []string{"https://user:secret@example.test/asset.mp4"})
 	if err == nil || !strings.Contains(err.Error(), "must not include userinfo") {
 		t.Fatalf("Resolve() error = %v, want HTTP userinfo rejection", err)
 	}
@@ -361,7 +379,7 @@ func TestResolveHTTPRejectsUserinfo(t *testing.T) {
 func TestResolveS3Prefix(t *testing.T) {
 	t.Parallel()
 	client := &fakeS3{objects: map[string][]byte{"prefix/b.mp4": []byte("b"), "prefix/a.mp4": []byte("aa"), "other": []byte("ignored")}}
-	items, err := New(Config{S3Client: client}).Resolve(context.Background(), []string{"s3://media/prefix/"})
+	items, err := newResolver(Config{S3Client: client}).Resolve(context.Background(), []string{"s3://media/prefix/"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +401,7 @@ func TestHTTPSourceErrorsDoNotLeakCredentials(t *testing.T) {
 	client := &http.Client{Transport: sourceRoundTripError(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("dial https://example.test/media?signature=top-secret")
 	})}
-	items, err := New(Config{HTTPClient: client}).Resolve(context.Background(), []string{"https://example.test/media?signature=input-secret"})
+	items, err := newResolver(Config{HTTPClient: client}).Resolve(context.Background(), []string{"https://example.test/media?signature=input-secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +465,7 @@ func TestResolveS3RejectsNonAdvancingPagination(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			client := &pagedS3{fakeS3: fakeS3{objects: map[string][]byte{}}, pages: testCase.pages}
-			_, err := New(Config{S3Client: client}).Resolve(context.Background(), []string{"s3://bucket/prefix/"})
+			_, err := newResolver(Config{S3Client: client}).Resolve(context.Background(), []string{"s3://bucket/prefix/"})
 			if err == nil || !strings.Contains(err.Error(), "continuation token") {
 				t.Fatalf("Resolve() error = %v, want pagination-token rejection", err)
 			}
@@ -497,7 +515,7 @@ func (s *toxicMetadataS3) ListObjectsV2(context.Context, *s3.ListObjectsV2Input,
 func TestS3MetadataErrorsExposeOnlyStableProcessMessages(t *testing.T) {
 	t.Parallel()
 	for _, input := range []string{"s3://bucket/exact.ts", "s3://bucket/prefix/"} {
-		resolver := New(Config{S3Client: &toxicMetadataS3{fakeS3{objects: map[string][]byte{}}}})
+		resolver := newResolver(Config{S3Client: &toxicMetadataS3{fakeS3{objects: map[string][]byte{}}}})
 		_, err := resolver.Resolve(context.Background(), []string{input})
 		if err == nil || !strings.Contains(err.Error(), "peer-response-top-secret") {
 			t.Fatalf("detailed in-process error was not retained for %s: %v", input, err)
@@ -569,7 +587,7 @@ func fullS3Object(contents, etag, versionID string) *s3.GetObjectOutput {
 
 func s3ItemAfterFirstRead(t *testing.T, client S3API, contents string) Item {
 	t.Helper()
-	items, err := New(Config{S3Client: client}).Resolve(context.Background(), []string{"s3://media/asset.mxf"})
+	items, err := newResolver(Config{S3Client: client}).Resolve(context.Background(), []string{"s3://media/asset.mxf"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +636,7 @@ func TestHTTPSourceResumesWithARangeRequest(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resolver := New(Config{})
+	resolver := newResolver(Config{})
 	items, err := resolver.Resolve(context.Background(), []string{server.URL + "/asset.mp4"})
 	if err != nil {
 		t.Fatal(err)
@@ -676,7 +694,7 @@ func TestHTTPSourceReportsAResourceItCannotResume(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resolver := New(Config{})
+	resolver := newResolver(Config{})
 	items, err := resolver.Resolve(context.Background(), []string{server.URL + "/asset.mp4"})
 	if err != nil {
 		t.Fatal(err)
@@ -758,7 +776,7 @@ func (s rangeServer) handler() http.HandlerFunc {
 func httpItemAfterFirstRead(t *testing.T, handler http.HandlerFunc) (Item, func()) {
 	t.Helper()
 	server := httptest.NewServer(handler)
-	resolver := New(Config{})
+	resolver := newResolver(Config{})
 	items, err := resolver.Resolve(context.Background(), []string{server.URL + "/asset.mp4"})
 	if err != nil {
 		server.Close()
@@ -924,7 +942,7 @@ func TestHTTPResumeBodyMustMatchItsDeclaredRange(t *testing.T) {
 					ContentLength: -1,
 				}, nil
 			})}
-			items, err := New(Config{HTTPClient: client}).Resolve(context.Background(), []string{"https://media.example/asset.mxf"})
+			items, err := newResolver(Config{HTTPClient: client}).Resolve(context.Background(), []string{"https://media.example/asset.mxf"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1133,7 +1151,7 @@ func TestHTTPTransfersAskForIdentityEncoding(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resolver := New(Config{})
+	resolver := newResolver(Config{})
 	items, err := resolver.Resolve(context.Background(), []string{server.URL + "/asset.mp4"})
 	if err != nil {
 		t.Fatal(err)
@@ -1437,7 +1455,7 @@ func TestS3RangeNotSatisfiable(t *testing.T) {
 func TestS3KeyWithoutASlashIsExact(t *testing.T) {
 	t.Parallel()
 	newResolver := func(client *fakeS3) *Resolver {
-		resolver := New(Config{})
+		resolver := newResolver(Config{})
 		resolver.s3Client = client
 		return resolver
 	}
@@ -1505,7 +1523,7 @@ func TestHTTPSourceBodyIdleTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resolver := New(Config{TransferIdleTimeout: 80 * time.Millisecond})
+	resolver := newResolver(Config{TransferIdleTimeout: 80 * time.Millisecond})
 	items, err := resolver.Resolve(context.Background(), []string{server.URL + "/programme.ts"})
 	if err != nil {
 		t.Fatal(err)
@@ -1529,7 +1547,7 @@ func TestHTTPSourceRequestPreservesParentCause(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resolver := New(Config{TransferIdleTimeout: time.Minute})
+	resolver := newResolver(Config{TransferIdleTimeout: time.Minute})
 	items, err := resolver.Resolve(context.Background(), []string{server.URL + "/programme.ts"})
 	if err != nil {
 		t.Fatal(err)
@@ -1550,7 +1568,7 @@ func TestHTTPSourceRequestPreservesParentCause(t *testing.T) {
 func TestS3SourceBodyIdleTimeout(t *testing.T) {
 	t.Parallel()
 	client := &stalledS3{fakeS3: fakeS3{objects: map[string][]byte{"programme.mxf": []byte("media")}}}
-	resolver := New(Config{S3Client: client, TransferIdleTimeout: 80 * time.Millisecond})
+	resolver := newResolver(Config{S3Client: client, TransferIdleTimeout: 80 * time.Millisecond})
 	items, err := resolver.Resolve(context.Background(), []string{"s3://archive/programme.mxf"})
 	if err != nil {
 		t.Fatal(err)
@@ -1573,7 +1591,7 @@ func TestS3SourceBodyIdleTimeout(t *testing.T) {
 func TestS3MetadataUsesTheMetadataDeadline(t *testing.T) {
 	t.Parallel()
 	client := &stalledS3Metadata{fakeS3: fakeS3{objects: map[string][]byte{"programme.mxf": []byte("media")}}}
-	resolver := New(Config{S3Client: client, MetadataTimeout: 80 * time.Millisecond})
+	resolver := newResolver(Config{S3Client: client, MetadataTimeout: 80 * time.Millisecond})
 	started := time.Now()
 	_, err := resolver.Resolve(context.Background(), []string{"s3://archive/programme.mxf"})
 	if !errors.Is(err, context.DeadlineExceeded) {

@@ -211,13 +211,8 @@ type HTTPError struct {
 	URL        string
 	StatusCode int
 	Status     string
-	Body       string
 }
 
 func (e *HTTPError) Error() string {
-	body := strings.TrimSpace(e.Body)
-	if body == "" {
-		return fmt.Sprintf("%s %s: %s", e.Method, e.URL, e.Status)
-	}
-	return fmt.Sprintf("%s %s: %s: %s", e.Method, e.URL, e.Status, body)
+	return fmt.Sprintf("%s %s: %s", e.Method, e.URL, e.Status)
 }

@@ -9,6 +9,8 @@ import (
 	pathpkg "path"
 	"strings"
 	"time"
+
+	"github.com/livewyer-ops/tamsin/internal/auth"
 )
 
 // DeleteSegments removes the selected Flow Segments and does not return until
@@ -70,7 +72,7 @@ func (c *Client) waitForDeletionRequest(ctx context.Context, deletePath, locatio
 	request := initial
 	for {
 		if request.Status != "" {
-			complete, err := c.validateDeletionRequest(request, flowID, options.Timerange)
+			complete, err := validateDeletionRequest(request, flowID, options.Timerange)
 			if err != nil {
 				return err
 			}
@@ -95,21 +97,15 @@ func (c *Client) waitForDeletionRequest(ctx context.Context, deletePath, locatio
 	}
 }
 
-func (c *Client) validateDeletionRequest(request DeletionRequest, flowID, timerange string) (bool, error) {
+func validateDeletionRequest(request DeletionRequest, flowID, timerange string) (bool, error) {
 	if strings.TrimSpace(request.ID) == "" {
 		return false, errors.New("segment deletion request has no ID")
 	}
 	if request.FlowID != flowID {
-		if c.suppressErrorBody {
-			return false, errors.New("segment deletion request targets an unexpected flow")
-		}
-		return false, fmt.Errorf("segment deletion request targets flow %q, want %q", c.untrustedDetail(request.FlowID), flowID)
+		return false, errors.New("segment deletion request targets an unexpected flow")
 	}
 	if request.TimerangeToDelete != timerange {
-		if c.suppressErrorBody {
-			return false, errors.New("segment deletion request targets an unexpected timerange")
-		}
-		return false, fmt.Errorf("segment deletion request targets timerange %q, want %q", c.untrustedDetail(request.TimerangeToDelete), timerange)
+		return false, errors.New("segment deletion request targets an unexpected timerange")
 	}
 	if request.DeleteFlow {
 		return false, errors.New("segment deletion request unexpectedly deletes the Flow")
@@ -120,19 +116,9 @@ func (c *Client) validateDeletionRequest(request DeletionRequest, flowID, timera
 	case "done":
 		return true, nil
 	case "error":
-		if c.suppressErrorBody {
-			return false, errors.New("segment deletion request failed")
-		}
-		detail := strings.TrimSpace(string(request.Error))
-		if detail == "" {
-			detail = "no error detail"
-		}
-		return false, fmt.Errorf("segment deletion request failed: %s", c.untrustedDetail(detail))
+		return false, errors.New("segment deletion request failed")
 	default:
-		if c.suppressErrorBody {
-			return false, errors.New("segment deletion request has an unknown status")
-		}
-		return false, fmt.Errorf("segment deletion request has unknown status %q", c.untrustedDetail(request.Status))
+		return false, errors.New("segment deletion request has an unknown status")
 	}
 }
 
@@ -146,7 +132,7 @@ func (c *Client) waitForSegmentAbsence(ctx context.Context, flowID string, optio
 		}
 		found := false
 		for _, segment := range segments {
-			if segment.Timerange == options.Timerange && (options.ObjectID == "" || segment.ObjectID == options.ObjectID) {
+			if segment.Timerange == options.Timerange && segment.ObjectID == options.ObjectID {
 				found = true
 				break
 			}
@@ -161,9 +147,6 @@ func (c *Client) waitForSegmentAbsence(ctx context.Context, flowID string, optio
 }
 
 func waitForPoll(ctx context.Context, interval time.Duration) error {
-	if interval <= 0 {
-		interval = time.Millisecond
-	}
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
 	select {
@@ -192,8 +175,8 @@ func (c *Client) apiReference(requestURL *url.URL, value string) (string, error)
 	if resolved.User != nil {
 		return "", errors.New("reference must not contain userinfo")
 	}
-	if origin(resolved) != c.baseOrigin {
-		return "", fmt.Errorf("reference points at %s, not the configured endpoint", origin(resolved))
+	if auth.Origin(resolved) != c.baseOrigin {
+		return "", fmt.Errorf("reference points at %s, not the configured endpoint", auth.Origin(resolved))
 	}
 	basePath := strings.TrimRight(c.base.EscapedPath(), "/")
 	if resolved.EscapedPath() != basePath && !strings.HasPrefix(resolved.EscapedPath(), basePath+"/") {

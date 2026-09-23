@@ -852,7 +852,9 @@ func TestProductionInputHTTPClientStripsHeadersAcrossOrigins(t *testing.T) {
 
 	run := observability.New("4bc16043-2214-4ff8-9c6a-923b60740b7c", nil)
 	client := newInputHTTPClient(http.DefaultTransport, time.Minute, 0, run, headers)
-	items, err := source.New(source.Config{HTTPClient: client, HTTPHeaders: headers}).Resolve(
+	items, err := source.New(source.Config{
+		HTTPClient: client, HTTPHeaders: headers, TransferIdleTimeout: time.Minute, MaxInputs: 1,
+	}).Resolve(
 		context.Background(), []string{redirector.URL + "/asset.mp4"})
 	if err != nil {
 		t.Fatal(err)

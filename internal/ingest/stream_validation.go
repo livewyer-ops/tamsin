@@ -196,10 +196,8 @@ func (p *Pipeline) probeStreamSegment(ctx context.Context, path string) (media.P
 	if err != nil {
 		return media.Probe{}, err
 	}
-	if presentation, ok := p.prober.(media.PresentationProber); ok {
-		if err := presentation.ProbePresentation(ctx, path, &probe); err != nil {
-			return media.Probe{}, err
-		}
+	if err := p.prober.ProbePresentation(ctx, path, &probe); err != nil {
+		return media.Probe{}, err
 	}
 	return probe, nil
 }
