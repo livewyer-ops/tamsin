@@ -18,8 +18,6 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/auth"
 	"github.com/livewyer-ops/tamsin/internal/ingest"
 	"github.com/livewyer-ops/tamsin/internal/media"
-	"github.com/livewyer-ops/tamsin/internal/netio"
-	"github.com/livewyer-ops/tamsin/internal/source"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"go.yaml.in/yaml/v3"
@@ -36,13 +34,14 @@ const (
 )
 
 type configDefinition struct {
-	key          string
-	kind         configKind
+	key         string
+	kind        configKind
+	flag        string
+	secret      bool
+	redactURL   bool
+	fileAllowed bool
+	// defaultValue replaces the default registered with the flag.
 	defaultValue any
-	flag         string
-	secret       bool
-	redactURL    bool
-	fileAllowed  bool
 }
 
 type configPosition struct {
@@ -51,11 +50,12 @@ type configPosition struct {
 }
 
 // settings is the complete configuration resolver used by the CLI. It stores
-// only validated file values and resolves changed persistent flags,
-// non-empty environment variables, file values, then defaults.
+// only validated file values and resolves changed flags, non-empty environment
+// variables, file values, then the defaults registered with the flags.
 type settings struct {
 	definitions map[string]configDefinition
 	file        map[string]any
+	defaults    map[string]any
 	flags       *pflag.FlagSet
 }
 
@@ -63,20 +63,56 @@ func newSettings() *settings {
 	return &settings{
 		definitions: configDefinitionMap(),
 		file:        make(map[string]any),
+		defaults:    make(map[string]any),
 	}
 }
 
-func (s *settings) InConfig(key string) bool {
-	_, ok := s.file[key]
-	return ok
+// bind resolves s through the root command's persistent flags and records
+// every setting's default from the flag that sets it.
+func (s *settings) bind(root *cobra.Command) {
+	s.flags = root.PersistentFlags()
+	for key, definition := range s.definitions {
+		if definition.defaultValue != nil {
+			s.defaults[key] = definition.defaultValue
+			continue
+		}
+		flags := root.PersistentFlags()
+		if flags.Lookup(definition.flag) == nil {
+			flags = root.Flags()
+		}
+		s.defaults[key] = flagValue(flags, definition)
+	}
+}
+
+// forCommand returns s as seen by command, whose changed flags take
+// precedence over every other source.
+func (s *settings) forCommand(command *cobra.Command) *settings {
+	view := *s
+	view.flags = command.Flags()
+	return &view
+}
+
+func (s *settings) flagChanged(key string) bool {
+	if s.flags == nil {
+		return false
+	}
+	flag := s.flags.Lookup(s.definitions[key].flag)
+	return flag != nil && flag.Changed
+}
+
+// explicit reports whether key was set rather than left at its default.
+func (s *settings) explicit(key string) bool {
+	if _, ok := s.file[key]; ok || s.flagChanged(key) {
+		return true
+	}
+	value, exists := os.LookupEnv(configEnvironmentName(key))
+	return exists && value != ""
 }
 
 func (s *settings) value(key string) any {
-	definition, known := s.definitions[key]
-	if known && definition.flag != "" && s.flags != nil {
-		if flag := s.flags.Lookup(definition.flag); flag != nil && flag.Changed {
-			return flagValue(s.flags, definition)
-		}
+	definition := s.definitions[key]
+	if s.flagChanged(key) {
+		return flagValue(s.flags, definition)
 	}
 	if raw, ok := os.LookupEnv(configEnvironmentName(key)); ok && raw != "" {
 		if value, err := environmentValue(configEnvironmentName(key), raw, definition.kind); err == nil {
@@ -86,7 +122,7 @@ func (s *settings) value(key string) any {
 	if value, ok := s.file[key]; ok {
 		return value
 	}
-	return definition.defaultValue
+	return s.defaults[key]
 }
 
 func flagValue(flags *pflag.FlagSet, definition configDefinition) any {
@@ -104,6 +140,10 @@ func flagValue(flags *pflag.FlagSet, definition configDefinition) any {
 		value, _ := flags.GetDuration(definition.flag)
 		return value
 	case configStrings:
+		// --scope is comma-separated; the other lists repeat.
+		if value, err := flags.GetStringArray(definition.flag); err == nil {
+			return value
+		}
 		value, _ := flags.GetStringSlice(definition.flag)
 		return value
 	default:
@@ -139,67 +179,67 @@ func (s *settings) GetStringSlice(key string) []string {
 // configDefinitions is the single allow-list for file and TAMSIN_* settings.
 func configDefinitions() []configDefinition {
 	return []configDefinition{
-		{key: "auth.allow_insecure_loopback", kind: configBool, defaultValue: false, flag: "allow-insecure-auth-loopback", fileAllowed: true},
-		{key: "auth.client_id", kind: configString, defaultValue: "", flag: "client-id", fileAllowed: true},
-		{key: "auth.client_secret", kind: configString, defaultValue: "", flag: "client-secret", secret: true, fileAllowed: true},
-		{key: "auth.code", kind: configString, defaultValue: "", flag: "oauth-code", secret: true, fileAllowed: true},
-		{key: "auth.mode", kind: configString, defaultValue: string(auth.ModeAuto), flag: "auth", fileAllowed: true},
-		{key: "auth.password", kind: configString, defaultValue: "", flag: "password", secret: true, fileAllowed: true},
-		{key: "auth.pkce_verifier", kind: configString, defaultValue: "", flag: "pkce-verifier", secret: true, fileAllowed: true},
-		{key: "auth.redirect_url", kind: configString, defaultValue: "http://127.0.0.1:53682/callback", flag: "redirect-url", redactURL: true, fileAllowed: true},
-		{key: "auth.scopes", kind: configStrings, defaultValue: []string{}, flag: "scope", fileAllowed: true},
-		{key: "auth.token", kind: configString, defaultValue: "", flag: "token", secret: true, fileAllowed: true},
-		{key: "auth.token_url", kind: configString, defaultValue: "", flag: "token-url", redactURL: true, fileAllowed: true},
-		{key: "auth.url_token", kind: configString, defaultValue: "", flag: "url-token", secret: true, fileAllowed: true},
-		{key: "auth.username", kind: configString, defaultValue: "", flag: "username", fileAllowed: true},
-		{key: "color", kind: configString, defaultValue: "auto", flag: "color", fileAllowed: true},
+		{key: "auth.allow_insecure_loopback", kind: configBool, flag: "allow-insecure-auth-loopback", fileAllowed: true},
+		{key: "auth.client_id", kind: configString, flag: "client-id", fileAllowed: true},
+		{key: "auth.client_secret", kind: configString, flag: "client-secret", secret: true, fileAllowed: true},
+		{key: "auth.code", kind: configString, flag: "oauth-code", secret: true, fileAllowed: true},
+		{key: "auth.mode", kind: configString, flag: "auth", fileAllowed: true},
+		{key: "auth.password", kind: configString, flag: "password", secret: true, fileAllowed: true},
+		{key: "auth.pkce_verifier", kind: configString, flag: "pkce-verifier", secret: true, fileAllowed: true},
+		{key: "auth.redirect_url", kind: configString, flag: "redirect-url", redactURL: true, fileAllowed: true},
+		{key: "auth.scopes", kind: configStrings, flag: "scope", fileAllowed: true},
+		{key: "auth.token", kind: configString, flag: "token", secret: true, fileAllowed: true},
+		{key: "auth.token_url", kind: configString, flag: "token-url", redactURL: true, fileAllowed: true},
+		{key: "auth.url_token", kind: configString, flag: "url-token", secret: true, fileAllowed: true},
+		{key: "auth.username", kind: configString, flag: "username", fileAllowed: true},
+		{key: "color", kind: configString, flag: "color", fileAllowed: true},
 		// config selects a file before a file can be read, so accepting it inside
 		// that file would be misleading. It remains a supported flag/env key.
-		{key: "config", kind: configString, defaultValue: "", flag: "config"},
-		{key: "endpoint", kind: configString, defaultValue: "", flag: "endpoint", redactURL: true, fileAllowed: true},
-		{key: "format", kind: configString, defaultValue: "human", flag: "format", fileAllowed: true},
-		{key: "http.insecure_skip_verify", kind: configBool, defaultValue: false, flag: "insecure-skip-verify", fileAllowed: true},
-		{key: "http.retries", kind: configInt, defaultValue: 3, flag: "retries", fileAllowed: true},
-		{key: "http.timeout", kind: configDuration, defaultValue: 30 * time.Second, flag: "timeout", fileAllowed: true},
-		{key: "http.transfer_idle_timeout", kind: configDuration, defaultValue: netio.DefaultIdleTimeout, flag: "transfer-idle-timeout", fileAllowed: true},
-		{key: "http.transfer_timeout", kind: configDuration, defaultValue: time.Duration(0), flag: "transfer-timeout", fileAllowed: true},
-		{key: "ingest.concurrency", kind: configInt, defaultValue: min(runtime.GOMAXPROCS(0), 8), fileAllowed: true},
-		{key: "ingest.dry_run", kind: configString, defaultValue: string(ingest.DryRunOff), fileAllowed: true},
-		{key: "ingest.essence_storage", kind: configString, defaultValue: string(media.EssenceStorageIndependent), fileAllowed: true},
-		{key: "ingest.flow_id", kind: configString, defaultValue: "", fileAllowed: true},
-		{key: "ingest.flow_metadata", kind: configString, defaultValue: "", fileAllowed: true},
-		{key: "ingest.input_mode", kind: configString, defaultValue: "auto", fileAllowed: true},
-		{key: "ingest.max_inputs", kind: configInt, defaultValue: source.DefaultMaxInputs, fileAllowed: true},
-		{key: "ingest.probe_concurrency", kind: configInt, defaultValue: 2, fileAllowed: true},
-		{key: "ingest.profile", kind: configString, defaultValue: "", fileAllowed: true},
-		{key: "ingest.segment_duration", kind: configDuration, defaultValue: defaultSegmentDuration, fileAllowed: true},
-		{key: "ingest.segment_format", kind: configString, defaultValue: string(media.SegmentFormatSource), fileAllowed: true},
-		{key: "ingest.source_id", kind: configString, defaultValue: "", fileAllowed: true},
-		{key: "ingest.staging_byte_budget", kind: configString, defaultValue: "auto", fileAllowed: true},
-		{key: "ingest.start", kind: configString, defaultValue: "0:0", fileAllowed: true},
-		{key: "ingest.storage_id", kind: configString, defaultValue: "", fileAllowed: true},
-		{key: "ingest.tams_flow_profiles", kind: configStrings, defaultValue: []string{}, fileAllowed: true},
-		{key: "ingest.temp_directory", kind: configString, defaultValue: "", fileAllowed: true},
-		{key: "ingest.transfers", kind: configInt, defaultValue: 0, fileAllowed: true},
-		{key: "ingest.verify", kind: configString, defaultValue: string(ingest.VerificationAuto), fileAllowed: true},
-		{key: "input", kind: configStrings, defaultValue: []string{}, fileAllowed: true},
-		{key: "log.format", kind: configString, defaultValue: "text", flag: "log-format", fileAllowed: true},
-		{key: "log.level", kind: configString, defaultValue: "info", flag: "log-level", fileAllowed: true},
-		{key: "media.ffmpeg", kind: configString, defaultValue: "ffmpeg", flag: "ffmpeg", fileAllowed: true},
+		{key: "config", kind: configString, flag: "config"},
+		{key: "endpoint", kind: configString, flag: "endpoint", redactURL: true, fileAllowed: true},
+		{key: "format", kind: configString, flag: "format", fileAllowed: true},
+		{key: "http.insecure_skip_verify", kind: configBool, flag: "insecure-skip-verify", fileAllowed: true},
+		{key: "http.retries", kind: configInt, flag: "retries", fileAllowed: true},
+		{key: "http.timeout", kind: configDuration, flag: "timeout", fileAllowed: true},
+		{key: "http.transfer_idle_timeout", kind: configDuration, flag: "transfer-idle-timeout", fileAllowed: true},
+		{key: "http.transfer_timeout", kind: configDuration, flag: "transfer-timeout", fileAllowed: true},
+		{key: "ingest.concurrency", kind: configInt, flag: "concurrency", defaultValue: min(runtime.GOMAXPROCS(0), 8), fileAllowed: true},
+		{key: "ingest.dry_run", kind: configString, flag: "dry-run", fileAllowed: true},
+		{key: "ingest.essence_storage", kind: configString, flag: "essence-storage", fileAllowed: true},
+		{key: "ingest.flow_id", kind: configString, flag: "flow-id", fileAllowed: true},
+		{key: "ingest.flow_metadata", kind: configString, flag: "flow-metadata", fileAllowed: true},
+		{key: "ingest.input_mode", kind: configString, flag: "input-mode", fileAllowed: true},
+		{key: "ingest.max_inputs", kind: configInt, flag: "max-inputs", fileAllowed: true},
+		{key: "ingest.probe_concurrency", kind: configInt, flag: "probe-concurrency", fileAllowed: true},
+		{key: "ingest.profile", kind: configString, flag: "profile", fileAllowed: true},
+		{key: "ingest.segment_duration", kind: configDuration, flag: "segment-duration", fileAllowed: true},
+		{key: "ingest.segment_format", kind: configString, flag: "segment-format", fileAllowed: true},
+		{key: "ingest.source_id", kind: configString, flag: "source-id", fileAllowed: true},
+		{key: "ingest.staging_byte_budget", kind: configString, flag: "staging-byte-budget", fileAllowed: true},
+		{key: "ingest.start", kind: configString, flag: "start", fileAllowed: true},
+		{key: "ingest.storage_id", kind: configString, flag: "storage-id", fileAllowed: true},
+		{key: "ingest.tams_flow_profiles", kind: configStrings, flag: "tams-flow-profile", fileAllowed: true},
+		{key: "ingest.temp_directory", kind: configString, flag: "temp-dir", fileAllowed: true},
+		{key: "ingest.transfers", kind: configInt, flag: "transfers", fileAllowed: true},
+		{key: "ingest.verify", kind: configString, flag: "verify", fileAllowed: true},
+		{key: "input", kind: configStrings, flag: "input", fileAllowed: true},
+		{key: "log.format", kind: configString, flag: "log-format", fileAllowed: true},
+		{key: "log.level", kind: configString, flag: "log-level", fileAllowed: true},
+		{key: "media.ffmpeg", kind: configString, flag: "ffmpeg", fileAllowed: true},
 		// FFmpeg arguments may carry headers, cookies, signed URLs, or provider
 		// options whose credential-bearing positions Tamsin cannot predict.
-		{key: "media.ffmpeg_args", kind: configStrings, defaultValue: []string{}, secret: true, fileAllowed: true},
-		{key: "media.ffprobe", kind: configString, defaultValue: "ffprobe", flag: "ffprobe", fileAllowed: true},
-		{key: "progress", kind: configString, defaultValue: "auto", flag: "progress", fileAllowed: true},
-		{key: "quiet", kind: configBool, defaultValue: false, flag: "quiet", fileAllowed: true},
+		{key: "media.ffmpeg_args", kind: configStrings, flag: "ffmpeg-arg", secret: true, fileAllowed: true},
+		{key: "media.ffprobe", kind: configString, flag: "ffprobe", fileAllowed: true},
+		{key: "progress", kind: configString, flag: "progress", fileAllowed: true},
+		{key: "quiet", kind: configBool, flag: "quiet", fileAllowed: true},
 		// Headers can contain bearer credentials, cookies, or signed values whose
 		// names Tamsin cannot predict. Treat the whole setting as secret.
-		{key: "source.http_headers", kind: configStrings, defaultValue: []string{}, secret: true, fileAllowed: true},
-		{key: "source.s3_endpoint", kind: configString, defaultValue: "", redactURL: true, fileAllowed: true},
-		{key: "source.s3_path_style", kind: configBool, defaultValue: false, fileAllowed: true},
-		{key: "source.s3_region", kind: configString, defaultValue: "", fileAllowed: true},
-		{key: "source.stdin_name", kind: configString, defaultValue: "stdin.bin", fileAllowed: true},
-		{key: "verbose", kind: configBool, defaultValue: false, flag: "verbose", fileAllowed: true},
+		{key: "source.http_headers", kind: configStrings, flag: "input-header", secret: true, fileAllowed: true},
+		{key: "source.s3_endpoint", kind: configString, flag: "s3-endpoint", redactURL: true, fileAllowed: true},
+		{key: "source.s3_path_style", kind: configBool, flag: "s3-path-style", fileAllowed: true},
+		{key: "source.s3_region", kind: configString, flag: "s3-region", fileAllowed: true},
+		{key: "source.stdin_name", kind: configString, flag: "stdin-name", fileAllowed: true},
+		{key: "verbose", kind: configBool, flag: "verbose", fileAllowed: true},
 	}
 }
 
@@ -215,12 +255,6 @@ func configDefinitionMap() map[string]configDefinition {
 func configEnvironmentName(key string) string {
 	replacer := strings.NewReplacer(".", "_", "-", "_")
 	return "TAMSIN_" + strings.ToUpper(replacer.Replace(key))
-}
-
-func (a *application) configureDefaults() {
-	if a.v == nil {
-		a.v = newSettings()
-	}
 }
 
 func decodeConfigFile(data []byte) (map[string]any, error) {
@@ -460,16 +494,11 @@ func (a *application) validateConfigEnvironment() error {
 		if value == "" {
 			continue
 		}
-		if err := validateEnvironmentValue(name, value, definition.kind); err != nil {
+		if _, err := environmentValue(name, value, definition.kind); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-func validateEnvironmentValue(name, value string, kind configKind) error {
-	_, err := environmentValue(name, value, kind)
-	return err
 }
 
 func environmentValue(name, value string, kind configKind) (any, error) {
@@ -513,115 +542,58 @@ func decodeEnvironmentStrings(name, value string) ([]string, error) {
 	return values, nil
 }
 
-func (a *application) configStrings(key string) []string {
-	return a.v.GetStringSlice(key)
-}
-
-func commandFlagChanged(command *cobra.Command, name string) bool {
-	if command == nil || name == "" {
-		return false
-	}
-	flag := command.Flags().Lookup(name)
-	return flag != nil && flag.Changed
-}
-
-func (a *application) configString(command *cobra.Command, flag, key string) string {
-	if commandFlagChanged(command, flag) {
-		value, err := command.Flags().GetString(flag)
-		if err != nil {
-			panic(err)
-		}
-		return value
-	}
-	return a.v.GetString(key)
-}
-
-func (a *application) configInt(command *cobra.Command, flag, key string) int {
-	if commandFlagChanged(command, flag) {
-		value, err := command.Flags().GetInt(flag)
-		if err != nil {
-			panic(err)
-		}
-		return value
-	}
-	return a.v.GetInt(key)
-}
-
-func (a *application) configDuration(command *cobra.Command, flag, key string) time.Duration {
-	if commandFlagChanged(command, flag) {
-		value, err := command.Flags().GetDuration(flag)
-		if err != nil {
-			panic(err)
-		}
-		return value
-	}
-	return a.v.GetDuration(key)
-}
-
-func (a *application) configStringArray(command *cobra.Command, flag, key string) []string {
-	if commandFlagChanged(command, flag) {
-		value, err := command.Flags().GetStringArray(flag)
-		if err != nil {
-			panic(err)
-		}
-		return value
-	}
-	return a.configStrings(key)
-}
-
-func (a *application) validateConfigValues(command *cobra.Command) error {
-	if err := a.validateGlobalConfig(); err != nil {
+// validate checks every setting the CLI resolves before a command runs.
+func (s *settings) validate() error {
+	if err := s.validateGlobal(); err != nil {
 		return err
 	}
-	if concurrency := a.configInt(command, "concurrency", "ingest.concurrency"); concurrency <= 0 || concurrency > 256 {
+	if concurrency := s.GetInt("ingest.concurrency"); concurrency <= 0 || concurrency > 256 {
 		return errors.New("concurrency must be between 1 and 256")
 	}
-	if transfers := a.configInt(command, "transfers", "ingest.transfers"); transfers < 0 || transfers > 256 {
+	if transfers := s.GetInt("ingest.transfers"); transfers < 0 || transfers > 256 {
 		return errors.New("transfers must be between 0 and 256")
 	}
-	if concurrency := a.configInt(command, "probe-concurrency", "ingest.probe_concurrency"); concurrency < 0 || concurrency > 256 {
+	if concurrency := s.GetInt("ingest.probe_concurrency"); concurrency < 0 || concurrency > 256 {
 		return errors.New("probe-concurrency must be between 0 and 256")
 	}
-	if maximum := a.configInt(command, "max-inputs", "ingest.max_inputs"); maximum <= 0 {
+	if maximum := s.GetInt("ingest.max_inputs"); maximum <= 0 {
 		return errors.New("max-inputs must be positive")
 	}
-	if err := ingest.DryRunMode(a.configString(command, "dry-run", "ingest.dry_run")).Validate(); err != nil {
+	if err := ingest.DryRunMode(s.GetString("ingest.dry_run")).Validate(); err != nil {
 		return err
 	}
-	if err := ingest.InputMode(a.configString(command, "input-mode", "ingest.input_mode")).Validate(); err != nil {
+	if err := ingest.InputMode(s.GetString("ingest.input_mode")).Validate(); err != nil {
 		return err
 	}
-	if err := ingest.VerificationMode(a.configString(command, "verify", "ingest.verify")).Validate(); err != nil {
+	if err := ingest.VerificationMode(s.GetString("ingest.verify")).Validate(); err != nil {
 		return err
 	}
-	if _, err := parseByteSize(a.configString(command, "staging-byte-budget", "ingest.staging_byte_budget")); err != nil {
+	if _, err := parseByteSize(s.GetString("ingest.staging_byte_budget")); err != nil {
 		return err
 	}
-	if duration := a.configDuration(command, "segment-duration", "ingest.segment_duration"); duration < 0 {
+	if duration := s.GetDuration("ingest.segment_duration"); duration < 0 {
 		return errors.New("segment duration cannot be negative")
 	}
-	if err := media.SegmentFormat(a.configString(command, "segment-format", "ingest.segment_format")).Validate(); err != nil {
+	if err := media.SegmentFormat(s.GetString("ingest.segment_format")).Validate(); err != nil {
 		return err
 	}
-	if err := media.EssenceStorage(a.configString(command, "essence-storage", "ingest.essence_storage")).Validate(); err != nil {
+	if err := media.EssenceStorage(s.GetString("ingest.essence_storage")).Validate(); err != nil {
 		return err
 	}
-	if selection := a.configString(command, "profile", "ingest.profile"); strings.TrimSpace(selection) != "" {
-		if _, err := a.resolvedConfigProfile(command); err != nil {
+	if strings.TrimSpace(s.GetString("ingest.profile")) != "" {
+		if _, err := s.treatment(); err != nil {
 			return err
 		}
 	}
-	if _, err := media.ParseTimestamp(a.configString(command, "start", "ingest.start")); err != nil {
+	if _, err := media.ParseTimestamp(s.GetString("ingest.start")); err != nil {
 		return err
 	}
-	for _, identifier := range []struct {
-		key, flag, label string
-	}{
-		{key: "ingest.flow_id", flag: "flow-id", label: "flow ID"},
-		{key: "ingest.source_id", flag: "source-id", label: "source ID"},
-		{key: "ingest.storage_id", flag: "storage-id", label: "storage ID"},
+	for _, identifier := range []struct{ key, label string }{
+		{key: "ingest.flow_id", label: "flow ID"},
+		{key: "ingest.source_id", label: "source ID"},
+		{key: "ingest.storage_id", label: "storage ID"},
 	} {
-		value := a.configString(command, identifier.flag, identifier.key)
+		value := s.GetString(identifier.key)
 		if value == "" {
 			continue
 		}
@@ -629,79 +601,87 @@ func (a *application) validateConfigValues(command *cobra.Command) error {
 			return fmt.Errorf("%s must be a UUID: %w", identifier.label, err)
 		}
 	}
-	if _, err := parseHeaders(a.configStringArray(command, "input-header", "source.http_headers")); err != nil {
+	if _, err := parseHeaders(s.GetStringSlice("source.http_headers")); err != nil {
 		return err
 	}
-	if err := a.validateConfiguredURLs(command); err != nil {
-		return err
+	return s.validateURLs()
+}
+
+func (s *settings) validateGlobal() error {
+	switch strings.ToLower(s.GetString("format")) {
+	case "human", "json":
+	default:
+		return fmt.Errorf("invalid result format %q", s.GetString("format"))
+	}
+	switch strings.ToLower(s.GetString("color")) {
+	case "auto", "always", "never":
+	default:
+		return fmt.Errorf("invalid color mode %q", s.GetString("color"))
+	}
+	switch strings.ToLower(s.GetString("log.format")) {
+	case "text", "json":
+	default:
+		return fmt.Errorf("invalid log format %q", s.GetString("log.format"))
+	}
+	switch strings.ToLower(s.GetString("log.level")) {
+	case "debug", "info", "warn", "warning", "error":
+	default:
+		return fmt.Errorf("invalid log level %q", s.GetString("log.level"))
+	}
+	switch strings.ToLower(s.GetString("progress")) {
+	case "auto", "plain", "none":
+	default:
+		return fmt.Errorf("invalid progress mode %q", s.GetString("progress"))
+	}
+	switch auth.Mode(s.GetString("auth.mode")) {
+	case auth.ModeAuto, auth.ModeNone, auth.ModeBasic, auth.ModeBearer, auth.ModeURLToken, auth.ModeOAuthClient, auth.ModeOAuthCode:
+	default:
+		return fmt.Errorf("invalid authentication mode %q", s.GetString("auth.mode"))
+	}
+	if timeout := s.GetDuration("http.timeout"); timeout <= 0 {
+		return errors.New("HTTP timeout must be positive")
+	}
+	if timeout := s.GetDuration("http.transfer_timeout"); timeout < 0 {
+		return errors.New("transfer timeout cannot be negative")
+	}
+	if timeout := s.GetDuration("http.transfer_idle_timeout"); timeout <= 0 {
+		return errors.New("transfer idle timeout must be positive")
+	}
+	if retries := s.GetInt("http.retries"); retries < 0 || retries > 20 {
+		return errors.New("HTTP retries must be between 0 and 20")
 	}
 	return nil
 }
 
-type treatmentSettings struct {
-	selection               string
-	segmentDuration         time.Duration
-	segmentFormat           media.SegmentFormat
-	essenceStorage          media.EssenceStorage
-	ffmpegArgs              []string
-	segmentDurationExplicit bool
-	segmentFormatExplicit   bool
-	essenceStorageExplicit  bool
-}
-
-// resolveTreatment is the input-independent media-policy validator shared by
-// doctor and ingest.
-func resolveTreatment(settings treatmentSettings) (ingest.Profile, error) {
-	overrides := ingest.ProfileOverrides{FFmpegArgs: len(settings.ffmpegArgs) > 0}
-	if settings.segmentDurationExplicit {
-		overrides.SegmentDuration = &settings.segmentDuration
+// treatment resolves the selected profile with every explicitly set media
+// override applied, independently of any input.
+func (s *settings) treatment() (ingest.Profile, error) {
+	ffmpegArgs := s.GetStringSlice("media.ffmpeg_args")
+	overrides := ingest.ProfileOverrides{FFmpegArgs: len(ffmpegArgs) > 0}
+	if s.explicit("ingest.segment_duration") {
+		segmentDuration := s.GetDuration("ingest.segment_duration")
+		overrides.SegmentDuration = &segmentDuration
 	}
-	if settings.segmentFormatExplicit {
-		overrides.SegmentFormat = &settings.segmentFormat
+	if s.explicit("ingest.segment_format") {
+		segmentFormat := media.SegmentFormat(s.GetString("ingest.segment_format"))
+		overrides.SegmentFormat = &segmentFormat
 	}
-	if settings.essenceStorageExplicit {
-		overrides.EssenceStorage = &settings.essenceStorage
+	if s.explicit("ingest.essence_storage") {
+		essenceStorage := media.EssenceStorage(s.GetString("ingest.essence_storage"))
+		overrides.EssenceStorage = &essenceStorage
 	}
-	profile, err := ingest.ResolveProfile(settings.selection, overrides)
+	profile, err := ingest.ResolveProfile(s.GetString("ingest.profile"), overrides)
 	if err != nil {
 		return ingest.Profile{}, err
 	}
-	if err := ingest.ValidateTreatment(profile, settings.ffmpegArgs); err != nil {
+	if err := ingest.ValidateTreatment(profile, ffmpegArgs); err != nil {
 		return ingest.Profile{}, err
 	}
 	return profile, nil
 }
 
-// resolvedConfigProfile applies the active command's local overrides before
-// file/environment values. Commands without treatment flags naturally inspect
-// the effective configured treatment.
-func (a *application) resolvedConfigProfile(command *cobra.Command) (ingest.Profile, error) {
-	return resolveTreatment(treatmentSettings{
-		selection:               a.configString(command, "profile", "ingest.profile"),
-		segmentDuration:         a.configDuration(command, "segment-duration", "ingest.segment_duration"),
-		segmentFormat:           media.SegmentFormat(a.configString(command, "segment-format", "ingest.segment_format")),
-		essenceStorage:          media.EssenceStorage(a.configString(command, "essence-storage", "ingest.essence_storage")),
-		ffmpegArgs:              a.configStringArray(command, "ffmpeg-arg", "media.ffmpeg_args"),
-		segmentDurationExplicit: a.configOptionExplicit(command, "segment-duration", "ingest.segment_duration"),
-		segmentFormatExplicit:   a.configOptionExplicit(command, "segment-format", "ingest.segment_format"),
-		essenceStorageExplicit:  a.configOptionExplicit(command, "essence-storage", "ingest.essence_storage"),
-	})
-}
-
-func (a *application) configOptionExplicit(command *cobra.Command, flag, key string) bool {
-	return commandFlagChanged(command, flag) || a.configValueExplicit(key)
-}
-
-func (a *application) configValueExplicit(key string) bool {
-	if a.v.InConfig(key) {
-		return true
-	}
-	value, exists := os.LookupEnv(configEnvironmentName(key))
-	return exists && value != ""
-}
-
-func (a *application) validateConfiguredURLs(command *cobra.Command) error {
-	if endpoint := a.v.GetString("endpoint"); endpoint != "" {
+func (s *settings) validateURLs() error {
+	if endpoint := s.GetString("endpoint"); endpoint != "" {
 		if _, err := validateTAMSEndpoint(endpoint); err != nil {
 			return err
 		}
@@ -710,9 +690,9 @@ func (a *application) validateConfiguredURLs(command *cobra.Command) error {
 		label string
 		value string
 	}{
-		{label: "OAuth token URL", value: a.v.GetString("auth.token_url")},
-		{label: "OAuth redirect URL", value: a.v.GetString("auth.redirect_url")},
-		{label: "S3 endpoint", value: a.configString(command, "s3-endpoint", "source.s3_endpoint")},
+		{label: "OAuth token URL", value: s.GetString("auth.token_url")},
+		{label: "OAuth redirect URL", value: s.GetString("auth.redirect_url")},
+		{label: "S3 endpoint", value: s.GetString("source.s3_endpoint")},
 	} {
 		if configuredURL.value == "" {
 			continue

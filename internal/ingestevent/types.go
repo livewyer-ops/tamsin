@@ -7,6 +7,9 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/livewyer-ops/tamsin/internal/ingest"
+	"github.com/livewyer-ops/tamsin/internal/progress"
 )
 
 var codePattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]*$`)
@@ -25,12 +28,6 @@ const (
 	// envelope, including its trailing newline. Object and Flow results are
 	// deliberately split so ordinary records stay far below this limit.
 	DefaultMaxEventBytes = 1 << 20
-	// AdvertisedMaxEventBytesLimit prevents a producer from asking consumers to
-	// treat arbitrarily large records as ordinary protocol events.
-	AdvertisedMaxEventBytesLimit = 16 << 20
-	// MinimumMaxEventBytes prevents a producer from advertising a limit too
-	// small for the mandatory protocol envelope.
-	MinimumMaxEventBytes = 512
 	// Diagnostic fields are independently bounded because they originate near
 	// error boundaries and must never become an unbounded provider-error tunnel.
 	MaxDiagnosticCodeBytes    = 128
@@ -125,15 +122,6 @@ type RunStarted struct {
 
 func (RunStarted) EventType() Type { return TypeRunStarted }
 
-// KnownInputCount marks requested_inputs as known, including a known count of
-// zero. A nil pointer means discovery has not established the count yet.
-func KnownInputCount(count uint64) *uint64 { return &count }
-
-// KnownSetting marks an optional scalar setting as resolved. It is useful for
-// booleans, where false must remain distinguishable from startup failure before
-// the setting was resolved.
-func KnownSetting[T any](value T) *T { return &value }
-
 type InputDeclared struct {
 	Input string `json:"input"`
 }
@@ -152,50 +140,32 @@ type InputStarted struct {
 
 func (InputStarted) EventType() Type { return TypeInputStarted }
 
-type FlowKind string
-
-const (
-	FlowKindEssence    FlowKind = "essence"
-	FlowKindCollection FlowKind = "collection"
-	// FlowKindMuxed is a multi-essence Flow which directly owns Media Objects.
-	// Collection is reserved for the empty association-only Flow used by
-	// demuxed ingest.
-	FlowKindMuxed FlowKind = "muxed"
-)
-
 type FlowPlanned struct {
-	FlowID            string   `json:"flow_id"`
-	SourceID          string   `json:"source_id"`
-	Kind              FlowKind `json:"kind"`
-	Role              string   `json:"role,omitempty"`
-	Root              bool     `json:"root"`
-	ParentFlowID      string   `json:"parent_flow_id,omitempty"`
-	Format            string   `json:"format,omitempty"`
-	Container         string   `json:"container,omitempty"`
-	TAMSFlowProfileID string   `json:"tams_flow_profile_id,omitempty"`
+	FlowID            string          `json:"flow_id"`
+	SourceID          string          `json:"source_id"`
+	Kind              ingest.FlowKind `json:"kind"`
+	Role              string          `json:"role,omitempty"`
+	Root              bool            `json:"root"`
+	ParentFlowID      string          `json:"parent_flow_id,omitempty"`
+	Format            string          `json:"format,omitempty"`
+	Container         string          `json:"container,omitempty"`
+	TAMSFlowProfileID string          `json:"tams_flow_profile_id,omitempty"`
 }
 
 func (FlowPlanned) EventType() Type { return TypeFlowPlanned }
-
-type ProgressPhase string
-
-const (
-	ProgressStore  ProgressPhase = "store"
-	ProgressVerify ProgressPhase = "verify"
-)
 
 // ProgressSnapshot is cumulative for one input and phase. Totals may grow
 // while TotalsFinal is false. Once true, totals cannot change; consumers must
 // not present a percentage before that point.
 type ProgressSnapshot struct {
-	Revision         uint64        `json:"revision"`
-	Phase            ProgressPhase `json:"phase"`
-	TotalsFinal      bool          `json:"totals_final"`
-	CompletedObjects uint64        `json:"completed_objects"`
-	TotalObjects     uint64        `json:"total_objects"`
-	CompletedBytes   uint64        `json:"completed_bytes"`
-	TotalBytes       uint64        `json:"total_bytes"`
-	ElapsedMS        uint64        `json:"elapsed_ms"`
+	Revision         uint64         `json:"revision"`
+	Phase            progress.Phase `json:"phase"`
+	TotalsFinal      bool           `json:"totals_final"`
+	CompletedObjects uint64         `json:"completed_objects"`
+	TotalObjects     uint64         `json:"total_objects"`
+	CompletedBytes   uint64         `json:"completed_bytes"`
+	TotalBytes       uint64         `json:"total_bytes"`
+	ElapsedMS        uint64         `json:"elapsed_ms"`
 }
 
 func (ProgressSnapshot) EventType() Type { return TypeProgressSnapshot }
@@ -213,24 +183,8 @@ func (RetryScheduled) EventType() Type { return TypeRetryScheduled }
 
 type Severity string
 
-const (
-	SeverityDebug   Severity = "debug"
-	SeverityInfo    Severity = "info"
-	SeverityWarning Severity = "warning"
-	SeverityError   Severity = "error"
-
-	// Stable diagnostic and input failure codes emitted by TAMSin. Consumers
-	// may branch on these values while retaining the payload message as their
-	// display fallback.
-	DiagnosticCodeConfigInvalid  = "config.invalid"
-	DiagnosticCodeObjectStranded = "object.stranded"
-	InputErrorCodeRunInterrupted = "run.interrupted"
-	InputErrorCodeIngestFailed   = "ingest.input_failed"
-)
-
-func validSeverity(value Severity) bool {
-	return value == SeverityDebug || value == SeverityInfo || value == SeverityWarning || value == SeverityError
-}
+// SeverityError is the only severity TAMSin emits.
+const SeverityError Severity = "error"
 
 func clonePtr[T any](value *T) *T {
 	if value == nil {
@@ -254,13 +208,10 @@ type Diagnostic struct {
 
 func (Diagnostic) EventType() Type { return TypeDiagnostic }
 
-// NewDiagnostic validates the stable branching fields and bounds display text
-// without splitting UTF-8. It does not accept arbitrary structured fields or a
-// raw error. Callers remain responsible for supplying credential-free text.
-func NewDiagnostic(severity Severity, code, message, hint string, actionRequired bool) (Diagnostic, error) {
-	if !validSeverity(severity) {
-		return Diagnostic{}, fmt.Errorf("unknown diagnostic severity %q", severity)
-	}
+// NewDiagnostic validates the stable code and bounds display text without
+// splitting UTF-8. It does not accept arbitrary structured fields or a raw
+// error. Callers remain responsible for supplying credential-free text.
+func NewDiagnostic(code, message, hint string, actionRequired bool) (Diagnostic, error) {
 	if !codePattern.MatchString(code) || len(code) > MaxDiagnosticCodeBytes {
 		return Diagnostic{}, fmt.Errorf("invalid diagnostic code %q", code)
 	}
@@ -270,7 +221,7 @@ func NewDiagnostic(severity Severity, code, message, hint string, actionRequired
 	message, messageTruncated := truncateUTF8(message, MaxDiagnosticMessageBytes)
 	hint, hintTruncated := truncateUTF8(hint, MaxDiagnosticHintBytes)
 	return Diagnostic{
-		Severity: severity, Code: code, Message: message, Hint: hint,
+		Severity: SeverityError, Code: code, Message: message, Hint: hint,
 		ActionRequired: actionRequired, Truncated: messageTruncated || hintTruncated,
 	}, nil
 }
@@ -288,120 +239,45 @@ func truncateUTF8(value string, maximum int) (string, bool) {
 	return clean[:cut], true
 }
 
-type ObjectDisposition string
-
-const (
-	ObjectDispositionPlanned                   ObjectDisposition = "planned"
-	ObjectDispositionUploaded                  ObjectDisposition = "uploaded"
-	ObjectDispositionRegistrationIndeterminate ObjectDisposition = "registration_indeterminate"
-	ObjectDispositionRegistered                ObjectDisposition = "registered"
-	ObjectDispositionRejected                  ObjectDisposition = "rejected"
-	ObjectDispositionIngested                  ObjectDisposition = "ingested"
-	ObjectDispositionResumed                   ObjectDisposition = "resumed"
-	ObjectDispositionRetracted                 ObjectDisposition = "retracted"
-	ObjectDispositionStranded                  ObjectDisposition = "stranded"
-	ObjectDispositionUnattempted               ObjectDisposition = "unattempted"
-)
-
-type ObjectVerificationStatus string
-
-const (
-	ObjectVerificationVerified     ObjectVerificationStatus = "verified"
-	ObjectVerificationNotRequested ObjectVerificationStatus = "not_requested"
-	ObjectVerificationNotReached   ObjectVerificationStatus = "not_reached"
-	ObjectVerificationFailed       ObjectVerificationStatus = "failed"
-)
-
-type VerificationMethod string
-
-const (
-	VerificationMethodNone     VerificationMethod = "none"
-	VerificationMethodStorage  VerificationMethod = "storage"
-	VerificationMethodReadback VerificationMethod = "readback"
-)
-
 type ObjectResult struct {
-	ObjectID           string                   `json:"object_id"`
-	Timerange          string                   `json:"timerange"`
-	Bytes              uint64                   `json:"bytes"`
-	SHA256             string                   `json:"sha256"`
-	Disposition        ObjectDisposition        `json:"disposition"`
-	Verification       ObjectVerificationStatus `json:"verification_status"`
-	VerificationMethod VerificationMethod       `json:"verification_method"`
+	ObjectID           string                          `json:"object_id"`
+	Timerange          string                          `json:"timerange"`
+	Bytes              uint64                          `json:"bytes"`
+	SHA256             string                          `json:"sha256"`
+	Disposition        ingest.ObjectDisposition        `json:"disposition"`
+	Verification       ingest.ObjectVerificationStatus `json:"verification_status"`
+	VerificationMethod ingest.VerificationMethod       `json:"verification_method"`
 }
 
 func (ObjectResult) EventType() Type { return TypeObjectResult }
 
-type FlowDisposition string
-
-const (
-	FlowPlannedDisposition FlowDisposition = "planned"
-	FlowUnchanged          FlowDisposition = "unchanged"
-	FlowWritten            FlowDisposition = "written"
-	FlowIndeterminate      FlowDisposition = "indeterminate"
-	FlowUnattempted        FlowDisposition = "unattempted"
-)
-
 type FlowResult struct {
-	FlowID            string          `json:"flow_id"`
-	SourceID          string          `json:"source_id"`
-	Kind              FlowKind        `json:"kind"`
-	Role              string          `json:"role,omitempty"`
-	TAMSFlowProfileID string          `json:"tams_flow_profile_id,omitempty"`
-	Disposition       FlowDisposition `json:"disposition"`
-	ObjectSummary     ObjectSummary   `json:"object_summary"`
-}
-
-type ObjectSummary struct {
-	Total            uint64 `json:"total"`
-	Bytes            uint64 `json:"bytes"`
-	Ingested         uint64 `json:"ingested"`
-	Resumed          uint64 `json:"resumed"`
-	Rejected         uint64 `json:"rejected"`
-	Retracted        uint64 `json:"retracted"`
-	Stranded         uint64 `json:"stranded"`
-	Unattempted      uint64 `json:"unattempted"`
-	Verified         uint64 `json:"verified"`
-	StorageVerified  uint64 `json:"storage_verified"`
-	ReadbackVerified uint64 `json:"readback_verified"`
+	FlowID            string                 `json:"flow_id"`
+	SourceID          string                 `json:"source_id"`
+	Kind              ingest.FlowKind        `json:"kind"`
+	Role              string                 `json:"role,omitempty"`
+	TAMSFlowProfileID string                 `json:"tams_flow_profile_id,omitempty"`
+	Disposition       ingest.FlowDisposition `json:"disposition"`
+	ObjectSummary     ingest.ObjectSummary   `json:"object_summary"`
 }
 
 func (FlowResult) EventType() Type { return TypeFlowResult }
 
-type InputStatus string
-
-const (
-	InputPlanned  InputStatus = "planned"
-	InputIngested InputStatus = "ingested"
-	InputResumed  InputStatus = "resumed"
-	InputFailed   InputStatus = "failed"
-)
-
-type VerificationStatus string
-
-const (
-	VerificationVerified        VerificationStatus = "verified"
-	VerificationNotRequested    VerificationStatus = "not_requested"
-	VerificationNotReached      VerificationStatus = "not_reached"
-	VerificationFailedRetracted VerificationStatus = "failed_retracted"
-	VerificationFailedStranded  VerificationStatus = "failed_stranded"
-)
-
 type InputFinished struct {
-	Input          string             `json:"input"`
-	Profile        string             `json:"profile"`
-	ProfileVersion string             `json:"profile_version"`
-	FFmpegVersion  string             `json:"ffmpeg_version,omitempty"`
-	MediaToolchain string             `json:"media_toolchain,omitempty"`
-	RootFlowID     string             `json:"root_flow_id,omitempty"`
-	Bytes          uint64             `json:"bytes,omitempty"`
-	SHA256         string             `json:"sha256,omitempty"`
-	Status         InputStatus        `json:"status"`
-	Verification   VerificationStatus `json:"verification"`
-	FlowCount      uint64             `json:"flow_count"`
-	ObjectCount    uint64             `json:"object_count"`
-	ErrorCode      string             `json:"error_code,omitempty"`
-	Message        string             `json:"message,omitempty"`
+	Input          string                    `json:"input"`
+	Profile        string                    `json:"profile"`
+	ProfileVersion string                    `json:"profile_version"`
+	FFmpegVersion  string                    `json:"ffmpeg_version,omitempty"`
+	MediaToolchain string                    `json:"media_toolchain,omitempty"`
+	RootFlowID     string                    `json:"root_flow_id,omitempty"`
+	Bytes          uint64                    `json:"bytes,omitempty"`
+	SHA256         string                    `json:"sha256,omitempty"`
+	Status         ingest.ResultStatus       `json:"status"`
+	Verification   ingest.VerificationStatus `json:"verification"`
+	FlowCount      uint64                    `json:"flow_count"`
+	ObjectCount    uint64                    `json:"object_count"`
+	ErrorCode      string                    `json:"error_code,omitempty"`
+	Message        string                    `json:"message,omitempty"`
 }
 
 func (InputFinished) EventType() Type { return TypeInputFinished }
@@ -409,11 +285,9 @@ func (InputFinished) EventType() Type { return TypeInputFinished }
 type CancellationReason string
 
 const (
-	CancellationSignal       CancellationReason = "signal"
-	CancellationParent       CancellationReason = "parent"
-	CancellationDeadline     CancellationReason = "deadline"
-	CancellationOutputClosed CancellationReason = "output_closed"
-	CancellationInternal     CancellationReason = "internal"
+	CancellationSignal   CancellationReason = "signal"
+	CancellationParent   CancellationReason = "parent"
+	CancellationDeadline CancellationReason = "deadline"
 )
 
 type RunCancellationRequested struct {

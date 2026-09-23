@@ -302,22 +302,22 @@ type Failure struct {
 }
 
 type Result struct {
-	Input          string             `json:"input"`
-	Profile        string             `json:"profile"`
-	ProfileVersion string             `json:"profile_version"`
-	FFmpegVersion  string             `json:"ffmpeg_version,omitempty"`
-	MediaToolchain string             `json:"media_toolchain,omitempty"`
-	RootFlowID     string             `json:"root_flow_id,omitempty"`
-	Bytes          int64              `json:"bytes,omitempty"`
-	SHA256         string             `json:"sha256,omitempty"`
-	Status         ResultStatus       `json:"status"`
-	Verification   VerificationStatus `json:"verification"`
-	Flows          []FlowResult       `json:"flows"`
-	Failure        *Failure           `json:"failure,omitempty"`
+	Input          string
+	Profile        string
+	ProfileVersion string
+	FFmpegVersion  string
+	MediaToolchain string
+	RootFlowID     string
+	Bytes          int64
+	SHA256         string
+	Status         ResultStatus
+	Verification   VerificationStatus
+	Flows          []FlowResult
+	Failure        *Failure
 	// Error retains detailed in-process diagnostics for direct internal callers
 	// and tests. It is deliberately excluded from every serialized or rendered
 	// contract; external process consumers use Failure instead.
-	Error string `json:"-"`
+	Error string
 }
 
 func (r *Result) rootFlow() *FlowResult {
@@ -330,15 +330,15 @@ func (r *Result) rootFlow() *FlowResult {
 }
 
 type BatchResult struct {
-	SchemaVersion  string   `json:"schema_version"`
-	ToolVersion    string   `json:"tool_version"`
-	ToolCommit     string   `json:"tool_commit"`
-	ToolBuildDate  string   `json:"tool_build_date,omitempty"`
-	ProfileVersion string   `json:"profile_version"`
-	RunID          string   `json:"run_id"`
-	Results        []Result `json:"results"`
-	Succeeded      int      `json:"succeeded"`
-	Failed         int      `json:"failed"`
+	SchemaVersion  string
+	ToolVersion    string
+	ToolCommit     string
+	ToolBuildDate  string
+	ProfileVersion string
+	RunID          string
+	Results        []Result
+	Succeeded      int
+	Failed         int
 }
 
 type ResultObserver func(index int, result Result) error

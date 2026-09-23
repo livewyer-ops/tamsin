@@ -261,8 +261,21 @@ func TestHumanUnits(t *testing.T) {
 	}
 }
 
+// summarise fills each Flow's Object summary from its Objects, as the pipeline
+// does before it returns a Result.
+func summarise(batch ingest.BatchResult) ingest.BatchResult {
+	for _, result := range batch.Results {
+		for index := range result.Flows {
+			for _, object := range result.Flows[index].Objects {
+				ingest.AccumulateObjectSummary(&result.Flows[index].ObjectSummary, object)
+			}
+		}
+	}
+	return batch
+}
+
 func successBatch() ingest.BatchResult {
-	return ingest.BatchResult{
+	return summarise(ingest.BatchResult{
 		SchemaVersion: "1.0", ToolVersion: "0.1.0", ToolCommit: strings.Repeat("c", 40),
 		ProfileVersion: "1", RunID: testRunID, Succeeded: 1,
 		Results: []ingest.Result{{
@@ -270,21 +283,21 @@ func successBatch() ingest.BatchResult {
 			RootFlowID: testCollection, Bytes: 1419776, SHA256: strings.Repeat("a", 64),
 			Status: ingest.ResultStatusIngested, Verification: ingest.VerificationVerified,
 			Flows: []ingest.FlowResult{
-				{FlowID: testCollection, SourceID: testSource, Disposition: ingest.FlowWritten},
-				{FlowID: testVideo, SourceID: "88888888-8888-4888-8888-888888888888", Role: "video", Disposition: ingest.FlowWritten, Objects: []ingest.ObjectResult{
+				{FlowID: testCollection, SourceID: testSource, Kind: ingest.FlowKindCollection, Disposition: ingest.FlowWritten},
+				{FlowID: testVideo, SourceID: "88888888-8888-4888-8888-888888888888", Kind: ingest.FlowKindEssence, Role: "video", Disposition: ingest.FlowWritten, Objects: []ingest.ObjectResult{
 					{ObjectID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", Timerange: "0:0_1:25", Bytes: 500000, SHA256: strings.Repeat("1", 64), Disposition: ingest.ObjectDispositionRegistered, Verification: ingest.ObjectVerificationVerified},
 					{ObjectID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", Timerange: "1:25_2:25", Bytes: 500000, SHA256: strings.Repeat("2", 64), Disposition: ingest.ObjectDispositionRegistered, Verification: ingest.ObjectVerificationVerified},
 				}},
-				{FlowID: testAudio, SourceID: "99999999-9999-4999-8999-999999999999", Role: "audio", Disposition: ingest.FlowWritten, Objects: []ingest.ObjectResult{
+				{FlowID: testAudio, SourceID: "99999999-9999-4999-8999-999999999999", Kind: ingest.FlowKindEssence, Role: "audio", Disposition: ingest.FlowWritten, Objects: []ingest.ObjectResult{
 					{ObjectID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", Timerange: "0:0_2:25", Bytes: 514152, SHA256: strings.Repeat("3", 64), Disposition: ingest.ObjectDispositionRegistered, Verification: ingest.ObjectVerificationVerified},
 				}},
 			},
 		}},
-	}
+	})
 }
 
 func failureBatch() ingest.BatchResult {
-	return ingest.BatchResult{
+	return summarise(ingest.BatchResult{
 		SchemaVersion: "1.0", ToolVersion: "0.1.0", ToolCommit: strings.Repeat("d", 40),
 		ProfileVersion: "1", RunID: testRunID, Failed: 1,
 		Results: []ingest.Result{{
@@ -296,15 +309,15 @@ func failureBatch() ingest.BatchResult {
 			},
 			Error: "verification failed after a storage timeout; one object could not be retracted",
 			Flows: []ingest.FlowResult{
-				{FlowID: testCollection, SourceID: testSource, Disposition: ingest.FlowIndeterminate},
-				{FlowID: testVideo, SourceID: "88888888-8888-4888-8888-888888888888", Role: "video", Disposition: ingest.FlowWritten, Objects: []ingest.ObjectResult{
+				{FlowID: testCollection, SourceID: testSource, Kind: ingest.FlowKindCollection, Disposition: ingest.FlowIndeterminate},
+				{FlowID: testVideo, SourceID: "88888888-8888-4888-8888-888888888888", Kind: ingest.FlowKindEssence, Role: "video", Disposition: ingest.FlowWritten, Objects: []ingest.ObjectResult{
 					{ObjectID: testStranded, Timerange: "0:0_1:25", Bytes: 1_048_576, SHA256: strings.Repeat("5", 64), Disposition: ingest.ObjectDispositionStranded},
 					{ObjectID: testRetracted, Timerange: "1:25_2:25", Bytes: 1_048_576, SHA256: strings.Repeat("6", 64), Disposition: ingest.ObjectDispositionRetracted},
 					{ObjectID: testUncertain, Timerange: "2:25_3:25", Bytes: 1_048_576, SHA256: strings.Repeat("7", 64), Disposition: ingest.ObjectDispositionRegistrationIndeterminate},
 				}},
 			},
 		}},
-	}
+	})
 }
 
 type failingWriter struct{ err error }

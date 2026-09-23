@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/livewyer-ops/tamsin/internal/ingestevent"
+	"github.com/livewyer-ops/tamsin/internal/progress"
 )
 
 type cliObjectEvent struct {
@@ -22,7 +23,7 @@ type cliInputEventState struct {
 	Declared      *ingestevent.InputDeclared
 	Started       *ingestevent.InputStarted
 	PlannedFlows  map[string]ingestevent.FlowPlanned
-	Progress      map[ingestevent.ProgressPhase]ingestevent.ProgressSnapshot
+	Progress      map[progress.Phase]ingestevent.ProgressSnapshot
 	ObjectResults []cliObjectEvent
 	FlowResults   map[string]ingestevent.FlowResult
 	Finished      *ingestevent.InputFinished
@@ -182,7 +183,7 @@ func (s *cliIngestEventStream) apply(t *testing.T, envelope ingestevent.Envelope
 	if input == nil {
 		input = &cliInputEventState{
 			PlannedFlows: make(map[string]ingestevent.FlowPlanned),
-			Progress:     make(map[ingestevent.ProgressPhase]ingestevent.ProgressSnapshot),
+			Progress:     make(map[progress.Phase]ingestevent.ProgressSnapshot),
 			FlowResults:  make(map[string]ingestevent.FlowResult),
 		}
 		s.state.Inputs[index] = input

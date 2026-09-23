@@ -99,7 +99,7 @@ func registerProfileCompletion(command *cobra.Command) {
 
 func (a *application) writeProfiles(report profilesReport) error {
 	if !strings.EqualFold(a.v.GetString("format"), "human") {
-		return a.writeValue(report)
+		return a.writeJSON(report)
 	}
 	writer := tabwriter.NewWriter(a.stdout, 0, 4, 2, ' ', 0)
 	if _, err := fmt.Fprintln(writer, "PROFILE\tSTORAGE\tTARGET\tFORMAT\tFFMPEG\tOBJECT PATTERN"); err != nil {

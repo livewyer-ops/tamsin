@@ -27,24 +27,30 @@ func (p Phase) valid() bool { return p == PhaseStore || p == PhaseVerify }
 
 // Scope correlates progress with one resolved input.
 type Scope struct {
-	InputIndex int    `json:"input_index"`
-	Input      string `json:"input"`
-	FlowID     string `json:"flow_id,omitempty"`
+	InputIndex int
+	Input      string
 }
 
 // Snapshot is one cumulative view of one input and transfer phase.
 type Snapshot struct {
-	Scope            Scope  `json:"scope"`
-	Phase            Phase  `json:"phase"`
-	CompletedObjects int    `json:"completed_objects"`
-	TotalObjects     int    `json:"total_objects"`
-	CompletedBytes   int64  `json:"completed_bytes"`
-	TotalBytes       int64  `json:"total_bytes"`
-	TotalsFinal      bool   `json:"totals_final"`
-	Revision         uint64 `json:"revision"`
+	Scope            Scope
+	Phase            Phase
+	CompletedObjects int
+	TotalObjects     int
+	CompletedBytes   int64
+	TotalBytes       int64
+	TotalsFinal      bool
+	Revision         uint64
 }
 
-// Validate checks the invariants relied on by progress consumers.
+// Hidden reports whether s is the empty verify snapshot a new Tracker
+// publishes. The matching store snapshot already shows that analysis is under
+// way; the first sealed verify total is the useful verification report.
+func (s Snapshot) Hidden() bool {
+	return s.Phase == PhaseVerify && !s.TotalsFinal && s.CompletedObjects == 0 && s.CompletedBytes == 0
+}
+
+// Validate checks the invariants every Tracker snapshot satisfies.
 func (s Snapshot) Validate() error {
 	if s.Scope.InputIndex < 0 {
 		return errors.New("progress input index cannot be negative")
@@ -103,8 +109,8 @@ type phaseState struct {
 type Tracker struct {
 	reporter Reporter
 	scope    Scope
-	publish  sync.Mutex
-	state    sync.Mutex
+	// mu also orders delivery, so a Reporter never sees revisions out of order.
+	mu       sync.Mutex
 	states   map[Phase]phaseState
 	revision uint64
 }
@@ -137,24 +143,19 @@ func (t *Tracker) SetTotals(phase Phase, objects int, bytes int64, final bool) e
 	if objects < 0 || bytes < 0 {
 		return errors.New("progress totals cannot be negative")
 	}
-	t.publish.Lock()
-	defer t.publish.Unlock()
-	t.state.Lock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	state := t.states[phase]
 	if state.totalsFinal {
 		if !final || objects != state.totalObjects || bytes != state.totalBytes {
-			t.state.Unlock()
 			return errors.New("final progress totals cannot be reopened or changed")
 		}
-		t.state.Unlock()
 		return nil
 	}
 	if objects < state.totalObjects || bytes < state.totalBytes {
-		t.state.Unlock()
 		return errors.New("progress totals cannot decrease")
 	}
 	if final && (objects < state.completedObjects || bytes < state.completedBytes) {
-		t.state.Unlock()
 		return errors.New("final progress totals cannot be lower than completed work")
 	}
 	state.totalObjects = objects
@@ -163,9 +164,7 @@ func (t *Tracker) SetTotals(phase Phase, objects int, bytes int64, final bool) e
 	t.revision++
 	state.revision = t.revision
 	t.states[phase] = state
-	snapshot := t.snapshot(phase, state)
-	t.state.Unlock()
-	t.reporter.Report(snapshot)
+	t.reporter.Report(t.snapshot(phase, state))
 	return nil
 }
 
@@ -176,14 +175,12 @@ func (t *Tracker) Advance(phase Phase, objects int, bytes int64) error {
 	if objects < 0 || bytes < 0 {
 		return errors.New("progress increments cannot be negative")
 	}
-	t.publish.Lock()
-	defer t.publish.Unlock()
-	t.state.Lock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	state := t.states[phase]
 	nextObjects := state.completedObjects + objects
 	nextBytes := state.completedBytes + bytes
 	if state.totalsFinal && (nextObjects > state.totalObjects || nextBytes > state.totalBytes) {
-		t.state.Unlock()
 		return errors.New("completed progress cannot exceed final totals")
 	}
 	state.completedObjects = nextObjects
@@ -191,9 +188,7 @@ func (t *Tracker) Advance(phase Phase, objects int, bytes int64) error {
 	t.revision++
 	state.revision = t.revision
 	t.states[phase] = state
-	snapshot := t.snapshot(phase, state)
-	t.state.Unlock()
-	t.reporter.Report(snapshot)
+	t.reporter.Report(t.snapshot(phase, state))
 	return nil
 }
 
@@ -277,7 +272,6 @@ type Line struct {
 
 type renderKey struct {
 	inputIndex int
-	flowID     string
 	phase      Phase
 }
 
@@ -288,7 +282,7 @@ func (l *Line) Write(payload []byte) (int, error) {
 }
 
 func (l *Line) Report(snapshot Snapshot) {
-	if snapshot.Validate() != nil || hiddenSnapshot(snapshot) {
+	if snapshot.Hidden() {
 		return
 	}
 	l.lock.Lock()
@@ -296,7 +290,7 @@ func (l *Line) Report(snapshot Snapshot) {
 	if l.closed {
 		return
 	}
-	key := renderKey{snapshot.Scope.InputIndex, snapshot.Scope.FlowID, snapshot.Phase}
+	key := renderKey{snapshot.Scope.InputIndex, snapshot.Phase}
 	if _, done := l.finished[key]; done {
 		return
 	}
@@ -342,11 +336,6 @@ func renderSnapshot(snapshot Snapshot) string {
 		bytes = fmt.Sprintf("%s/%s", bytes, humanBytes(snapshot.TotalBytes))
 	}
 	return fmt.Sprintf("%s %s %s, %s", prefix, verb, objects, bytes)
-}
-
-func hiddenSnapshot(snapshot Snapshot) bool {
-	return snapshot.Phase == PhaseVerify && !snapshot.TotalsFinal &&
-		snapshot.CompletedObjects == 0 && snapshot.CompletedBytes == 0
 }
 
 func displayLabel(input string) string {

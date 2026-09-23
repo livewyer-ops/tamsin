@@ -49,7 +49,7 @@ func TestIngestEventOutputSeparatesProgressAndTerminalRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(output.Close)
-	options := &ingestFlagValues{
+	options := &ingestOptions{
 		profile: ingest.ProfileEssenceSegments, profileVersion: "1",
 		verify: string(ingest.VerificationReadback), concurrency: 1, transfers: 1, inputs: []string{"input.ts"},
 	}
@@ -76,17 +76,21 @@ func TestIngestEventOutputSeparatesProgressAndTerminalRecords(t *testing.T) {
 		output.Report(snapshot)
 	}
 	output.Retry(observability.RetryEvent{Operation: observability.OperationObjectUpload, Attempt: 2, MaxAttempts: 3})
+	objects := []ingest.ObjectResult{{
+		ObjectID: eventTestObjectA, Timerange: "[0:0_1:0)", Bytes: 10, SHA256: eventTestDigest,
+		Disposition: ingest.ObjectDispositionIngested, Verification: ingest.ObjectVerificationVerified,
+		VerificationMethod: ingest.VerificationMethodReadback,
+	}}
+	if err := output.ObjectsCompleted(0, eventTestFlowID, objects); err != nil {
+		t.Fatal(err)
+	}
 	result := ingest.Result{
 		Input: "input.ts", Profile: ingest.ProfileEssenceSegments, ProfileVersion: "1",
 		RootFlowID: eventTestFlowID, Status: ingest.ResultStatusIngested, Verification: ingest.VerificationVerified,
 		Flows: []ingest.FlowResult{{
-			FlowID: eventTestFlowID, SourceID: eventTestSourceID, Disposition: ingest.FlowWritten,
+			FlowID: eventTestFlowID, SourceID: eventTestSourceID, Kind: ingest.FlowKindEssence, Disposition: ingest.FlowWritten,
 			ObjectSummary: ingest.ObjectSummary{Total: 1, Bytes: 10, Ingested: 1, Verified: 1, ReadbackVerified: 1},
-			Objects: []ingest.ObjectResult{{
-				ObjectID: eventTestObjectA, Timerange: "[0:0_1:0)", Bytes: 10, SHA256: eventTestDigest,
-				Disposition: ingest.ObjectDispositionIngested, Verification: ingest.ObjectVerificationVerified,
-				VerificationMethod: ingest.VerificationMethodReadback,
-			}},
+			Objects:       objects,
 		}},
 	}
 	if err := output.Result(0, result); err != nil {
@@ -99,8 +103,8 @@ func TestIngestEventOutputSeparatesProgressAndTerminalRecords(t *testing.T) {
 
 	stream := decodeCLIIngestEventStream(t, outputBytes.Bytes())
 	input := stream.state.Inputs[0]
-	if input == nil || input.Finished == nil || input.Progress[ingestevent.ProgressStore].CompletedObjects != 1 ||
-		input.Progress[ingestevent.ProgressVerify].CompletedObjects != 1 || len(input.ObjectResults) != 1 {
+	if input == nil || input.Finished == nil || input.Progress[progress.PhaseStore].CompletedObjects != 1 ||
+		input.Progress[progress.PhaseVerify].CompletedObjects != 1 || len(input.ObjectResults) != 1 {
 		t.Fatalf("incomplete event projection: %#v", input)
 	}
 	if stream.state.RetryCount != 1 || stream.state.Finished == nil || stream.state.Finished.ObjectsVerified != 1 {
@@ -124,7 +128,6 @@ func TestRunFailureMapsEveryExitCode(t *testing.T) {
 		{"auth", ExitAuth, ingest.FailureCodeAuthFailed, ingest.FailureMessageAuthFailed, true},
 		{"partial", ExitPartial, ingest.FailureCodeInputFailed, ingest.FailureMessageInputFailed, false},
 		{"source", ExitSource, ingest.FailureCodeSourceFailed, ingest.FailureMessageSourceFailed, true},
-		{"media", ExitMedia, ingest.FailureCodeMediaFailed, ingest.FailureMessageMediaFailed, true},
 		{"remote", ExitRemote, ingest.FailureCodeTAMSFailed, ingest.FailureMessageTAMSFailed, true},
 		{"interrupted", ExitInterrupted, ingest.FailureCodeInterrupted, ingest.FailureMessageInterrupted, false},
 		{"unrecognised", 99, ingest.FailureCodeRunFailed, ingest.FailureMessageRunFailed, true},
@@ -194,7 +197,7 @@ func TestIngestEventInterruptionCompletesQueuedInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(output.Close)
-	options := &ingestFlagValues{
+	options := &ingestOptions{
 		profile: ingest.ProfileEssenceSegments, profileVersion: "1",
 		verify: string(ingest.VerificationNone), concurrency: 1, transfers: 1, inputs: []string{"done.ts", "queued.ts"},
 	}

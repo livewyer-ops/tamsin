@@ -24,7 +24,6 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/progress"
 	"github.com/livewyer-ops/tamsin/internal/source"
 	"github.com/livewyer-ops/tamsin/internal/tams"
-	"github.com/spf13/cobra"
 )
 
 func TestLoggerForProgressDoesNotChangeConfiguredLevel(t *testing.T) {
@@ -39,10 +38,7 @@ func TestLoggerForProgressDoesNotChangeConfiguredLevel(t *testing.T) {
 				reporter = progress.New(&stderr, progress.Options{Mode: mode})
 			}
 			defer reporter.Close()
-			logger, err := app.loggerFor(reporter)
-			if err != nil {
-				t.Fatal(err)
-			}
+			logger := app.loggerFor(reporter)
 			logger.Info("info-marker")
 			logger.Warn("warn-marker")
 			if !strings.Contains(stderr.String(), "info-marker") || !strings.Contains(stderr.String(), "warn-marker") {
@@ -114,7 +110,7 @@ func TestCLIDryRunFromConfig(t *testing.T) {
 		stream.state.Hello.ToolVersion == "" || stream.state.Hello.ToolCommit == "" || stream.state.RunID == "" ||
 		stream.state.Started == nil || stream.state.Started.Profile != "preserve" || stream.state.Started.ProfileVersion != "1" ||
 		stream.state.Manifest == nil || stream.state.Manifest.TotalInputs != 1 || inputState == nil || inputState.Finished == nil ||
-		inputState.Finished.Status != ingestevent.InputPlanned || inputState.Finished.RootFlowID == "" {
+		inputState.Finished.Status != ingest.ResultStatusPlanned || inputState.Finished.RootFlowID == "" {
 		t.Fatalf("unexpected reduced dry-run stream: hello=%#v started=%#v manifest=%#v input=%#v run=%#v",
 			stream.state.Hello, stream.state.Started, stream.state.Manifest, inputState, stream.state.Finished)
 	}
@@ -149,13 +145,13 @@ func TestCLINamedProfileIsReportedInMachineOutput(t *testing.T) {
 		t.Fatalf("profile was not retained across lifecycle events: started=%#v input=%#v", stream.state.Started, inputState)
 	}
 	plan := inputState.PlannedFlows[inputState.Finished.RootFlowID]
-	if inputState.Started == nil || plan.Kind != ingestevent.FlowKindEssence || plan.Role != "video" ||
+	if inputState.Started == nil || plan.Kind != ingest.FlowKindEssence || plan.Role != "video" ||
 		!plan.Root || plan.ParentFlowID != "" || plan.Format != "urn:x-nmos:format:video" ||
 		len(inputState.ObjectResults) != 1 {
 		t.Fatalf("mono-essence lifecycle was not planned explicitly: started=%#v plan=%#v", inputState.Started, plan)
 	}
-	if object := inputState.ObjectResults[0].Result; object.Disposition != ingestevent.ObjectDispositionPlanned ||
-		object.Verification != ingestevent.ObjectVerificationNotReached {
+	if object := inputState.ObjectResults[0].Result; object.Disposition != ingest.ObjectDispositionPlanned ||
+		object.Verification != ingest.ObjectVerificationNotReached {
 		t.Fatalf("dry-run Object terminal state = %#v, want planned and not_reached", object)
 	}
 }
@@ -258,16 +254,17 @@ func TestCLIDefaultSegmentDurationIsTenSeconds(t *testing.T) {
 func TestCLIRequiresProfileAndResolvesExplicitEssenceSegmentsProfile(t *testing.T) {
 	t.Parallel()
 	app := &application{v: newSettings()}
-	app.configureDefaults()
-	command := &cobra.Command{}
-	raw := addIngestFlags(command)
-	if _, _, err := app.ingestOptions(command, []string{"input.mp4"}, raw); err == nil || !strings.Contains(err.Error(), "profile is required") {
+	command, _, err := app.rootCommand().Find([]string{"ingest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.resolveIngestOptions(command, []string{"input.mp4"}); err == nil || !strings.Contains(err.Error(), "profile is required") {
 		t.Fatalf("ingest without a profile error = %v", err)
 	}
 	if err := command.Flags().Set("profile", ingest.ProfileEssenceSegments); err != nil {
 		t.Fatal(err)
 	}
-	options, _, err := app.ingestOptions(command, []string{"input.mp4"}, raw)
+	options, _, err := app.resolveIngestOptions(command, []string{"input.mp4"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +343,7 @@ func TestCLINumericFlowProfileMatchesByJSONSemanticsBeforeMutation(t *testing.T)
 	for _, flow := range inputState.PlannedFlows {
 		foundProfile = foundProfile || flow.TAMSFlowProfileID == profileID
 	}
-	if !foundProfile || inputState.Finished == nil || inputState.Finished.Status != ingestevent.InputPlanned {
+	if !foundProfile || inputState.Finished == nil || inputState.Finished.Status != ingest.ResultStatusPlanned {
 		t.Fatalf("matching Profile was not retained: %#v", inputState)
 	}
 
@@ -359,7 +356,7 @@ func TestCLINumericFlowProfileMatchesByJSONSemanticsBeforeMutation(t *testing.T)
 	state = decodeCLIIngestEventStream(t, stdout.Bytes()).state
 	inputState = state.Inputs[0]
 	if inputState.Finished == nil || inputState.Finished.ErrorCode != ingest.FailureCodeFlowPlanFailed ||
-		inputState.Finished.Status != ingestevent.InputFailed {
+		inputState.Finished.Status != ingest.ResultStatusFailed {
 		t.Fatalf("mismatching Profile result = %#v", inputState.Finished)
 	}
 	if !strings.Contains(stdout.String(), "/flow_metadata/essence_parameters/frame_rate/numerator: values differ") ||

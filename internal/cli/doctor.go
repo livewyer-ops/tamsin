@@ -113,58 +113,26 @@ func (r *doctorRun) exitCode() int {
 	return ExitGeneral
 }
 
-type doctorFlagValues struct {
-	online            bool
-	profile           string
-	segmentDuration   time.Duration
-	segmentFormat     string
-	essenceStorage    string
-	ffmpegArgs        []string
-	tempDirectory     string
-	stagingByteBudget string
-	storageID         string
-}
-
-type doctorSettings struct {
-	doctorFlagValues
-	stagingBytes int64
-}
-
 func (a *application) doctorCommand() *cobra.Command {
-	raw := &doctorFlagValues{}
 	command := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check local ingest readiness and optional read-only TAMS preflight",
 		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(command *cobra.Command, _ []string) error {
-			return a.runDoctor(command, raw)
+			return a.runDoctor(command)
 		},
 	}
-	flags := command.Flags()
-	flags.BoolVar(&raw.online, "online", false, "also run the read-only TAMS startup preflight")
-	addTreatmentFlags(command, &raw.profile, &raw.segmentDuration, &raw.segmentFormat,
-		&raw.essenceStorage, &raw.ffmpegArgs)
-	addReadinessFlags(command, &raw.tempDirectory, &raw.stagingByteBudget, &raw.storageID)
+	command.Flags().Bool("online", false, "also run the read-only TAMS startup preflight")
+	addTreatmentFlags(command)
+	addReadinessFlags(command)
 	return command
 }
 
-func (a *application) doctorSettings(command *cobra.Command, raw *doctorFlagValues) doctorSettings {
-	settings := doctorSettings{doctorFlagValues: *raw}
-	settings.profile = a.configString(command, "profile", "ingest.profile")
-	settings.segmentDuration = a.configDuration(command, "segment-duration", "ingest.segment_duration")
-	settings.segmentFormat = a.configString(command, "segment-format", "ingest.segment_format")
-	settings.essenceStorage = a.configString(command, "essence-storage", "ingest.essence_storage")
-	settings.ffmpegArgs = a.configStringArray(command, "ffmpeg-arg", "media.ffmpeg_args")
-	settings.tempDirectory = a.configString(command, "temp-dir", "ingest.temp_directory")
-	settings.stagingByteBudget = a.configString(command, "staging-byte-budget", "ingest.staging_byte_budget")
-	settings.storageID = a.configString(command, "storage-id", "ingest.storage_id")
-	return settings
-}
-
-func (a *application) runDoctor(command *cobra.Command, raw *doctorFlagValues) error {
-	run := newDoctorRun(raw.online)
+func (a *application) runDoctor(command *cobra.Command) error {
+	online, _ := command.Flags().GetBool("online")
+	run := newDoctorRun(online)
 	if a.doctorConfigErr != nil {
-		run.report.Profile.Selection = raw.profile
+		run.report.Profile.Selection, _ = command.Flags().GetString("profile")
 		run.fail("configuration", a.doctorConfigErr, ExitUsage, nil)
 		for _, name := range []string{
 			"profile", "staging", "ffprobe", "ffmpeg", "authentication", "service",
@@ -175,10 +143,12 @@ func (a *application) runDoctor(command *cobra.Command, raw *doctorFlagValues) e
 		return a.finishDoctor(command, run)
 	}
 
-	settings := a.doctorSettings(command, raw)
+	v := a.v.forCommand(command)
+	selection := v.GetString("ingest.profile")
+	storageID := v.GetString("ingest.storage_id")
 	var configErr error
-	if settings.storageID != "" {
-		if _, err := uuid.Parse(settings.storageID); err != nil {
+	if storageID != "" {
+		if _, err := uuid.Parse(storageID); err != nil {
 			configErr = errors.Join(configErr, fmt.Errorf("storage ID must be a UUID: %w", err))
 		}
 	}
@@ -195,12 +165,12 @@ func (a *application) runDoctor(command *cobra.Command, raw *doctorFlagValues) e
 		run.pass("configuration", detail)
 	}
 
-	allProfiles := strings.TrimSpace(settings.profile) == ""
+	allProfiles := strings.TrimSpace(selection) == ""
 	profile, profileErr := ingest.Profile{}, error(nil)
 	if !allProfiles {
-		profile, profileErr = a.resolvedConfigProfile(command)
+		profile, profileErr = v.treatment()
 	}
-	run.report.Profile.Selection = settings.profile
+	run.report.Profile.Selection = selection
 	if profileErr != nil {
 		run.fail("profile", profileErr, ExitUsage, nil)
 	} else if allProfiles {
@@ -213,7 +183,7 @@ func (a *application) runDoctor(command *cobra.Command, raw *doctorFlagValues) e
 	} else {
 		requiresFFmpeg := ingest.TreatmentRequiresFFmpeg(profile)
 		run.report.Profile = doctorProfile{
-			Selection: settings.profile, Name: profile.Name, Version: profile.Version,
+			Selection: selection, Name: profile.Name, Version: profile.Version,
 			SegmentDuration: profile.SegmentDuration.String(), SegmentFormat: string(profile.SegmentFormat),
 			EssenceStorage: string(profile.EssenceStorage), RequiresFFmpeg: requiresFFmpeg,
 		}
@@ -225,14 +195,14 @@ func (a *application) runDoctor(command *cobra.Command, raw *doctorFlagValues) e
 		})
 	}
 
-	stagingBytes, budgetErr := parseByteSize(settings.stagingByteBudget)
-	settings.stagingBytes = stagingBytes
+	budget := v.GetString("ingest.staging_byte_budget")
+	stagingBytes, budgetErr := parseByteSize(budget)
 	if budgetErr != nil {
 		run.fail("staging", budgetErr, ExitUsage, nil)
-	} else if inspection, err := ingest.InspectStaging(settings.tempDirectory, stagingBytes); err != nil {
-		run.fail("staging", err, ExitGeneral, stagingDetail(inspection, settings.stagingByteBudget))
+	} else if inspection, err := ingest.InspectStaging(v.GetString("ingest.temp_directory"), stagingBytes); err != nil {
+		run.fail("staging", err, ExitGeneral, stagingDetail(inspection, budget))
 	} else {
-		run.pass("staging", stagingDetail(inspection, settings.stagingByteBudget))
+		run.pass("staging", stagingDetail(inspection, budget))
 	}
 
 	ffprobe := media.FFprobe{Executable: a.v.GetString("media.ffprobe")}
@@ -254,8 +224,8 @@ func (a *application) runDoctor(command *cobra.Command, raw *doctorFlagValues) e
 		}
 	}
 
-	if raw.online && configErr == nil {
-		a.runDoctorOnline(command.Context(), run, settings)
+	if online && configErr == nil {
+		a.runDoctorOnline(command.Context(), run, storageID)
 	} else if configErr != nil {
 		for _, name := range []string{"authentication", "service", "api_compatibility", "service_lifetimes", "storage_backends", "storage_selection"} {
 			run.skip(name, "configuration did not resolve safely")
@@ -299,7 +269,7 @@ func stagingDetail(inspection ingest.StagingInspection, configured string) map[s
 	return detail
 }
 
-func (a *application) runDoctorOnline(ctx context.Context, run *doctorRun, settings doctorSettings) {
+func (a *application) runDoctorOnline(ctx context.Context, run *doctorRun, storageID string) {
 	endpoint := strings.TrimRight(a.v.GetString("endpoint"), "/")
 	if endpoint == "" {
 		run.fail("authentication", errors.New("--online requires --endpoint"), ExitUsage, nil)
@@ -412,7 +382,7 @@ func (a *application) runDoctorOnline(ctx context.Context, run *doctorRun, setti
 		run.skip("storage_selection", "storage backends were unavailable")
 	} else {
 		run.pass("storage_backends", map[string]any{"count": len(backends), "request": "GET /service/storage-backends"})
-		selection, selectionErr := ingest.ResolveStorageBackend(backends, settings.storageID)
+		selection, selectionErr := ingest.ResolveStorageBackend(backends, storageID)
 		if selectionErr != nil {
 			run.fail("storage_selection", selectionErr, ExitRemote, nil)
 		} else {
@@ -519,7 +489,5 @@ func (a *application) writeDoctorReport(report doctorResult) error {
 		}
 		return nil
 	}
-	encoder := json.NewEncoder(a.stdout)
-	encoder.SetEscapeHTML(false)
-	return encoder.Encode(report)
+	return a.writeJSON(report)
 }

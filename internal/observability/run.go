@@ -96,21 +96,19 @@ type Run struct {
 	logger  *slog.Logger
 	started time.Time
 	now     func() time.Time
+	retry   RetryObserver
 
 	mu      sync.Mutex
-	retry   RetryObserver
 	metrics Snapshot
 }
 
-// SetRetryObserver replaces the run's retry observer. It is safe to call
-// before or during a run; the CLI installs it before creating any clients.
+// SetRetryObserver installs the run's retry observer. Call it before the run
+// is shared with any client.
 func (r *Run) SetRetryObserver(observer RetryObserver) {
 	if r == nil {
 		return
 	}
-	r.mu.Lock()
 	r.retry = observer
-	r.mu.Unlock()
 }
 
 // New starts a run with a correlated logger and cumulative metrics.
@@ -154,7 +152,6 @@ func (r *Run) Retry(operation Operation, attempt, max, statusCode int, cause err
 	}
 	r.mu.Lock()
 	r.metrics.Retries++
-	observer := r.retry
 	r.mu.Unlock()
 	r.logger.Debug("retry scheduled",
 		"operation", event.Operation.String(),
@@ -163,8 +160,8 @@ func (r *Run) Retry(operation Operation, attempt, max, statusCode int, cause err
 		"status_class", event.StatusClass,
 		"error_class", event.ErrorClass,
 		"backoff", event.Backoff)
-	if observer != nil {
-		observer(event)
+	if r.retry != nil {
+		r.retry(event)
 	}
 }
 

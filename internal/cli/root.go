@@ -31,7 +31,6 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/tams"
 	"github.com/livewyer-ops/tamsin/internal/version"
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 )
 
 // defaultSegmentDuration targets Media Objects that are, in the words of TAMS
@@ -54,9 +53,8 @@ type application struct {
 	configFile        string
 	configFileWarning string
 	ingestInvocation  bool
-	// ingestTerminalFrozen marks the point after which all terminal projections
-	// share one cancellation decision. Execute must not let a later caller
-	// cancellation rewrite only the process exit code.
+	// ingestTerminalFrozen is set once the ingest outcome is decided, after
+	// which a caller cancellation must not rewrite the exit code.
 	ingestTerminalFrozen bool
 	events               *ingestEventOutput
 	humanReceipt         bool
@@ -150,57 +148,37 @@ func (a *application) rootCommand() *cobra.Command {
 		Version:       version.String(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Args: usageArgs(func(command *cobra.Command, args []string) error {
-			a.ingestInvocation = true
-			return cobra.MaximumNArgs(2)(command, args)
-		}),
+		Args:          usageArgs(cobra.MaximumNArgs(2)),
+		RunE:          a.runIngest,
 	}
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return withExit(ExitUsage, err) })
 
-	a.configureDefaults()
-	a.addPersistentFlags(root)
+	addPersistentFlags(root)
+	addIngestFlags(root)
+	a.v.bind(root)
 	root.PersistentPreRunE = func(command *cobra.Command, _ []string) error {
 		a.ingestInvocation = command == root || command.Name() == "ingest"
 		if command.Annotations[configIndependentAnnotation] == "true" {
 			return nil
 		}
-		if err := a.loadConfig(); err != nil {
-			if command.Name() == "doctor" {
-				a.doctorConfigErr = err
-				return nil
-			}
-			return withExit(ExitUsage, err)
-		}
-		if err := a.validateConfigEnvironment(); err != nil {
-			if command.Name() == "doctor" {
-				a.doctorConfigErr = err
-				return nil
-			}
-			return withExit(ExitUsage, err)
+		err := a.loadConfig()
+		if err == nil {
+			err = a.validateConfigEnvironment()
 		}
 		if command.Name() == "doctor" {
 			// Doctor reports invalid local readiness flags in their own profile,
 			// staging, or configuration checks. Validate the underlying config here,
 			// but permit a valid higher-precedence Doctor flag to repair it.
-			if a.validateConfigValues(nil) != nil {
-				effectiveErr := a.validateConfigValues(command)
-				if effectiveErr == nil {
-					return nil
-				}
-				a.doctorConfigErr = effectiveErr
+			if err == nil && a.v.validate() != nil {
+				err = a.v.forCommand(command).validate()
 			}
+			a.doctorConfigErr = err
 			return nil
 		}
-		if err := a.validateConfigValues(command); err != nil {
-			return withExit(ExitUsage, err)
+		if err == nil {
+			err = a.v.forCommand(command).validate()
 		}
-		return nil
-	}
-
-	rootFlags := addIngestFlags(root)
-	root.RunE = func(command *cobra.Command, args []string) error {
-		a.ingestInvocation = true
-		return a.runIngest(command, args, rootFlags)
+		return withExit(ExitUsage, err)
 	}
 
 	root.AddCommand(a.ingestCommand())
@@ -232,20 +210,14 @@ func (a *application) ingestCommand() *cobra.Command {
 	command := &cobra.Command{
 		Use:   "ingest [flags] [input] [TAMS endpoint]",
 		Short: "Create one Flow graph per resolved input and ingest its media",
-		Args: usageArgs(func(command *cobra.Command, args []string) error {
-			a.ingestInvocation = true
-			return cobra.MaximumNArgs(2)(command, args)
-		}),
+		Args:  usageArgs(cobra.MaximumNArgs(2)),
+		RunE:  a.runIngest,
 	}
-	ingestFlags := addIngestFlags(command)
-	command.RunE = func(command *cobra.Command, args []string) error {
-		a.ingestInvocation = true
-		return a.runIngest(command, args, ingestFlags)
-	}
+	addIngestFlags(command)
 	return command
 }
 
-func (a *application) addPersistentFlags(command *cobra.Command) {
+func addPersistentFlags(command *cobra.Command) {
 	flags := command.PersistentFlags()
 	flags.String("config", "", "configuration file (default: $XDG_CONFIG_HOME/tamsin/config.yaml)")
 	flags.StringP("endpoint", "o", "", "TAMS API endpoint")
@@ -280,13 +252,6 @@ func (a *application) addPersistentFlags(command *cobra.Command) {
 	flags.String("pkce-verifier", "", "PKCE verifier for a pre-obtained OAuth code (prefer environment)")
 	flags.Bool("allow-insecure-auth-loopback", false,
 		"allow credentials over HTTP to explicit loopback hosts (unsafe)")
-
-	a.v.flags = flags
-	for _, definition := range configDefinitions() {
-		if definition.flag != "" && flags.Lookup(definition.flag) == nil {
-			panic("configuration definition names an unknown persistent flag: " + definition.flag)
-		}
-	}
 }
 
 func (a *application) loadConfig() error {
@@ -373,176 +338,100 @@ func readConfigFile(filename string) ([]byte, error) {
 	return data, nil
 }
 
-func (a *application) validateGlobalConfig() error {
-	switch strings.ToLower(a.v.GetString("format")) {
-	case "human", "json":
-	default:
-		return fmt.Errorf("invalid result format %q", a.v.GetString("format"))
-	}
-	switch strings.ToLower(a.v.GetString("color")) {
-	case "auto", "always", "never":
-	default:
-		return fmt.Errorf("invalid color mode %q", a.v.GetString("color"))
-	}
-	switch strings.ToLower(a.v.GetString("log.format")) {
-	case "text", "json":
-	default:
-		return fmt.Errorf("invalid log format %q", a.v.GetString("log.format"))
-	}
-	switch strings.ToLower(a.v.GetString("log.level")) {
-	case "debug", "info", "warn", "warning", "error":
-	default:
-		return fmt.Errorf("invalid log level %q", a.v.GetString("log.level"))
-	}
-	switch strings.ToLower(a.v.GetString("progress")) {
-	case "auto", "plain", "none":
-	default:
-		return fmt.Errorf("invalid progress mode %q", a.v.GetString("progress"))
-	}
-	switch auth.Mode(a.v.GetString("auth.mode")) {
-	case auth.ModeAuto, auth.ModeNone, auth.ModeBasic, auth.ModeBearer, auth.ModeURLToken, auth.ModeOAuthClient, auth.ModeOAuthCode:
-	default:
-		return fmt.Errorf("invalid authentication mode %q", a.v.GetString("auth.mode"))
-	}
-	if timeout := a.v.GetDuration("http.timeout"); timeout <= 0 {
-		return errors.New("HTTP timeout must be positive")
-	}
-	if timeout := a.v.GetDuration("http.transfer_timeout"); timeout < 0 {
-		return errors.New("transfer timeout cannot be negative")
-	}
-	if timeout := a.v.GetDuration("http.transfer_idle_timeout"); timeout <= 0 {
-		return errors.New("transfer idle timeout must be positive")
-	}
-	if retries := a.v.GetInt("http.retries"); retries < 0 || retries > 20 {
-		return errors.New("HTTP retries must be between 0 and 20")
-	}
-	return nil
+// ingestOptions are the settings of one ingest run, resolved and validated.
+type ingestOptions struct {
+	inputs           []string
+	inputMode        string
+	profile          string
+	profileVersion   string
+	concurrency      int
+	transfers        int
+	probeConcurrency int
+	dryRun           string
+	verify           string
+	tempDirectory    string
+	stagingBytes     int64
+	maxInputs        int
+	segmentDuration  time.Duration
+	segmentFormat    string
+	essenceStorage   string
+	ffmpegArgs       []string
+	start            string
+	storageID        string
+	flowID           string
+	sourceID         string
+	metadataFile     string
+	tamsFlowProfiles []string
+	stdinName        string
+	inputHeaders     []string
+	s3Region         string
+	s3Endpoint       string
+	s3PathStyle      bool
+	ffprobe          string
+	ffmpeg           string
 }
 
-type ingestFlagValues struct {
-	inputs            []string
-	inputMode         string
-	profile           string
-	profileVersion    string
-	concurrency       int
-	transfers         int
-	probeConcurrency  int
-	dryRun            string
-	verify            string
-	tempDirectory     string
-	stagingByteBudget string
-	stagingBytes      int64
-	maxInputs         int
-	segmentDuration   time.Duration
-	segmentFormat     string
-	essenceStorage    string
-	ffmpegArgs        []string
-	start             string
-	storageID         string
-	flowID            string
-	sourceID          string
-	metadataFile      string
-	tamsFlowProfiles  []string
-	stdinName         string
-	inputHeaders      []string
-	s3Region          string
-	s3Endpoint        string
-	s3PathStyle       bool
-	ffprobe           string
-	ffmpeg            string
-}
-
-type ingestLifecycleOutput struct {
-	events *ingestEventOutput
-}
-
-func (o *ingestLifecycleOutput) InputStarted(index int) error {
-	if o.events == nil {
-		return nil
-	}
-	return o.events.InputStarted(index)
-}
-
-func (o *ingestLifecycleOutput) FlowPlanned(index int, plan ingest.FlowPlan) error {
-	if o.events == nil {
-		return nil
-	}
-	return o.events.FlowPlanned(index, plan)
-}
-
-func (o *ingestLifecycleOutput) ObjectsCompleted(index int, flowID string, objects []ingest.ObjectResult) error {
-	if o.events == nil {
-		return nil
-	}
-	return o.events.ObjectsCompleted(index, flowID, objects)
-}
-
-func addTreatmentFlags(command *cobra.Command, profile *string, segmentDuration *time.Duration,
-	segmentFormat, essenceStorage *string, ffmpegArgs *[]string) {
+func addTreatmentFlags(command *cobra.Command) {
 	flags := command.Flags()
-	flags.StringVar(profile, "profile", "", profileFlagDescription())
+	flags.String("profile", "", profileFlagDescription())
 	registerProfileCompletion(command)
-	flags.DurationVarP(segmentDuration, "segment-duration", "d", defaultSegmentDuration,
+	flags.DurationP("segment-duration", "d", defaultSegmentDuration,
 		"target duration of each TAMS Flow Segment; 0 disables segmentation, leaving storage to decide whole input or whole essence")
-	flags.StringVar(segmentFormat, "segment-format", string(media.SegmentFormatSource),
+	flags.String("segment-format", string(media.SegmentFormatSource),
 		"container for Flow Segments: source or mpegts")
-	flags.StringVar(essenceStorage, "essence-storage", string(media.EssenceStorageIndependent),
+	flags.String("essence-storage", string(media.EssenceStorageIndependent),
 		"how a muxed input is stored: independent (one Flow per essence) or muxed (keep the multiplex)")
-	flags.StringArrayVar(ffmpegArgs, "ffmpeg-arg", nil, "additional explicit FFmpeg argument (repeatable)")
+	flags.StringArray("ffmpeg-arg", nil, "additional explicit FFmpeg argument (repeatable)")
 }
 
-func addReadinessFlags(command *cobra.Command, tempDirectory, stagingByteBudget, storageID *string) {
+func addReadinessFlags(command *cobra.Command) {
 	flags := command.Flags()
-	flags.StringVar(tempDirectory, "temp-dir", "", "staging directory")
-	flags.StringVar(stagingByteBudget, "staging-byte-budget", "auto",
+	flags.String("temp-dir", "", "staging directory")
+	flags.String("staging-byte-budget", "auto",
 		"global temporary-media budget: auto or a byte size such as 80GiB")
-	flags.StringVar(storageID, "storage-id", "", "target TAMS storage backend ID")
+	flags.String("storage-id", "", "target TAMS storage backend ID")
 }
 
-func addIngestFlags(command *cobra.Command) *ingestFlagValues {
-	values := &ingestFlagValues{}
+func addIngestFlags(command *cobra.Command) {
 	flags := command.Flags()
-	flags.StringArrayVarP(&values.inputs, "input", "i", nil, "input path or URI (repeatable)")
-	flags.StringVar(&values.inputMode, "input-mode", "auto", "remote input access: auto, stream, or stage")
-	addTreatmentFlags(command, &values.profile, &values.segmentDuration, &values.segmentFormat,
-		&values.essenceStorage, &values.ffmpegArgs)
-	addReadinessFlags(command, &values.tempDirectory, &values.stagingByteBudget, &values.storageID)
+	flags.StringArrayP("input", "i", nil, "input path or URI (repeatable)")
+	flags.String("input-mode", "auto", "remote input access: auto, stream, or stage")
+	addTreatmentFlags(command)
+	addReadinessFlags(command)
 	// Left at zero so --help does not print a number that is only true on the
-	// machine that printed it. The real default is resolved from configuration
-	// below, the same way --probe-concurrency does it.
-	flags.IntVarP(&values.concurrency, "concurrency", "j", 0,
+	// machine that printed it. The real default is resolved from configuration.
+	flags.IntP("concurrency", "j", 0,
 		"maximum concurrent input ingests (default: CPU count, at most 8)")
-	flags.IntVar(&values.transfers, "transfers", 0,
+	flags.Int("transfers", 0,
 		"maximum Media Object uploads and verifications in flight across the whole run (default: --concurrency)")
-	flags.IntVar(&values.probeConcurrency, "probe-concurrency", 0,
+	flags.Int("probe-concurrency", 0,
 		"maximum queued FFprobe measurements (default: 2; local media processes are capped at two)")
-	flags.StringVar(&values.dryRun, "dry-run", string(ingest.DryRunOff),
+	flags.String("dry-run", string(ingest.DryRunOff),
 		"local-only planning mode: fast or exact")
-	flags.StringVar(&values.verify, "verify", string(ingest.VerificationAuto),
+	flags.String("verify", string(ingest.VerificationAuto),
 		"Object integrity policy: auto, readback, or none")
-	flags.IntVar(&values.maxInputs, "max-inputs", source.DefaultMaxInputs,
+	flags.Int("max-inputs", source.DefaultMaxInputs,
 		"maximum unique inputs after directory, manifest, and S3 prefix expansion")
-	flags.StringVar(&values.start, "start", "0:0", "Flow start as a TAMS timestamp")
-	flags.StringVar(&values.flowID, "flow-id", "", "Flow UUID for a single resolved input")
-	flags.StringVar(&values.sourceID, "source-id", "", "Source UUID for a single resolved input")
-	flags.StringVar(&values.metadataFile, "flow-metadata", "", "JSON Flow metadata overrides")
-	flags.StringArrayVar(&values.tamsFlowProfiles, "tams-flow-profile", nil,
+	flags.String("start", "0:0", "Flow start as a TAMS timestamp")
+	flags.String("flow-id", "", "Flow UUID for a single resolved input")
+	flags.String("source-id", "", "Source UUID for a single resolved input")
+	flags.String("flow-metadata", "", "JSON Flow metadata overrides")
+	flags.StringArray("tams-flow-profile", nil,
 		"TAMS 8.2 Flow Profile assignment as [video|audio|image|data[:N]=]UUID (repeatable)")
-	flags.StringVar(&values.stdinName, "stdin-name", "stdin.bin",
+	flags.String("stdin-name", "stdin.bin",
 		"filename hint; explicitly selects stdin unless input is configured or passed with --input")
-	flags.StringArrayVar(&values.inputHeaders, "input-header", nil, "HTTP input header as 'Name: value' (repeatable)")
-	flags.StringVar(&values.s3Region, "s3-region", "", "AWS region override for S3 inputs")
-	flags.StringVar(&values.s3Endpoint, "s3-endpoint", "", "S3-compatible endpoint URL")
-	flags.BoolVar(&values.s3PathStyle, "s3-path-style", false, "use path-style S3 addressing")
-	return values
+	flags.StringArray("input-header", nil, "HTTP input header as 'Name: value' (repeatable)")
+	flags.String("s3-region", "", "AWS region override for S3 inputs")
+	flags.String("s3-endpoint", "", "S3-compatible endpoint URL")
+	flags.Bool("s3-path-style", false, "use path-style S3 addressing")
 }
 
-func (a *application) runIngest(command *cobra.Command, args []string, raw *ingestFlagValues) (returnErr error) {
+func (a *application) runIngest(command *cobra.Command, args []string) (returnErr error) {
 	runCtx, cancel := context.WithCancelCause(command.Context())
 	defer cancel(nil)
 
 	var (
-		options *ingestFlagValues
+		options *ingestOptions
 		batch   ingest.BatchResult
 		run     *observability.Run
 	)
@@ -580,7 +469,7 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 
 	var endpoint string
 	var err error
-	options, endpoint, err = a.ingestOptions(command, args, raw)
+	options, endpoint, err = a.resolveIngestOptions(command, args)
 	if err != nil {
 		return withExit(ExitUsage, err)
 	}
@@ -591,14 +480,8 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 	}
 
 	reporter := a.reporter()
-	if a.events != nil && !strings.EqualFold(a.v.GetString("progress"), "none") {
-		reporter = a.events
-	}
 	defer reporter.Close()
-	logger, err := a.loggerFor(reporter)
-	if err != nil {
-		return withExit(ExitUsage, err)
-	}
+	logger := a.loggerFor(reporter)
 	run = observability.New(a.runID, logger)
 	if a.events != nil {
 		run.SetRetryObserver(a.events.Retry)
@@ -665,9 +548,12 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 			return withExit(ExitAuth, err)
 		}
 	}
-	var lifecycleObserver ingest.LifecycleObserver
+	var (
+		lifecycleObserver ingest.LifecycleObserver
+		observe           ingest.ResultObserver
+	)
 	if a.events != nil {
-		lifecycleObserver = &ingestLifecycleOutput{events: a.events}
+		lifecycleObserver, observe = a.events, a.events.Result
 	}
 	pipeline, err := ingest.New(ingest.Config{
 		Observability: run, LifecycleObserver: lifecycleObserver,
@@ -682,12 +568,6 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 	if err != nil {
 		return withExit(ExitUsage, err)
 	}
-	var observe ingest.ResultObserver
-	if a.events != nil {
-		observe = func(index int, result ingest.Result) error {
-			return a.events.Result(index, result)
-		}
-	}
 	var pipelineErr error
 	batch, pipelineErr = pipeline.RunObserved(runCtx, items, observe)
 	// The transient region must be closed before either human or structured
@@ -698,9 +578,8 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 	if a.events != nil {
 		terminal = a.events.FreezeTerminal(command.Context())
 	}
-	// This is the single terminal linearization point for human or NDJSON output
-	// and process status. A later caller cancellation is treated
-	// as shutdown after terminalization began and cannot rewrite one projection.
+	// From here a later caller cancellation is shutdown and cannot change the
+	// outcome already decided for the output and exit status.
 	a.ingestTerminalFrozen = true
 	var resultErr error
 	switch {
@@ -716,7 +595,7 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 		resultErr = withExit(ExitPartial, fmt.Errorf("%d of %d inputs failed", batch.Failed, len(batch.Results)))
 	}
 	if a.events == nil {
-		if outputErr := a.writeBatch(batch, run.Snapshot()); outputErr != nil {
+		if outputErr := presentation.WriteHuman(a.stdout, batch, run.Snapshot(), a.humanOptions()); outputErr != nil {
 			return withExit(ExitGeneral, outputErr)
 		}
 		a.humanReceipt = resultErr != nil && (batch.Failed > 0 || pipelineErr != nil)
@@ -724,36 +603,36 @@ func (a *application) runIngest(command *cobra.Command, args []string, raw *inge
 	return resultErr
 }
 
-func (a *application) ingestOptions(command *cobra.Command, args []string, raw *ingestFlagValues) (*ingestFlagValues, string, error) {
-	options := *raw
-	options.inputs = a.configStringArray(command, "input", "input")
-	options.inputMode = a.configString(command, "input-mode", "ingest.input_mode")
-	options.profile = a.configString(command, "profile", "ingest.profile")
-	options.concurrency = a.configInt(command, "concurrency", "ingest.concurrency")
-	options.transfers = a.configInt(command, "transfers", "ingest.transfers")
-	options.probeConcurrency = a.configInt(command, "probe-concurrency", "ingest.probe_concurrency")
-	options.dryRun = a.configString(command, "dry-run", "ingest.dry_run")
-	options.verify = a.configString(command, "verify", "ingest.verify")
-	options.tempDirectory = a.configString(command, "temp-dir", "ingest.temp_directory")
-	options.stagingByteBudget = a.configString(command, "staging-byte-budget", "ingest.staging_byte_budget")
-	options.maxInputs = a.configInt(command, "max-inputs", "ingest.max_inputs")
-	options.segmentDuration = a.configDuration(command, "segment-duration", "ingest.segment_duration")
-	options.segmentFormat = a.configString(command, "segment-format", "ingest.segment_format")
-	options.essenceStorage = a.configString(command, "essence-storage", "ingest.essence_storage")
-	options.ffmpegArgs = a.configStringArray(command, "ffmpeg-arg", "media.ffmpeg_args")
-	options.start = a.configString(command, "start", "ingest.start")
-	options.storageID = a.configString(command, "storage-id", "ingest.storage_id")
-	options.flowID = a.configString(command, "flow-id", "ingest.flow_id")
-	options.sourceID = a.configString(command, "source-id", "ingest.source_id")
-	options.metadataFile = a.configString(command, "flow-metadata", "ingest.flow_metadata")
-	options.tamsFlowProfiles = a.configStringArray(command, "tams-flow-profile", "ingest.tams_flow_profiles")
-	options.stdinName = a.configString(command, "stdin-name", "source.stdin_name")
-	options.inputHeaders = a.configStringArray(command, "input-header", "source.http_headers")
-	options.s3Region = a.configString(command, "s3-region", "source.s3_region")
-	options.s3Endpoint = a.configString(command, "s3-endpoint", "source.s3_endpoint")
-	options.s3PathStyle = boolOption(command.Flags(), "s3-path-style", raw.s3PathStyle, a.v.GetBool("source.s3_path_style"))
-	options.ffprobe = a.v.GetString("media.ffprobe")
-	options.ffmpeg = a.v.GetString("media.ffmpeg")
+func (a *application) resolveIngestOptions(command *cobra.Command, args []string) (*ingestOptions, string, error) {
+	v := a.v.forCommand(command)
+	options := &ingestOptions{
+		inputs:           v.GetStringSlice("input"),
+		inputMode:        v.GetString("ingest.input_mode"),
+		concurrency:      v.GetInt("ingest.concurrency"),
+		transfers:        v.GetInt("ingest.transfers"),
+		probeConcurrency: v.GetInt("ingest.probe_concurrency"),
+		dryRun:           v.GetString("ingest.dry_run"),
+		verify:           v.GetString("ingest.verify"),
+		tempDirectory:    v.GetString("ingest.temp_directory"),
+		maxInputs:        v.GetInt("ingest.max_inputs"),
+		ffmpegArgs:       v.GetStringSlice("media.ffmpeg_args"),
+		start:            v.GetString("ingest.start"),
+		storageID:        v.GetString("ingest.storage_id"),
+		flowID:           v.GetString("ingest.flow_id"),
+		sourceID:         v.GetString("ingest.source_id"),
+		metadataFile:     v.GetString("ingest.flow_metadata"),
+		tamsFlowProfiles: v.GetStringSlice("ingest.tams_flow_profiles"),
+		stdinName:        v.GetString("source.stdin_name"),
+		inputHeaders:     v.GetStringSlice("source.http_headers"),
+		s3Region:         v.GetString("source.s3_region"),
+		s3Endpoint:       v.GetString("source.s3_endpoint"),
+		s3PathStyle:      v.GetBool("source.s3_path_style"),
+		ffprobe:          v.GetString("media.ffprobe"),
+		ffmpeg:           v.GetString("media.ffmpeg"),
+	}
+	if options.transfers == 0 {
+		options.transfers = options.concurrency
+	}
 	// An explicit name is an unambiguous declaration that the operator intends
 	// to pipe media. Keep the configured/default hint non-selecting so a bare
 	// ingest still fails immediately instead of waiting on an interactive stdin.
@@ -761,10 +640,10 @@ func (a *application) ingestOptions(command *cobra.Command, args []string, raw *
 		options.inputs = []string{"-"}
 	}
 
-	if strings.TrimSpace(options.profile) == "" {
+	if strings.TrimSpace(v.GetString("ingest.profile")) == "" {
 		return nil, "", errors.New("ingest profile is required; choose one with --profile (run `tamsin profiles` to compare them)")
 	}
-	profile, err := a.resolvedConfigProfile(command)
+	profile, err := v.treatment()
 	if err != nil {
 		return nil, "", err
 	}
@@ -773,20 +652,11 @@ func (a *application) ingestOptions(command *cobra.Command, args []string, raw *
 	options.segmentDuration = profile.SegmentDuration
 	options.segmentFormat = string(profile.SegmentFormat)
 	options.essenceStorage = string(profile.EssenceStorage)
-	if err := ingest.DryRunMode(options.dryRun).Validate(); err != nil {
-		return nil, "", err
-	}
-	if err := ingest.InputMode(options.inputMode).Validate(); err != nil {
-		return nil, "", err
-	}
 	if options.inputMode == string(ingest.InputStream) && len(options.ffmpegArgs) > 0 {
 		return nil, "", errors.New("--input-mode=stream cannot be combined with --ffmpeg-arg; use auto or stage")
 	}
-	if err := ingest.VerificationMode(options.verify).Validate(); err != nil {
-		return nil, "", err
-	}
 
-	endpoint := a.v.GetString("endpoint")
+	endpoint := v.GetString("endpoint")
 	switch {
 	case len(options.inputs) == 0 && len(args) == 2:
 		options.inputs = []string{args[0]}
@@ -808,18 +678,11 @@ func (a *application) ingestOptions(command *cobra.Command, args []string, raw *
 	if len(options.inputs) == 0 {
 		return nil, "", errors.New("at least one input is required")
 	}
-	if options.concurrency <= 0 {
-		return nil, "", errors.New("concurrency must be positive")
-	}
-	if options.maxInputs <= 0 {
-		return nil, "", errors.New("max-inputs must be positive")
-	}
-	stagingBytes, err := parseByteSize(options.stagingByteBudget)
+	options.stagingBytes, err = parseByteSize(v.GetString("ingest.staging_byte_budget"))
 	if err != nil {
 		return nil, "", err
 	}
-	options.stagingBytes = stagingBytes
-	return &options, strings.TrimRight(endpoint, "/"), nil
+	return options, strings.TrimRight(endpoint, "/"), nil
 }
 
 func (a *application) tamsClient(ctx context.Context, endpoint string, base *http.Transport,
@@ -888,7 +751,7 @@ func (a *application) authenticationConfig(endpoint, endpointToken string) auth.
 		Username: a.v.GetString("auth.username"), Password: a.v.GetString("auth.password"),
 		BearerToken: a.v.GetString("auth.token"), URLToken: a.v.GetString("auth.url_token"), TokenURL: a.v.GetString("auth.token_url"),
 		ClientID: a.v.GetString("auth.client_id"), ClientSecret: a.v.GetString("auth.client_secret"),
-		RedirectURL: a.v.GetString("auth.redirect_url"), Scopes: a.configStrings("auth.scopes"), OAuthCode: a.v.GetString("auth.code"),
+		RedirectURL: a.v.GetString("auth.redirect_url"), Scopes: a.v.GetStringSlice("auth.scopes"), OAuthCode: a.v.GetString("auth.code"),
 		PKCEVerifier: a.v.GetString("auth.pkce_verifier"), Timeout: a.v.GetDuration("http.timeout"),
 		AllowInsecureLoopback: a.v.GetBool("auth.allow_insecure_loopback"),
 	}
@@ -914,66 +777,43 @@ func (a *application) httpTransport(concurrency, transfers int) *http.Transport 
 }
 
 func httpIdleConnectionLimits(concurrency, transfers int) (total, perHost int) {
-	if transfers <= 0 {
-		transfers = concurrency
-	}
 	perHost = min(max(max(concurrency, transfers), 2), 32)
 	return min(perHost*2, 64), perHost
 }
 
-// reporter keeps human progress on stderr and leaves JSON output to events.
+// reporter sends progress to the event stream in JSON mode and to stderr for
+// people otherwise.
 func (a *application) reporter() progress.Reporter {
-	if strings.EqualFold(a.v.GetString("format"), "json") || a.v.GetBool("quiet") {
+	mode := progress.Mode(strings.ToLower(a.v.GetString("progress")))
+	switch {
+	case a.events != nil && mode != progress.ModeNone:
+		return a.events
+	case a.events != nil || a.v.GetBool("quiet"):
 		return progress.Discard{}
 	}
-	return progress.New(a.stderr, progress.Options{Mode: progress.Mode(strings.ToLower(a.v.GetString("progress")))})
+	return progress.New(a.stderr, progress.Options{Mode: mode})
 }
 
 // loggerFor serialises diagnostics with human progress on stderr.
-func (a *application) loggerFor(reporter progress.Reporter) (*slog.Logger, error) {
+func (a *application) loggerFor(reporter progress.Reporter) *slog.Logger {
 	writer := a.stderr
 	if line, drawing := reporter.(*progress.Line); drawing {
 		writer = line
 	}
-	return a.loggerTo(writer)
-}
-
-func (a *application) loggerTo(writer io.Writer) (*slog.Logger, error) {
-	var level slog.Level
+	level := slog.LevelInfo
 	switch strings.ToLower(a.v.GetString("log.level")) {
 	case "debug":
 		level = slog.LevelDebug
-	case "info":
-		level = slog.LevelInfo
 	case "warn", "warning":
 		level = slog.LevelWarn
 	case "error":
 		level = slog.LevelError
-	default:
-		return nil, fmt.Errorf("invalid log level %q", a.v.GetString("log.level"))
 	}
 	options := &slog.HandlerOptions{Level: level}
-	var handler slog.Handler
-	switch strings.ToLower(a.v.GetString("log.format")) {
-	case "text":
-		handler = slog.NewTextHandler(writer, options)
-	case "json":
-		handler = slog.NewJSONHandler(writer, options)
-	default:
-		return nil, fmt.Errorf("invalid log format %q", a.v.GetString("log.format"))
+	if strings.EqualFold(a.v.GetString("log.format"), "json") {
+		return slog.New(slog.NewJSONHandler(writer, options))
 	}
-	return slog.New(handler), nil
-}
-
-func (a *application) writeBatch(batch ingest.BatchResult, metrics observability.Snapshot) error {
-	switch strings.ToLower(a.v.GetString("format")) {
-	case "human":
-		return presentation.WriteHuman(a.stdout, batch, metrics, a.humanOptions())
-	case "json":
-		return errors.New("structured ingest output must be written as an event stream")
-	default:
-		return fmt.Errorf("invalid result format %q", a.v.GetString("format"))
-	}
+	return slog.New(slog.NewTextHandler(writer, options))
 }
 
 func readFlowMetadata(filename string) (tams.Flow, error) {
@@ -1052,11 +892,4 @@ func (a *application) safeUsageHint(err error) string {
 		return value
 	}, hint)
 	return strings.Join(strings.Fields(clean), " ")
-}
-
-func boolOption(flags *pflag.FlagSet, name string, flagValue, configured bool) bool {
-	if flags.Changed(name) {
-		return flagValue
-	}
-	return configured
 }
