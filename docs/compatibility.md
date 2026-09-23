@@ -25,7 +25,7 @@ interfaces.
 | Go toolchain for source builds | 1.26.8, as pinned in `go.mod` |
 | FFprobe and FFmpeg | 5.1 or newer, from the same maintained build |
 | Release binaries | linux/amd64, linux/arm64, darwin/amd64 and darwin/arm64, without CGO |
-| Container image | linux/amd64 and linux/arm64 on `tamsin-ffmpeg-runtime:5.1.9-bookworm-r2`, a Debian bookworm base with FFmpeg 5.1.9 |
+| Container image | linux/amd64 and linux/arm64 on `tamsin-ffmpeg-runtime:5.1.9-bookworm-r3`, a Debian bookworm base with FFmpeg 5.1.9 |
 
 `go install` is not a supported install path: release tags carry no `v`
 prefix, so Go tooling cannot resolve them.
