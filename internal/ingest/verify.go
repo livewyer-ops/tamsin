@@ -14,17 +14,19 @@ import (
 
 // verificationOutcome is the terminal state of one registered Media Object.
 //
-// Every Object that reaches the store must end in one of these. The failure
-// this models is specific: Segments are registered in bulk before any is
-// verified, so a mismatch found in one leaves the rest registered and unchecked
-// unless something guarantees they are each resolved.
+// Every new registration must be verified or retracted. Existing Segments may
+// be preserved when the store cannot be read; a retry must not destroy media
+// solely because it could not finish verification.
 type verificationOutcome int
 
 const (
 	outcomeVerified verificationOutcome = iota
 	outcomeRetracted
 	outcomeRetractionFailed
+	outcomePreserved
 )
+
+var errObjectIntegrity = errors.New("object integrity check failed")
 
 // VerificationError preserves the safety-relevant terminal state of a failed
 // verification. Callers must not have to parse prose to distinguish media that
@@ -35,11 +37,16 @@ type VerificationError struct {
 	Total     int
 	Retracted int
 	Stranded  int
+	Preserved int
 	Err       error
 }
 
 func (e *VerificationError) Error() string {
 	failed := e.Retracted + e.Stranded
+	if e.Preserved > 0 {
+		return fmt.Sprintf("verification incomplete for flow %s: %d existing segments preserved, %d retracted, %d could not be retracted: %v",
+			e.FlowID, e.Preserved, e.Retracted, e.Stranded, e.Err)
+	}
 	// A Segment that could not be retracted needs an operator, so it is named
 	// first: the difference between "we cleaned up" and "you must" is the whole
 	// point of tracking terminal state.
@@ -53,8 +60,8 @@ func (e *VerificationError) Error() string {
 
 func (e *VerificationError) Unwrap() error { return e.Err }
 
-// verifyAll checks every registered Object, attempts retraction for each that
-// fails verification, and records every terminal outcome in results. Failures
+// verifyAll checks every registered Object and records its terminal outcome.
+// Existing Segments are preserved unless their bytes prove corrupt. Failures
 // must not cancel sibling cleanup. Within recovery, verification and
 // retraction share the caller's recovery deadline rather than giving each
 // Object a fresh detached cleanup allowance. Otherwise retraction shares one
@@ -89,6 +96,12 @@ func (p *Pipeline) verifyAll(ctx context.Context, flowID string, objects []prepa
 
 	outcomes := make([]verificationOutcome, len(objects))
 	failures := make([]error, len(objects))
+	existing := make(map[string]bool)
+	for _, result := range results {
+		if result.Disposition == ObjectDispositionResumed {
+			existing[result.ObjectID] = true
+		}
+	}
 
 	// Bound goroutines by the transfer budget. Wait for every outcome without
 	// cancelling siblings on error: they may still need to retract Segments.
@@ -100,7 +113,7 @@ func (p *Pipeline) verifyAll(ctx context.Context, flowID string, objects []prepa
 		go func() {
 			defer group.Done()
 			for index := range pending {
-				outcomes[index], failures[index] = p.verifyOneWithRetraction(ctx, recovery, flowID, objects[index])
+				outcomes[index], failures[index] = p.verifyOneWithRetraction(ctx, recovery, flowID, objects[index], existing[objects[index].id])
 			}
 		}()
 	}
@@ -114,6 +127,7 @@ func (p *Pipeline) verifyAll(ctx context.Context, flowID string, objects []prepa
 		verified  int
 		retracted int
 		stranded  int
+		preserved int
 		collected []error
 	)
 	for index, outcome := range outcomes {
@@ -130,6 +144,9 @@ func (p *Pipeline) verifyAll(ctx context.Context, flowID string, objects []prepa
 			stranded++
 			setObjectDisposition(results, objectID, ObjectDispositionStranded)
 			setObjectVerification(results, objectID, ObjectVerificationFailed, VerificationMethodReadback)
+		case outcomePreserved:
+			preserved++
+			setObjectVerification(results, objectID, ObjectVerificationNotReached, VerificationMethodReadback)
 		}
 		if failures[index] != nil {
 			collected = append(collected, failures[index])
@@ -140,43 +157,50 @@ func (p *Pipeline) verifyAll(ctx context.Context, flowID string, objects []prepa
 		return nil
 	}
 	p.logger.Warn("verification did not complete for every object",
-		"flow_id", flowID, "verified", verified, "retracted", retracted, "stranded", stranded)
+		"flow_id", flowID, "verified", verified, "retracted", retracted, "stranded", stranded, "preserved", preserved)
 	return &VerificationError{
-		FlowID: flowID, Total: len(objects), Retracted: retracted, Stranded: stranded,
+		FlowID: flowID, Total: len(objects), Retracted: retracted, Stranded: stranded, Preserved: preserved,
 		Err: errors.Join(collected...),
 	}
 }
 
 // verifyOneWithRetraction resolves a single Object to a terminal state.
 //
-// An Object that cannot be checked at all — because the run was cancelled, or
-// because a transfer slot never came free — is retracted rather than left
-// registered. Unchecked is indistinguishable from corrupt from the store's
-// point of view, and the safe reading is the pessimistic one.
+// New registrations are retracted if they cannot be verified. An inability to
+// read an existing Segment does not prove corruption and must not delete it.
 func (p *Pipeline) verifyOneWithRetraction(ctx context.Context, recovery func() context.Context,
-	flowID string, object preparedObject) (verificationOutcome, error) {
+	flowID string, object preparedObject, existing bool) (verificationOutcome, error) {
+	fail := func(cause error) (verificationOutcome, error) {
+		if existing && (ctx.Err() != nil || !errors.Is(cause, errObjectIntegrity)) {
+			return outcomePreserved, fmt.Errorf("existing segment %s preserved: %w", object.id, cause)
+		}
+		return p.retractWithinRecovery(recovery(), flowID, object, cause)
+	}
 	release, err := p.acquireTransfer(ctx)
 	if err != nil {
 		cause := fmt.Errorf("object %s was registered but never verified: %w", object.id, err)
-		return p.retractWithinRecovery(recovery(), flowID, object, cause)
+		return fail(cause)
 	}
 	defer release()
 
 	// A whole-Flow listing generates every GET URL before bounded verification
 	// workers can consume them. Hold this worker's global slot first, then ask
 	// for only this exact registered Segment. Nothing queues between issuance
-	// and DownloadDigest. A failed listing still requires retraction.
+	// and DownloadDigest.
 	segments, listErr := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{
-		ObjectID: object.id, Timerange: object.timerange, IncludeDownloadURLs: true,
+		ObjectID: object.id, Timerange: object.timerange, IncludeDownloadURLs: true, IncludeObjectTimerange: true,
 	})
 	if listErr != nil {
 		cause := fmt.Errorf("refresh download URL for object %s: %w", object.id, listErr)
-		return p.retractWithinRecovery(recovery(), flowID, object, cause)
+		return fail(cause)
 	}
 	segment := matchingSegment(segments, object.id, object.timerange)
 	if segment == nil {
 		cause := fmt.Errorf("registered segment %s was not returned by TAMS", object.id)
-		return p.retractWithinRecovery(recovery(), flowID, object, cause)
+		return fail(cause)
+	}
+	if err := checkSegmentTiming(flowID, object, *segment); err != nil {
+		return fail(err)
 	}
 	startBefore := time.Now().Add(p.limits.PresignedURL)
 	for index := range segment.GetURLs {
@@ -186,7 +210,7 @@ func (p *Pipeline) verifyOneWithRetraction(ctx context.Context, recovery func() 
 	}
 
 	if err := p.verifyObject(ctx, object, *segment); err != nil {
-		return p.retractWithinRecovery(recovery(), flowID, object, err)
+		return fail(err)
 	}
 	p.observability.Verification(object.size, observability.OutcomeVerified)
 	p.advanceProgress(ctx, progress.PhaseVerify, 1, object.size)

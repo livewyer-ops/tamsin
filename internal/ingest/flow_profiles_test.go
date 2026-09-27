@@ -304,7 +304,7 @@ func TestEquivalentNumericFlowDoesNotCauseResumeWrite(t *testing.T) {
 	client := newFakeClient()
 	client.flows[flowID] = existing
 	pipeline := &Pipeline{client: client, config: Config{DryRunMode: DryRunOff}}
-	plan, err := pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: generated, ownsMedia: true})
+	plan, err := pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: generated, ownsMedia: true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestPlanFlowWriteRejectsConflictingSourceBeforeMutation(t *testing.T) {
 			"id": flowID, "source_id": "9a2c4e60-71bd-4f3a-8e15-2d6b0c8a7f43",
 		},
 		ownsMedia: true,
-	})
+	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "already belongs to source_id") {
 		t.Fatalf("planFlowWrite() error = %v, want source ownership conflict", err)
 	}

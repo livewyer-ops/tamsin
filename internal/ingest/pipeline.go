@@ -423,6 +423,9 @@ func (p *Pipeline) verificationFailureStatus(err error) VerificationStatus {
 	if verificationErr.Stranded > 0 {
 		return VerificationFailedStranded
 	}
+	if verificationErr.Preserved > 0 {
+		return VerificationNotReached
+	}
 	return VerificationFailedRetracted
 }
 
@@ -1475,17 +1478,20 @@ func (p *Pipeline) verifyObject(ctx context.Context, expected preparedObject, se
 		size, checksum, err := p.client.DownloadDigest(ctx, download, expected.size)
 		if err != nil {
 			var sizeErr *tams.ObjectSizeError
-			if errors.As(err, &sizeErr) || ctx.Err() != nil || len(candidates) == 1 {
+			if errors.As(err, &sizeErr) {
+				return fmt.Errorf("%w: verify object %s: %w", errObjectIntegrity, expected.id, err)
+			}
+			if ctx.Err() != nil || len(candidates) == 1 {
 				return fmt.Errorf("verify object %s: %w", expected.id, err)
 			}
 			unreadable = append(unreadable, err)
 			continue
 		}
 		if size != expected.size {
-			return fmt.Errorf("object %s byte length mismatch: expected %d, got %d", expected.id, expected.size, size)
+			return fmt.Errorf("%w: object %s byte length mismatch: expected %d, got %d", errObjectIntegrity, expected.id, expected.size, size)
 		}
 		if checksum != expected.sha256 {
-			return fmt.Errorf("object %s SHA-256 mismatch: expected %s, got %s", expected.id, expected.sha256, checksum)
+			return fmt.Errorf("%w: object %s SHA-256 mismatch: expected %s, got %s", errObjectIntegrity, expected.id, expected.sha256, checksum)
 		}
 		return nil
 	}

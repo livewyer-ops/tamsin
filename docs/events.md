@@ -282,7 +282,7 @@ operator must inspect.
 | `tams.preflight_failed` | The TAMS service preflight did not complete successfully.<br>The TAMS service is not compatible with this ingest.<br>The TAMS service did not advertise usable transfer lifetimes. |
 | `tams.storage_unavailable` | No usable TAMS storage backend was selected. |
 | `tams.registration_failed` | Media Object registration did not complete successfully. |
-| `tams.segment_conflict` | Another Media Object occupies a Segment timerange in this Flow. |
+| `tams.segment_conflict` | An existing Segment conflicts with this ingest. |
 | `flow.plan_failed` | The final Flow graph is not valid or could not be read. |
 | `flow.write_failed` | The Flow graph could not be committed completely. |
 | `flow.indeterminate` | A Flow update may have committed before its response was lost. |

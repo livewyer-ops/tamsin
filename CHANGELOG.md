@@ -11,6 +11,14 @@ example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
 
 ## Unreleased
 
+- Preserve existing Segments when resume verification cannot read them, while
+  retaining retraction for confirmed byte corruption. Check media timing on
+  every resume, including when verification is disabled.
+- Preserve additional stored essence parameters and apply label/description
+  overrides to the intended root or collected Flow on resume.
+- Require release commits to belong to `main`, reject `v`-prefixed release tags
+  and correct the candidate changelog instructions.
+
 Upgrading from `8.2.0-in2` renews generated identities through renderer epoch 4.
 Test an exact dry run and a real ingest on evaluation media before upgrading
 workers. A repeated input can create new Flows and upload media again; existing

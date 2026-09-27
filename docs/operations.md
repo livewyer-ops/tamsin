@@ -192,7 +192,13 @@ needs readback; otherwise, and for any partial overlap, the input stops with
 `tams.segment_conflict` and nothing is uploaded. TAMSin never registers an
 overlapping Segment.
 
-A failed verification retracts only the exact Object/timerange Segment.
+Failed verification of a new registration retracts only the exact
+Object/timerange Segment. During resume, a timeout, cancellation or unavailable
+download leaves existing Segments in place and reports verification as
+`not_reached`; retry when the store is reachable. A confirmed byte-length or
+checksum mismatch still retracts the corrupt Segment. Every resumed Segment
+must match the expected media timing, even with verification disabled; a timing
+conflict leaves it unchanged.
 Cleanup is detached from cancellation and bounded by `--deletion-timeout`
 (default five minutes), while each request inside it keeps `--timeout`. A 202
 DELETE response is followed through its same-service deletion request to

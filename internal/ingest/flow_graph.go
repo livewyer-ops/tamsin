@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"sort"
 	"strings"
@@ -30,7 +31,17 @@ func (p *Pipeline) planFlowGraph(ctx context.Context, graph flowGraph) ([]planne
 		if err != nil {
 			return nil, err
 		}
-		plan, err := p.planFlowWrite(ctx, member)
+		overrides := p.config.FlowMetadata
+		if graph.collectorID != "" && member.id != graph.collectorID {
+			overrides = p.config.CollectedFlowMetadata[member.role]
+			if graph.storage == media.EssenceStorageIndependent {
+				// Independent essences inherit root metadata before role overrides.
+				overrides = make(tams.Flow)
+				maps.Copy(overrides, p.config.FlowMetadata)
+				maps.Copy(overrides, p.config.CollectedFlowMetadata[member.role])
+			}
+		}
+		plan, err := p.planFlowWrite(ctx, member, overrides)
 		if err != nil {
 			return nil, err
 		}
@@ -62,7 +73,7 @@ func (p *Pipeline) planFlowGraph(ctx context.Context, graph flowGraph) ([]planne
 // replaces a Flow, so the final value must preserve everything this run does
 // not own. The dry-run path has no store to read and validates the generated
 // value as-is.
-func (p *Pipeline) planFlowWrite(ctx context.Context, member graphFlow) (plannedFlowWrite, error) {
+func (p *Pipeline) planFlowWrite(ctx context.Context, member graphFlow, overrides tams.Flow) (plannedFlowWrite, error) {
 	plan := plannedFlowWrite{member: member, effective: member.flow, changed: true}
 	plan.request = flowPutProjection(member.flow, member.profileID)
 	if p.config.DryRunMode != DryRunOff {
@@ -137,7 +148,7 @@ func (p *Pipeline) planFlowWrite(ctx context.Context, member graphFlow) (planned
 			"flow %s already exists with profile_id %q; refusing to attach, repoint, or remove immutable Profile identity %q",
 			member.id, existingProfileID, member.profileID)
 	}
-	plan.effective = preserveForeignMetadata(existing, member.flow, p.config.FlowMetadata)
+	plan.effective = preserveForeignMetadata(existing, member.flow, overrides)
 	plan.request = flowPutProjection(plan.effective, member.profileID)
 	plan.changed = !equalJSONValues(plan.effective, existing)
 	return plan, nil
@@ -337,6 +348,13 @@ func preserveForeignMetadata(existing, generated, operatorOverrides tams.Flow) t
 	}
 	for key, value := range generated {
 		merged[key] = value
+	}
+	if generatedParameters, ok := generated["essence_parameters"].(map[string]any); ok {
+		parameters := make(map[string]any)
+		existingParameters, _ := existing["essence_parameters"].(map[string]any)
+		maps.Copy(parameters, existingParameters)
+		maps.Copy(parameters, generatedParameters)
+		merged["essence_parameters"] = parameters
 	}
 	for _, field := range descriptiveFields {
 		if _, asked := operatorOverrides[field]; asked {

@@ -115,7 +115,8 @@ TAMSin does not infer editorial purpose or source lineage generation.
 identity fields, format or collection ownership. Technical overrides do
 participate in generated identities for streamed inputs; see
 [generated identity and resume](concepts.md#generated-identity-and-resume).
-Resume preserves operator labels, descriptions and non-`_tamsin_` tags.
+Resume preserves operator labels and descriptions unless explicitly overridden,
+along with non-`_tamsin_` tags and additional stored essence parameters.
 See [profiles](profiles.md) for media limits and
 [operations](operations.md) for verification and recovery.
 

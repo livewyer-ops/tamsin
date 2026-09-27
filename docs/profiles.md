@@ -279,7 +279,9 @@ Supply technical fields only when you know the output's properties; complete
 
 Overrides cannot directly set IDs. Technical overrides can change generated
 IDs for streamed inputs; see [identity and resume](concepts.md#generated-identity-and-resume).
-Resume keeps existing operator labels and descriptions, so ingest metadata
-is not a way to edit the labels of an existing Flow.
+Resume keeps existing operator labels and descriptions unless explicitly
+overridden for that Flow. In muxed storage, `--flow-metadata` targets the root
+and `--collected-flow-metadata` targets the named roles. Independent essences
+inherit `--flow-metadata`, with per-role overrides taking precedence.
 
 See [operations](operations.md) for staging, verification and recovery.

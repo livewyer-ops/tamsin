@@ -333,9 +333,8 @@ func (p *Pipeline) adoptOccupyingSegment(ctx context.Context, flowID string, obj
 	}
 	// Same bytes at a different offset is what a Flow written by an earlier
 	// placement looks like; adopting it would keep the wrong timing.
-	if !tamstime.EqualTimestamps(segment.TSOffset, object.tsOffset) ||
-		(segment.ObjectTimerange != "" && !tamstime.EqualTimeRanges(segment.ObjectTimerange, object.objectTimerange)) {
-		return false, conflict("its media timing differs from this input's; re-ingest into a new Flow ID")
+	if err := checkSegmentTiming(flowID, *object, *segment); err != nil {
+		return false, err
 	}
 	startBefore := time.Now().Add(p.limits.PresignedURL)
 	for index := range segment.GetURLs {
@@ -521,13 +520,15 @@ func (p *Pipeline) reserveTransferBatch(ctx context.Context, desired int) (*tran
 func (p *Pipeline) registerFlow(ctx context.Context, flowID, container string, objects []preparedObject, objectResults []ObjectResult, storageID string) error {
 	// One listing answers the resume question for every Object. Asking per
 	// Object cost a round trip each, which dominates on a high-latency link.
-	// It answers identity only: a verification worker asks for its own URL
+	// It answers identity and timing: a verification worker asks for its own URL
 	// after it holds a transfer slot, so the service is spared signing one per
 	// Segment for a listing that is only being asked which Objects exist. It
 	// covers just the span this batch will write: a long-lived Flow can hold
 	// far more Segments than the listing cap, and none outside the span can
 	// overlap what is about to be registered.
-	existing, err := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{Timerange: chunkTimerange(objects)})
+	existing, err := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{
+		Timerange: chunkTimerange(objects), IncludeObjectTimerange: true,
+	})
 	if err != nil {
 		return fmt.Errorf("list existing segments: %w", err)
 	}
@@ -538,7 +539,7 @@ func (p *Pipeline) registerFlow(ctx context.Context, flowID, container string, o
 func (p *Pipeline) registerRollingChunk(ctx context.Context, flowID, container string, objects []preparedObject,
 	objectResults []ObjectResult, storageID string, throughput *float64) error {
 	existing, err := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{
-		Timerange: chunkTimerange(objects),
+		Timerange: chunkTimerange(objects), IncludeObjectTimerange: true,
 	})
 	if err != nil {
 		return fmt.Errorf("list existing segments for rolling batch: %w", err)
@@ -564,6 +565,9 @@ func (p *Pipeline) registerPreparedObjects(ctx context.Context, flowID, containe
 			}
 			adopted[object.id] = struct{}{}
 			continue
+		}
+		if err := checkSegmentTiming(flowID, object, *segment); err != nil {
+			return err
 		}
 		// A resumed Object credits the upload it did not need to repeat. Its
 		// verification is scheduled with the rest, so that unit is credited there.

@@ -1,9 +1,21 @@
 package ingest
 
 import (
+	"fmt"
+
 	"github.com/livewyer-ops/tamsin/internal/tams"
 	"github.com/livewyer-ops/tamsin/internal/tamstime"
 )
+
+func checkSegmentTiming(flowID string, object preparedObject, segment tams.Segment) error {
+	if !tamstime.EqualTimestamps(segment.TSOffset, object.tsOffset) ||
+		(segment.ObjectTimerange != "" && !tamstime.EqualTimeRanges(segment.ObjectTimerange, object.objectTimerange)) {
+		return withFailure(FailureCodeSegmentConflict, FailureMessageSegmentConflict, true,
+			fmt.Errorf("flow %s segment %s at %s records different media timing; use a new Flow ID",
+				flowID, segment.ObjectID, segment.Timerange))
+	}
+	return nil
+}
 
 // matchingSegment compares timeranges by value: a service may return the
 // instantaneous range [t] as [t_t], or otherwise respell what was registered.

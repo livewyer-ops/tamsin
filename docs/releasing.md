@@ -7,6 +7,9 @@ for example `8.2.0-in1`. Append `-rcM` for a release candidate, for example
 without `-rc` is a stable release and moves the minor, major and `latest`
 image tags; a candidate is published as a GitHub prerelease and moves none.
 
+Repository tag protection must cover `*.*.*`, including candidates. A rule
+covering only legacy `v*` tags does not protect these releases.
+
 The commands below assume a clone of `https://github.com/livewyer-ops/tamsin`
 with that repository as `origin`. Confirm its push URL with
 `git remote get-url --push origin` before tagging. Push only the intended tag
@@ -23,9 +26,10 @@ version=MAJOR.MINOR.PATCH-inN
 For a candidate, include its `-rcM` suffix. Before tagging:
 
 1. move the intended unreleased notes into a dated section in
-   [CHANGELOG.md](../CHANGELOG.md), with the exact value of `$version` in
-   brackets and a non-empty body; the workflow takes
-   the release notes from it and fails without it;
+   [CHANGELOG.md](../CHANGELOG.md), with the base release version in brackets
+   and a non-empty body. A candidate such as `8.2.0-in3-rc1` uses the
+   `[8.2.0-in3]` section. Check extraction with
+   `./scripts/release-notes.py "$version" CHANGELOG.md` before tagging;
 2. for a stable release, update the README downloads, image example and
    documentation version links to the selected version; for a candidate, keep
    the stable install links and identify the candidate documentation explicitly;
@@ -48,7 +52,8 @@ git tag -a "$version" -m "Release $version"
 git push origin "refs/tags/$version:refs/tags/$version"
 ```
 
-The release workflow repeats verification and both TAMOSS compatibility tests,
+The release workflow requires the tagged commit to belong to `main`, repeats
+verification and both TAMOSS compatibility tests,
 then:
 
 - builds Linux and macOS binaries for amd64 and arm64;
