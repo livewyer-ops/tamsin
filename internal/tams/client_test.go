@@ -665,12 +665,18 @@ func TestPresignedURLAcceptsBothHeaderShapes(t *testing.T) {
 			t.Fatalf("headers were not canonicalized for %s: %#v", payload, parsed.Headers)
 		}
 	}
-	var preferred PresignedURL
-	if err := json.Unmarshal([]byte(`{"url":"https://example.test","content-type":"top-level/type","headers":{"content-type":"headers/type"}}`), &preferred); err != nil {
+	var agreeing PresignedURL
+	if err := json.Unmarshal([]byte(`{"url":"https://example.test","content-type":"video/mp4","headers":{"content-type":"video/mp4"}}`), &agreeing); err != nil {
 		t.Fatal(err)
 	}
-	if got := preferred.Headers["Content-Type"]; got != "headers/type" {
-		t.Fatalf("headers Content-Type = %q, want headers object to override top-level field", got)
+	if got := agreeing.Headers["Content-Type"]; got != "video/mp4" {
+		t.Fatalf("agreeing Content-Type instructions = %q", got)
+	}
+	// The two spellings name one header, so a disagreement cannot be followed
+	// by silently preferring either.
+	var conflicting PresignedURL
+	if err := json.Unmarshal([]byte(`{"url":"https://example.test","content-type":"top-level/type","headers":{"content-type":"headers/type"}}`), &conflicting); err == nil {
+		t.Fatal("conflicting content-type instructions were accepted")
 	}
 	for _, payload := range []string{
 		`{"url":"https://example.test","headers":{"X-Test":"one","x-test":"two"}}`,

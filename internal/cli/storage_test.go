@@ -33,7 +33,18 @@ func TestCLIIngestSupportsBothStorageURLModes(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				defer mu.Unlock()
-				if r.Header.Get("Authorization") != "Bearer fixture-token" {
+				// API credentials belong on API requests and on unsigned media URLs
+				// served from the same origin. A presigned URL carries its own
+				// authorisation, so credentials added to it would be a leak and can
+				// invalidate its signature.
+				media := strings.HasPrefix(r.URL.Path, "/media/")
+				authorised := r.Header.Get("Authorization") == "Bearer fixture-token"
+				switch {
+				case media && presigned && authorised:
+					t.Errorf("API credentials were sent with a presigned URL for %s", r.URL.Path)
+					http.Error(w, "unexpected credentials", http.StatusBadRequest)
+					return
+				case !(media && presigned) && !authorised:
 					t.Errorf("missing same-origin credentials for %s", r.URL.Path)
 					http.Error(w, "unauthorised", http.StatusUnauthorized)
 					return

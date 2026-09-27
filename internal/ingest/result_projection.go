@@ -1,14 +1,30 @@
 package ingest
 
-import "github.com/livewyer-ops/tamsin/internal/tams"
+import (
+	"github.com/livewyer-ops/tamsin/internal/tams"
+	"github.com/livewyer-ops/tamsin/internal/tamstime"
+)
 
+// matchingSegment compares timeranges by value: a service may return the
+// instantaneous range [t] as [t_t], or otherwise respell what was registered.
 func matchingSegment(segments []tams.Segment, objectID, timerange string) *tams.Segment {
 	for index := range segments {
-		if segments[index].ObjectID == objectID && segments[index].Timerange == timerange {
+		if segments[index].ObjectID == objectID && tamstime.EqualTimeRanges(segments[index].Timerange, timerange) {
 			return &segments[index]
 		}
 	}
 	return nil
+}
+
+// renameObjectResult follows an Object whose identifier the service replaced
+// during allocation, so its dispositions keep landing on the same result.
+func renameObjectResult(objects []ObjectResult, oldID, newID string) {
+	for index := range objects {
+		if objects[index].ObjectID == oldID {
+			objects[index].ObjectID = newID
+			return
+		}
+	}
 }
 
 func (p *Pipeline) newObjectResult(object preparedObject) ObjectResult {

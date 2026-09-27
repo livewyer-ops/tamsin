@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"net/http"
 	"sync"
 	"time"
 
@@ -76,7 +78,7 @@ func chunkTimerange(chunk []preparedObject) string {
 //
 // It reports how long the batch took and how many bytes it moved, so the next
 // can be sized from what this one achieved rather than from a guess.
-func (p *Pipeline) commitChunk(ctx context.Context, flowID string, chunk []preparedObject,
+func (p *Pipeline) commitChunk(ctx context.Context, flowID, container string, chunk []preparedObject,
 	objectResults []ObjectResult, storageID string, throughput float64) (time.Duration, int64, error) {
 	// Storage allocation creates every PUT URL in its response. Reserve the
 	// workers that will consume them first, and ask for no more URLs than can
@@ -93,7 +95,7 @@ func (p *Pipeline) commitChunk(ctx context.Context, flowID string, chunk []prepa
 		}
 		ready := remaining[:min(len(remaining), reservation.count)]
 		bytes, err := p.commitReadyChunk(
-			ctx, flowID, ready, objectResults, storageID, throughput, reservation)
+			ctx, flowID, container, ready, objectResults, storageID, throughput, reservation)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -105,7 +107,7 @@ func (p *Pipeline) commitChunk(ctx context.Context, flowID string, chunk []prepa
 
 // commitReadyChunk consumes one batch whose upload workers are already
 // reserved.
-func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []preparedObject,
+func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID, container string, chunk []preparedObject,
 	objectResults []ObjectResult, storageID string, throughput float64,
 	reservation *transferReservation) (int64, error) {
 	defer reservation.releaseAll()
@@ -120,7 +122,10 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []
 		ObjectIDs: objectIDs, StorageID: storageID,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("allocate storage for %d objects: %w", len(chunk), err)
+		allocation, err = p.allocateFreshObjects(ctx, flowID, chunk, objectResults, storageID, err)
+		if err != nil {
+			return 0, err
+		}
 	}
 	destinations := make(map[string]tams.PresignedURL, len(allocation.MediaObjects))
 	// The service exposes a minimum duration, not an absolute expiry. Measure it
@@ -132,6 +137,11 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []
 		if !p.apiVersion.AtLeast(8, 2) || allocated.Presigned != nil && *allocated.Presigned {
 			allocated.PutURL.StartBefore = uploadStartBefore
 		}
+		// The flag lives beside put_url in the allocation, and the transfer
+		// decides from it whether API credentials belong on the request.
+		if allocated.Presigned != nil {
+			allocated.PutURL.Presigned = *allocated.Presigned
+		}
 		destinations[allocated.ObjectID] = allocated.PutURL
 	}
 	// Validate the complete response before starting any transfer. Returning
@@ -141,6 +151,16 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []
 		destination, ok := destinations[object.id]
 		if !ok || destination.URL == "" {
 			return 0, fmt.Errorf("storage allocation omitted object %s", object.id)
+		}
+		// A registered Object's type must match the Flow's container, so when
+		// the service gave no Content-Type instruction the container is sent
+		// rather than a generic type the store would record.
+		if _, instructed := destination.Headers["Content-Type"]; !instructed && container != "" {
+			headers := make(map[string]string, len(destination.Headers)+1)
+			maps.Copy(headers, destination.Headers)
+			headers["Content-Type"] = container
+			destination.Headers = headers
+			destinations[object.id] = destination
 		}
 	}
 
@@ -244,6 +264,36 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID string, chunk []
 		return 0, err
 	}
 	return transferred, nil
+}
+
+// allocateFreshObjects recovers a batch whose deterministic identifiers the
+// service refused. TAMS rejects object_ids that already exist, and an earlier
+// attempt that uploaded but never registered leaves its identifier occupied
+// until the service collects the orphan, which it promises to do only after
+// its advertised Object lifetime. Rather than wait for that, the batch
+// continues under service-assigned identifiers. Any other rejection is
+// reported as it was, joined with the outcome of the fresh request.
+func (p *Pipeline) allocateFreshObjects(ctx context.Context, flowID string, chunk []preparedObject,
+	objectResults []ObjectResult, storageID string, cause error) (tams.StorageResponse, error) {
+	var httpErr *tams.HTTPError
+	if !errors.As(cause, &httpErr) || httpErr.StatusCode != http.StatusBadRequest {
+		return tams.StorageResponse{}, fmt.Errorf("allocate storage for %d objects: %w", len(chunk), cause)
+	}
+	fresh, err := p.client.AllocateStorage(ctx, flowID, tams.StorageRequest{Limit: len(chunk), StorageID: storageID})
+	if err != nil {
+		return tams.StorageResponse{}, fmt.Errorf("allocate storage for %d objects: %w", len(chunk), errors.Join(cause, err))
+	}
+	if len(fresh.MediaObjects) != len(chunk) {
+		return tams.StorageResponse{}, fmt.Errorf("allocate storage for %d objects: the service assigned %d identifiers after rejecting the requested ones: %w",
+			len(chunk), len(fresh.MediaObjects), cause)
+	}
+	p.logger.Warn("requested object identifiers were rejected; continuing with service-assigned identifiers",
+		"flow_id", flowID, "objects", len(chunk), "cause", cause)
+	for index := range chunk {
+		renameObjectResult(objectResults, chunk[index].id, fresh.MediaObjects[index].ObjectID)
+		chunk[index].id = fresh.MediaObjects[index].ObjectID
+	}
+	return fresh, nil
 }
 
 // applyBitRates records what a reader will actually have to pull off the wire.
@@ -368,7 +418,7 @@ func (p *Pipeline) reserveTransferBatch(ctx context.Context, desired int) (*tran
 // allocate, upload, register, then verify and retract on mismatch. Independent
 // essence storage runs this once per essence, so it takes the Flow and the
 // Objects belonging to it rather than reading them off a single ingest.
-func (p *Pipeline) registerFlow(ctx context.Context, flowID string, objects []preparedObject, objectResults []ObjectResult, storageID string) error {
+func (p *Pipeline) registerFlow(ctx context.Context, flowID, container string, objects []preparedObject, objectResults []ObjectResult, storageID string) error {
 	// One listing answers the resume question for every Object. Asking per
 	// Object cost a round trip each, which dominates on a high-latency link.
 	// It answers identity only: a verification worker asks for its own URL
@@ -379,10 +429,10 @@ func (p *Pipeline) registerFlow(ctx context.Context, flowID string, objects []pr
 		return fmt.Errorf("list existing segments: %w", err)
 	}
 	throughput := float64(0)
-	return p.registerPreparedObjects(ctx, flowID, objects, objectResults, storageID, existing, &throughput)
+	return p.registerPreparedObjects(ctx, flowID, container, objects, objectResults, storageID, existing, &throughput)
 }
 
-func (p *Pipeline) registerRollingChunk(ctx context.Context, flowID string, objects []preparedObject,
+func (p *Pipeline) registerRollingChunk(ctx context.Context, flowID, container string, objects []preparedObject,
 	objectResults []ObjectResult, storageID string, throughput *float64) error {
 	existing, err := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{
 		Timerange: chunkTimerange(objects),
@@ -390,10 +440,10 @@ func (p *Pipeline) registerRollingChunk(ctx context.Context, flowID string, obje
 	if err != nil {
 		return fmt.Errorf("list existing segments for rolling batch: %w", err)
 	}
-	return p.registerPreparedObjects(ctx, flowID, objects, objectResults, storageID, existing, throughput)
+	return p.registerPreparedObjects(ctx, flowID, container, objects, objectResults, storageID, existing, throughput)
 }
 
-func (p *Pipeline) registerPreparedObjects(ctx context.Context, flowID string, objects []preparedObject,
+func (p *Pipeline) registerPreparedObjects(ctx context.Context, flowID, container string, objects []preparedObject,
 	objectResults []ObjectResult, storageID string, existing []tams.Segment, throughput *float64) error {
 	missing := make([]preparedObject, 0, len(objects))
 	var resumed []preparedObject
@@ -441,7 +491,7 @@ func (p *Pipeline) registerPreparedObjects(ctx context.Context, flowID string, o
 	// length of one batch.
 	for offset := 0; offset < len(missing); {
 		chunk := missing[offset:min(offset+p.chunkSize(missing[offset:], *throughput), len(missing))]
-		elapsed, transferred, err := p.commitChunk(ctx, flowID, chunk, objectResults, storageID, *throughput)
+		elapsed, transferred, err := p.commitChunk(ctx, flowID, container, chunk, objectResults, storageID, *throughput)
 		if err != nil {
 			return err
 		}

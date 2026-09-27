@@ -22,6 +22,7 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/auth"
 	"github.com/livewyer-ops/tamsin/internal/netio"
 	"github.com/livewyer-ops/tamsin/internal/observability"
+	"github.com/livewyer-ops/tamsin/internal/tamstime"
 )
 
 const (
@@ -213,7 +214,7 @@ func (c *Client) RegisterSegments(ctx context.Context, flowID string, requests [
 
 func failedRegistration(failures []FailedSegment, request SegmentRequest) bool {
 	for _, failed := range failures {
-		if failed.ObjectID == request.ObjectID && (failed.Timerange == "" || failed.Timerange == request.Timerange) {
+		if failed.ObjectID == request.ObjectID && (failed.Timerange == "" || tamstime.EqualTimeRanges(failed.Timerange, request.Timerange)) {
 			return true
 		}
 	}
@@ -234,6 +235,9 @@ func (c *Client) UploadFile(ctx context.Context, destination PresignedURL, filen
 	var receipt UploadReceipt
 	err := c.presignedTransfer(ctx, destination, "upload", observability.OperationObjectUpload,
 		func(ctx context.Context, client *http.Client, attempt int) (*transferRetry, error) {
+			if destination.Body != nil {
+				return nil, errors.New("upload instruction carries a request body, which cannot stand in for Media Object bytes")
+			}
 			file, err := os.Open(filename)
 			if err != nil {
 				return nil, fmt.Errorf("open upload file: %w", err)
@@ -254,11 +258,11 @@ func (c *Client) UploadFile(ctx context.Context, destination PresignedURL, filen
 			}
 			request.ContentLength = info.Size()
 			request.Header.Set("User-Agent", c.userAgent)
+			// No Content-Type is invented here: the caller supplies the Flow's
+			// container when the service gave no instruction, and a registered
+			// Object's type must match that container.
 			for name, value := range destination.Headers {
 				request.Header.Set(name, value)
-			}
-			if request.Header.Get("Content-Type") == "" {
-				request.Header.Set("Content-Type", "application/octet-stream")
 			}
 			if err := c.ensureURLAttemptCanStart(destination, "upload"); err != nil {
 				watch.Stop()
@@ -473,8 +477,12 @@ func (c *Client) presignedTransfer(ctx context.Context, presigned PresignedURL, 
 	if err != nil {
 		return fmt.Errorf("TAMS %s URL is not valid", operation)
 	}
+	// API credentials belong only on unsigned URLs served from the API origin,
+	// the same-origin rule the specification points at. A presigned URL carries
+	// its own authorisation, and a bearer header or access_token query added to
+	// it can invalidate the signature it was issued with.
 	client := c.external
-	if auth.Origin(parsed) == c.baseOrigin {
+	if !presigned.Presigned && auth.Origin(parsed) == c.baseOrigin {
 		client = c.http
 	}
 	for number := range c.retries + 1 {

@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/livewyer-ops/tamsin/internal/auth"
 	"github.com/livewyer-ops/tamsin/internal/ingest"
 	"github.com/livewyer-ops/tamsin/internal/media"
@@ -148,7 +147,7 @@ func (a *application) runDoctor(command *cobra.Command) error {
 	storageID := v.GetString("ingest.storage_id")
 	var configErr error
 	if storageID != "" {
-		if _, err := uuid.Parse(storageID); err != nil {
+		if _, err := tams.CanonicalUUID(storageID); err != nil {
 			configErr = errors.Join(configErr, fmt.Errorf("storage ID must be a UUID: %w", err))
 		}
 	}

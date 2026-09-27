@@ -130,6 +130,12 @@ a request starts, not a healthy transfer already in flight. Non-presigned URLs
 have no such start deadline. Scheduling respects advertised lifetimes but
 cannot guarantee registration under arbitrary network delays.
 
+API credentials travel only with unsigned media URLs on the API origin. A
+presigned URL is requested exactly as issued, and other origins never receive
+the API credentials. Uploads carry the store's header instructions; with no
+`Content-Type` instruction the Flow's `container` is sent. Verification tries
+each advertised download URL in turn, presigned first.
+
 ## Recovery
 
 Streaming writes the complete Flow graph only after initial segments establish

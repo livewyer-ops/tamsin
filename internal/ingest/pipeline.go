@@ -115,20 +115,25 @@ func New(config Config, client TAMSClient, prober media.Prober, segmenter media.
 		return nil, err
 	}
 	config.TAMSFlowProfiles = normalizedProfiles
+	// Identifiers are sent in the lowercase hyphenated spelling the schema
+	// requires, whatever spelling the operator typed, and a version or variant
+	// the schema excludes is refused before any resource is written.
 	for _, identifier := range [...]struct {
 		label string
-		value string
+		value *string
 	}{
-		{label: "flow ID", value: config.FlowID},
-		{label: "source ID", value: config.SourceID},
-		{label: "storage ID", value: config.StorageID},
+		{label: "flow ID", value: &config.FlowID},
+		{label: "source ID", value: &config.SourceID},
+		{label: "storage ID", value: &config.StorageID},
 	} {
-		if identifier.value == "" {
+		if *identifier.value == "" {
 			continue
 		}
-		if _, err := uuid.Parse(identifier.value); err != nil {
+		canonical, err := tams.CanonicalUUID(*identifier.value)
+		if err != nil {
 			return nil, fmt.Errorf("%s must be a UUID: %w", identifier.label, err)
 		}
+		*identifier.value = canonical
 	}
 	if (config.DryRunMode == DryRunOff || len(profileAssignments) > 0) && client == nil {
 		return nil, errors.New("TAMS client is required unless dry-run is enabled without a TAMS Flow Profile")
@@ -1319,26 +1324,42 @@ func (p *Pipeline) verifyObject(ctx context.Context, expected preparedObject, se
 	if len(segment.GetURLs) == 0 {
 		return fmt.Errorf("segment %s has no download URL for verification", expected.id)
 	}
-	// A service may also list direct storage URLs that require separate credentials.
-	// Prefer its presigned access route when one is available.
-	download := segment.GetURLs[0]
+	// A service may list several routes to one Object: a presigned one, a
+	// direct storage URL that needs credentials of its own, an unsigned route
+	// on the API origin. Presigned routes are tried first, then the rest, until
+	// one can be read. A route that serves the wrong bytes or the wrong length
+	// is an integrity failure, not a reason to try another.
+	candidates := make([]tams.PresignedURL, 0, len(segment.GetURLs))
 	for _, candidate := range segment.GetURLs {
 		if candidate.Presigned {
-			download = candidate
-			break
+			candidates = append(candidates, candidate)
 		}
 	}
-	size, checksum, err := p.client.DownloadDigest(ctx, download, expected.size)
-	if err != nil {
-		return fmt.Errorf("verify object %s: %w", expected.id, err)
+	for _, candidate := range segment.GetURLs {
+		if !candidate.Presigned {
+			candidates = append(candidates, candidate)
+		}
 	}
-	if size != expected.size {
-		return fmt.Errorf("object %s byte length mismatch: expected %d, got %d", expected.id, expected.size, size)
+	var unreadable []error
+	for _, download := range candidates {
+		size, checksum, err := p.client.DownloadDigest(ctx, download, expected.size)
+		if err != nil {
+			var sizeErr *tams.ObjectSizeError
+			if errors.As(err, &sizeErr) || ctx.Err() != nil || len(candidates) == 1 {
+				return fmt.Errorf("verify object %s: %w", expected.id, err)
+			}
+			unreadable = append(unreadable, err)
+			continue
+		}
+		if size != expected.size {
+			return fmt.Errorf("object %s byte length mismatch: expected %d, got %d", expected.id, expected.size, size)
+		}
+		if checksum != expected.sha256 {
+			return fmt.Errorf("object %s SHA-256 mismatch: expected %s, got %s", expected.id, expected.sha256, checksum)
+		}
+		return nil
 	}
-	if checksum != expected.sha256 {
-		return fmt.Errorf("object %s SHA-256 mismatch: expected %s, got %s", expected.id, expected.sha256, checksum)
-	}
-	return nil
+	return fmt.Errorf("verify object %s: none of %d advertised URLs could be read: %w", expected.id, len(candidates), errors.Join(unreadable...))
 }
 
 func digestFile(ctx context.Context, filename string) (int64, string, error) {

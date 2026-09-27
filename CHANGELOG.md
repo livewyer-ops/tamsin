@@ -11,6 +11,29 @@ example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
 
 ## Unreleased
 
+- Send API credentials only with unsigned media URLs on the API origin. A
+  presigned URL, whether on the API origin or elsewhere, is requested exactly
+  as issued; a bearer header or `access_token` query added to it could
+  invalidate its signature.
+- Follow the store's HTTP request instructions completely: an upload with no
+  `Content-Type` instruction is typed as the Flow's `container` instead of
+  `application/octet-stream`, disagreeing `content-type` and header
+  instructions are reported instead of one being silently preferred, and a
+  `body` instruction on a Media Object upload is refused rather than sending
+  either the text or the media.
+- Retry an ingest whose earlier attempt uploaded an Object but never
+  registered it. The store keeps the deterministic identifier occupied until
+  it collects the orphan, so the batch continues under service-assigned
+  identifiers instead of failing on the repeated allocation.
+- Accept every spelling of a UUID the identifier packages understand and send
+  the lowercase hyphenated form the schema requires; refuse versions and
+  variants outside it before any Flow is written.
+- Compare timeranges by value when matching registered Segments for resume,
+  reconciliation and deletion readback, so `[t]` and `[t_t]`, leading zeros
+  and omitted markers no longer make a registered Segment look missing.
+- Try every download URL a Segment advertises during verification, presigned
+  routes first, before reporting an Object unreadable. Bytes that disagree
+  still fail verification immediately.
 - Build release images on FFmpeg runtime `5.1.9-bookworm-r3`, which refreshes
   the Debian bookworm base. FFmpeg stays at 5.1.9.
 - Update Go module dependencies, including the AWS SDK for Go v2 1.47 with its

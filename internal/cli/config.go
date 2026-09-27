@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/livewyer-ops/tamsin/internal/auth"
 	"github.com/livewyer-ops/tamsin/internal/ingest"
 	"github.com/livewyer-ops/tamsin/internal/media"
+	"github.com/livewyer-ops/tamsin/internal/tams"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"go.yaml.in/yaml/v3"
@@ -597,7 +597,7 @@ func (s *settings) validate() error {
 		if value == "" {
 			continue
 		}
-		if _, err := uuid.Parse(value); err != nil {
+		if _, err := tams.CanonicalUUID(value); err != nil {
 			return fmt.Errorf("%s must be a UUID: %w", identifier.label, err)
 		}
 	}

@@ -198,7 +198,7 @@ func (e *rollingExecution) flush(state *rollingFlowState) error {
 		operationErr = e.pipeline.observeObjectBatch(e.ctx, state.flowID, objectResults, objectIDs)
 	} else {
 		operationErr = e.pipeline.registerRollingChunk(
-			e.ctx, state.flowID, objects, objectResults, e.storageID, &state.throughput)
+			e.ctx, state.flowID, plannedContainer(e.planned, state.flowID), objects, objectResults, e.storageID, &state.throughput)
 		if operationErr != nil {
 			for index := range objectResults {
 				if objectResults[index].Disposition == ObjectDispositionPlanned {

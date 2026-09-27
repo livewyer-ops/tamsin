@@ -10,6 +10,7 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/observability"
 	"github.com/livewyer-ops/tamsin/internal/progress"
 	"github.com/livewyer-ops/tamsin/internal/tams"
+	"github.com/livewyer-ops/tamsin/internal/tamstime"
 )
 
 func (p *Pipeline) acceptStorageVerification(ctx context.Context, object preparedObject, results []ObjectResult) {
@@ -158,7 +159,7 @@ func (p *Pipeline) retractRegisteredObjects(ctx context.Context, flowID string,
 
 func requestWasRegistered(requests []tams.SegmentRequest, object preparedObject) bool {
 	for _, request := range requests {
-		if request.ObjectID == object.id && request.Timerange == object.timerange {
+		if request.ObjectID == object.id && tamstime.EqualTimeRanges(request.Timerange, object.timerange) {
 			return true
 		}
 	}

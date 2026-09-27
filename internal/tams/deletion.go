@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/livewyer-ops/tamsin/internal/auth"
+	"github.com/livewyer-ops/tamsin/internal/tamstime"
 )
 
 // DeleteSegments removes the selected Flow Segments and does not return until
@@ -104,7 +105,7 @@ func validateDeletionRequest(request DeletionRequest, flowID, timerange string) 
 	if request.FlowID != flowID {
 		return false, errors.New("segment deletion request targets an unexpected flow")
 	}
-	if request.TimerangeToDelete != timerange {
+	if !tamstime.EqualTimeRanges(request.TimerangeToDelete, timerange) {
 		return false, errors.New("segment deletion request targets an unexpected timerange")
 	}
 	if request.DeleteFlow {
@@ -132,7 +133,7 @@ func (c *Client) waitForSegmentAbsence(ctx context.Context, flowID string, optio
 		}
 		found := false
 		for _, segment := range segments {
-			if segment.Timerange == options.Timerange && segment.ObjectID == options.ObjectID {
+			if tamstime.EqualTimeRanges(segment.Timerange, options.Timerange) && segment.ObjectID == options.ObjectID {
 				found = true
 				break
 			}

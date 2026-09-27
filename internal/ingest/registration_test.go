@@ -48,7 +48,7 @@ func registrationFixture(t *testing.T, client *fakeClient, objects, transfers in
 }
 
 func commitRegistrationFixture(ctx context.Context, pipeline *Pipeline, objects []preparedObject, results []ObjectResult) error {
-	_, _, err := pipeline.commitChunk(ctx, "flow", objects, results, "storage", 0)
+	_, _, err := pipeline.commitChunk(ctx, "flow", "", objects, results, "storage", 0)
 	return err
 }
 

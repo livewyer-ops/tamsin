@@ -35,7 +35,7 @@ func (p *Pipeline) executeFlowPlan(ctx context.Context, inputURI string, graph f
 		if target.role != "" {
 			p.logger.Info("ingesting essence", "input", inputURI, "flow_id", target.flowID, "role", target.role)
 		}
-		if err := p.registerFlow(ctx, target.flowID, target.objects, results[target.resultIndex].Objects, storageID); err != nil {
+		if err := p.registerFlow(ctx, target.flowID, plannedContainer(planned, target.flowID), target.objects, results[target.resultIndex].Objects, storageID); err != nil {
 			return withFailure(FailureCodeTAMSRegistrationFailed, FailureMessageTAMSRegistrationFailed, true, err)
 		}
 	}
@@ -62,6 +62,19 @@ func (p *Pipeline) writeFlowGraph(ctx context.Context, planned []plannedFlowWrit
 		return withFailure(FailureCodeFlowWriteFailed, FailureMessageFlowWriteFailed, true, err)
 	}
 	return nil
+}
+
+// plannedContainer is the container the written Flow declares. Every Media
+// Object uploaded for the Flow is typed as it unless the store instructs
+// otherwise.
+func plannedContainer(planned []plannedFlowWrite, flowID string) string {
+	for _, plan := range planned {
+		if plan.member.id == flowID {
+			container, _ := plan.effective["container"].(string)
+			return container
+		}
+	}
+	return ""
 }
 
 func collectPlannedFlowObjects(targets []flowRegistrationTarget) []preparedObject {

@@ -305,14 +305,29 @@ type fakeClient struct {
 	// onDownload fires as verification reads an Object back, which is the only
 	// point where a test can interrupt a run that has already registered.
 	onDownload func()
+	// occupiedObjectIDs mirrors the service rule that a client-supplied
+	// identifier stays in use once allocated until the Object is collected;
+	// rejectOccupiedIDs turns a repeat allocation of one into the 400 TAMS
+	// answers with. freshAllocations counts limit-based requests.
+	occupiedObjectIDs map[string]bool
+	rejectOccupiedIDs bool
+	freshAllocations  int
+	// uploadContentTypes records the Content-Type each upload carried, keyed by
+	// Object identifier.
+	uploadContentTypes map[string]string
+	// downloadErrors fails verification reads of particular URLs.
+	downloadErrors map[string]error
 }
 
 func newFakeClient() *fakeClient {
 	return &fakeClient{
 		flows: make(map[string]tams.Flow), segments: make(map[string]map[string]tams.Segment),
 		objects: make(map[string][]byte), backends: []tams.StorageBackend{{ID: "storage", DefaultStorage: true}},
-		flowOrder: make(map[string]int),
-		profiles:  make(map[string]tams.Profile),
+		flowOrder:          make(map[string]int),
+		profiles:           make(map[string]tams.Profile),
+		occupiedObjectIDs:  make(map[string]bool),
+		uploadContentTypes: make(map[string]string),
+		downloadErrors:     make(map[string]error),
 	}
 }
 
@@ -415,14 +430,29 @@ func (c *fakeClient) record(call string) {
 func (c *fakeClient) AllocateStorage(_ context.Context, flowID string, request tams.StorageRequest) (tams.StorageResponse, error) {
 	c.record(fmt.Sprintf("allocate:%d", len(request.ObjectIDs)))
 	c.lock.Lock()
+	defer c.lock.Unlock()
 	c.allocations++
 	status, _ := c.flows[flowID]["status"].(string)
 	c.allocationStatuses = append(c.allocationStatuses, status)
 	c.maxAllocationObjects = max(c.maxAllocationObjects, len(request.ObjectIDs))
-	c.lock.Unlock()
-	response := tams.StorageResponse{MediaObjects: make([]tams.AllocatedObject, len(request.ObjectIDs))}
-	for index := range request.ObjectIDs {
-		response.MediaObjects[index] = tams.AllocatedObject{ObjectID: request.ObjectIDs[index], PutURL: tams.PresignedURL{URL: "mem://" + request.ObjectIDs[index]}}
+	for _, id := range request.ObjectIDs {
+		if c.rejectOccupiedIDs && c.occupiedObjectIDs[id] {
+			return tams.StorageResponse{}, &tams.HTTPError{Method: http.MethodPost, URL: "flows/" + flowID + "/storage",
+				StatusCode: http.StatusBadRequest, Status: "400 Bad Request"}
+		}
+	}
+	ids := request.ObjectIDs
+	if request.Limit > 0 && len(ids) == 0 {
+		c.freshAllocations++
+		ids = make([]string, request.Limit)
+		for index := range ids {
+			ids[index] = fmt.Sprintf("fresh-%d-%d", c.freshAllocations, index)
+		}
+	}
+	response := tams.StorageResponse{MediaObjects: make([]tams.AllocatedObject, len(ids))}
+	for index, id := range ids {
+		c.occupiedObjectIDs[id] = true
+		response.MediaObjects[index] = tams.AllocatedObject{ObjectID: id, PutURL: tams.PresignedURL{URL: "mem://" + id}}
 	}
 	return response, nil
 }
@@ -580,6 +610,7 @@ func (c *fakeClient) UploadFile(_ context.Context, destination tams.PresignedURL
 		data[len(data)-1] ^= 0xff
 	}
 	c.objects[strings.TrimPrefix(destination.URL, "mem://")] = data
+	c.uploadContentTypes[strings.TrimPrefix(destination.URL, "mem://")] = destination.Headers["Content-Type"]
 	c.uploads++
 	return receipt, nil
 }
@@ -596,6 +627,12 @@ func (c *changedUploadClient) UploadFile(ctx context.Context, destination tams.P
 
 func (c *fakeClient) DownloadDigest(_ context.Context, source tams.PresignedURL, _ int64) (int64, string, error) {
 	c.record("verify")
+	c.lock.Lock()
+	downloadErr := c.downloadErrors[source.URL]
+	c.lock.Unlock()
+	if downloadErr != nil {
+		return 0, "", downloadErr
+	}
 	c.lock.Lock()
 	hook := c.onDownload
 	c.verified = append(c.verified, source.URL)
