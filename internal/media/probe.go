@@ -42,17 +42,20 @@ var mediaToolEnvironmentNames = map[string]struct{}{
 }
 
 type Stream struct {
-	Index         int    `json:"index"`
-	CodecName     string `json:"codec_name"`
-	CodecLongName string `json:"codec_long_name"`
-	CodecType     string `json:"codec_type"`
-	HasBFrames    int    `json:"has_b_frames"`
-	Profile       string `json:"profile"`
-	Width         int    `json:"width"`
-	Height        int    `json:"height"`
-	PixelFormat   string `json:"pix_fmt"`
-	FieldOrder    string `json:"field_order"`
-	ColorSpace    string `json:"color_space"`
+	Index     int    `json:"index"`
+	CodecName string `json:"codec_name"`
+	// CodecTagString is the container's four-character tag, the only name
+	// FFprobe gives a track FFmpeg cannot decode, such as QuickTime timecode.
+	CodecTagString string `json:"codec_tag_string"`
+	CodecLongName  string `json:"codec_long_name"`
+	CodecType      string `json:"codec_type"`
+	HasBFrames     int    `json:"has_b_frames"`
+	Profile        string `json:"profile"`
+	Width          int    `json:"width"`
+	Height         int    `json:"height"`
+	PixelFormat    string `json:"pix_fmt"`
+	FieldOrder     string `json:"field_order"`
+	ColorSpace     string `json:"color_space"`
 	// ColorPrimaries names the colour system. ColorSpace is the matrix
 	// coefficients, which usually agree with it and are not the same question.
 	ColorPrimaries string `json:"color_primaries"`
@@ -73,10 +76,17 @@ type Stream struct {
 	// summaries above.
 	Cadence      CadenceEvidence  `json:"-"`
 	Presentation PresentationSpan `json:"-"`
-	StartTime    string           `json:"start_time"`
-	Duration     string           `json:"duration"`
-	BitRate      string           `json:"bit_rate"`
-	Disposition  struct {
+	// SampleCount, KeyFrames and LastSampleTime are filled by the packet
+	// measurement of a rendered Object: how many samples the stream holds, how
+	// many are stream access points, and the presentation time (rational
+	// seconds) of the last sample. They are not FFprobe JSON fields.
+	SampleCount    int    `json:"-"`
+	KeyFrames      int    `json:"-"`
+	LastSampleTime string `json:"-"`
+	StartTime      string `json:"start_time"`
+	Duration       string `json:"duration"`
+	BitRate        string `json:"bit_rate"`
+	Disposition    struct {
 		AttachedPicture int `json:"attached_pic"`
 	} `json:"disposition"`
 }

@@ -11,8 +11,18 @@ import (
 // manifestTolerance bounds the disagreement accepted between the exact end of
 // one Segment's reference stream and the position FFmpeg's manifest gives the
 // next cut. FFmpeg writes the segment list with microsecond precision;
-// measured packet timing is exact to the nanosecond.
+// measured packet timing is exact to the nanosecond. A regularised reference
+// stream is compared at half its sample period instead, because its container
+// rounds timestamps, and no real gap in a fixed-rate stream is shorter than a
+// sample.
 const manifestTolerance = int64(time.Microsecond)
+
+func boundaryTolerance(measured objectMeasurement) int64 {
+	if measured.regular && measured.period/2 > manifestTolerance {
+		return measured.period / 2
+	}
+	return manifestTolerance
+}
 
 // timelineCursor places rendered Segments on the Flow timeline.
 //
@@ -28,6 +38,10 @@ const manifestTolerance = int64(time.Microsecond)
 // starts before the previous Segment's reference stream ends is refused rather
 // than described with overlapping Segments.
 //
+// When a Segment's reference span was regularised, the manifest end it is
+// compared against moves by the same amount, so a container that rounds
+// timestamps is judged on the nominal timeline it was regularised to.
+//
 // Untimed records (a whole file, a whole essence) have no manifest and follow
 // one another from untimedStart, as they always did.
 type timelineCursor struct {
@@ -35,6 +49,7 @@ type timelineCursor struct {
 	firstTimedStart int64
 	position        int64
 	lastManifestEnd int64
+	lastTolerance   int64
 	placed          bool
 	logger          *slog.Logger
 }
@@ -54,7 +69,7 @@ func (c *timelineCursor) place(record media.SegmentRecord, measured objectMeasur
 		default:
 			gap := record.Start - c.lastManifestEnd
 			switch {
-			case absInt64(gap) <= manifestTolerance:
+			case absInt64(gap) <= c.lastTolerance:
 				position = c.position
 			case gap > 0:
 				position = c.position + gap
@@ -70,7 +85,13 @@ func (c *timelineCursor) place(record media.SegmentRecord, measured objectMeasur
 					"manifest_span", media.Timestamp(record.End-record.Start), "reference_span", media.Timestamp(measured.referenceSpan))
 			}
 		}
+		// A regularised span moves the end the manifest is compared against by
+		// the same amount; an unregularised one is compared as recorded.
 		c.lastManifestEnd = record.End
+		if measured.regular {
+			c.lastManifestEnd += measured.referenceSpan - measured.measuredSpan
+		}
+		c.lastTolerance = boundaryTolerance(measured)
 	}
 	next, err := media.TimestampShift(position, measured.referenceSpan)
 	if err != nil {

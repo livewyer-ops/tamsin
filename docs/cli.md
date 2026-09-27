@@ -43,6 +43,7 @@ Use the explicit form in scripts. `tamsin --version` prints the version.
 | `--tams-flow-profile` | | TAMS 8.2 Profile assignment as `FORMAT[:INDEX]=UUID` or a bare UUID; repeat as required |
 | `--ffmpeg-arg` | | Explicit FFmpeg pass-through argument; repeat as required |
 | `--flow-metadata` | | Path to a JSON file of Flow metadata overrides, at most 2 MiB |
+| `--collected-flow-metadata` | | Path to a JSON file of per-role overrides for collected essence Flows, keyed by collection role such as `video` or `audio 1`, at most 2 MiB |
 | `--source-id` | | Source UUID; requires exactly one resolved input |
 | `--flow-id` | | Flow UUID; requires exactly one resolved input |
 | `--staging-byte-budget` | `auto` | Global temporary-media budget: `auto` or a byte size such as `80GiB` |

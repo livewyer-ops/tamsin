@@ -354,6 +354,7 @@ type ingestOptions struct {
 	flowID           string
 	sourceID         string
 	metadataFile     string
+	collectedFile    string
 	tamsFlowProfiles []string
 	stdinName        string
 	inputHeaders     []string
@@ -409,6 +410,7 @@ func addIngestFlags(command *cobra.Command) {
 	flags.String("flow-id", "", "Flow UUID for a single resolved input")
 	flags.String("source-id", "", "Source UUID for a single resolved input")
 	flags.String("flow-metadata", "", "JSON Flow metadata overrides")
+	flags.String("collected-flow-metadata", "", "JSON object of per-role Flow metadata overrides for collected essences")
 	flags.StringArray("tams-flow-profile", nil,
 		"TAMS 8.2 Flow Profile assignment as [video|audio|image|data[:N]=]UUID (repeatable)")
 	flags.String("stdin-name", "stdin.bin",
@@ -530,6 +532,10 @@ func (a *application) runIngest(command *cobra.Command, args []string) (returnEr
 	if err != nil {
 		return withExit(ExitUsage, err)
 	}
+	collectedMetadata, err := readCollectedFlowMetadata(options.collectedFile)
+	if err != nil {
+		return withExit(ExitUsage, err)
+	}
 
 	var client *tams.Client
 	if ingest.DryRunMode(options.dryRun) == ingest.DryRunOff || len(options.tamsFlowProfiles) > 0 {
@@ -556,7 +562,8 @@ func (a *application) runIngest(command *cobra.Command, args []string) (returnEr
 		TempDirectory: options.tempDirectory, StagingByteBudget: options.stagingBytes,
 		InputMode:       ingest.InputMode(options.inputMode),
 		SegmentDuration: options.segmentDuration, SegmentFormat: media.SegmentFormat(options.segmentFormat), EssenceStorage: media.EssenceStorage(options.essenceStorage), FFmpegArgs: options.ffmpegArgs, Start: start, StorageID: options.storageID,
-		FlowID: options.flowID, SourceID: options.sourceID, FlowMetadata: metadata, TAMSFlowProfiles: options.tamsFlowProfiles,
+		FlowID: options.flowID, SourceID: options.sourceID, FlowMetadata: metadata, CollectedFlowMetadata: collectedMetadata,
+		TAMSFlowProfiles: options.tamsFlowProfiles,
 	}, client, media.FFprobe{Executable: options.ffprobe}, media.FFmpeg{Executable: options.ffmpeg}, logger, reporter)
 	if err != nil {
 		return withExit(ExitUsage, err)
@@ -614,6 +621,7 @@ func (a *application) resolveIngestOptions(command *cobra.Command, args []string
 		flowID:           v.GetString("ingest.flow_id"),
 		sourceID:         v.GetString("ingest.source_id"),
 		metadataFile:     v.GetString("ingest.flow_metadata"),
+		collectedFile:    v.GetString("ingest.collected_flow_metadata"),
 		tamsFlowProfiles: v.GetStringSlice("ingest.tams_flow_profiles"),
 		stdinName:        v.GetString("source.stdin_name"),
 		inputHeaders:     v.GetStringSlice("source.http_headers"),
@@ -813,28 +821,54 @@ func readFlowMetadata(filename string) (tams.Flow, error) {
 	if filename == "" {
 		return nil, nil
 	}
+	var metadata tams.Flow
+	if err := readMetadataDocument(filename, &metadata); err != nil {
+		return nil, err
+	}
+	return metadata, nil
+}
+
+// readCollectedFlowMetadata reads per-role overrides for collected essences:
+// a JSON object whose keys are collection roles and whose values are Flow
+// metadata objects.
+func readCollectedFlowMetadata(filename string) (map[string]tams.Flow, error) {
+	if filename == "" {
+		return nil, nil
+	}
+	var metadata map[string]tams.Flow
+	if err := readMetadataDocument(filename, &metadata); err != nil {
+		return nil, err
+	}
+	for role, override := range metadata {
+		if override == nil {
+			return nil, fmt.Errorf("collected Flow metadata for role %q must be a JSON object", role)
+		}
+	}
+	return metadata, nil
+}
+
+func readMetadataDocument(filename string, target any) error {
 	file, err := os.Open(filename)
 	if err != nil {
-		return nil, fmt.Errorf("open Flow metadata: %w", err)
+		return fmt.Errorf("open Flow metadata: %w", err)
 	}
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, (2<<20)+1))
 	if err != nil {
-		return nil, fmt.Errorf("read Flow metadata: %w", err)
+		return fmt.Errorf("read Flow metadata: %w", err)
 	}
 	if len(data) > 2<<20 {
-		return nil, errors.New("flow metadata exceeds 2 MiB")
+		return errors.New("flow metadata exceeds 2 MiB")
 	}
-	var metadata tams.Flow
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
-	if err := decoder.Decode(&metadata); err != nil {
-		return nil, fmt.Errorf("decode Flow metadata: %w", err)
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("decode Flow metadata: %w", err)
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
-		return nil, errors.New("flow metadata must contain exactly one JSON object")
+		return errors.New("flow metadata must contain exactly one JSON object")
 	}
-	return metadata, nil
+	return nil
 }
 
 func parseHeaders(values []string) (http.Header, error) {

@@ -45,7 +45,10 @@ type objectPacket struct {
 }
 
 func measureObjectPackets(reader io.Reader, probe *Probe) error {
-	type span struct{ first, end *big.Rat }
+	type span struct {
+		first, end, last   *big.Rat
+		samples, keyFrames int
+	}
 	bounds := make(map[int]span)
 	streams := make(map[int]Stream)
 	for _, stream := range contentStreams(probe.Streams) {
@@ -111,6 +114,13 @@ func measureObjectPackets(reader io.Reader, probe *Probe) error {
 			if bound.end == nil || end.Cmp(bound.end) > 0 {
 				bound.end = end
 			}
+			if bound.last == nil || first.Cmp(bound.last) > 0 {
+				bound.last = first
+			}
+			bound.samples++
+			if strings.Contains(packet.Flags, "K") {
+				bound.keyFrames++
+			}
 			bounds[stream.Index] = bound
 		}
 		if _, err := decoder.Token(); err != nil {
@@ -131,6 +141,9 @@ func measureObjectPackets(reader io.Reader, probe *Probe) error {
 		}
 		stream.StartTime = bound.first.RatString()
 		stream.Duration = new(big.Rat).Sub(bound.end, bound.first).RatString()
+		stream.LastSampleTime = bound.last.RatString()
+		stream.SampleCount = bound.samples
+		stream.KeyFrames = bound.keyFrames
 	}
 	probe.Format.StartTime = ""
 	probe.Format.Duration = ""

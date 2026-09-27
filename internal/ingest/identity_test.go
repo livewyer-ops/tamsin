@@ -299,7 +299,7 @@ func TestStreamFlowIdentityExcludesLaterMeasurementsButIncludesOverrides(t *test
 		"essence_parameters": map[string]any{"frame_width": 1920, "frame_rate": map[string]any{"numerator": 25, "denominator": 1}}}
 	id := func(key string, flow tams.Flow, info media.FlowInfo, overrides tams.Flow) string {
 		t.Helper()
-		value, err := streamedFlowID(key, flow, info, overrides)
+		value, err := streamedFlowID(key, flow, info, overrides, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -3,6 +3,7 @@ package media
 import (
 	"fmt"
 	"io"
+	"math/big"
 	"math/bits"
 	"mime"
 	"net/http"
@@ -51,6 +52,11 @@ type FlowInfo struct {
 	// muxed Flow's first rendered Segment is anchored there, because FFmpeg
 	// cuts and reports Segments on that stream.
 	ReferenceOffset int64
+	// DroppedStreams records data and attachment tracks that have no coding
+	// media type Tamsin can name (QuickTime timecode, MXF ancillary data,
+	// font attachments). They stay inside the multiplex but are not described
+	// as Flows, because an elemental Flow must declare a codec.
+	DroppedStreams []UnsupportedCodec
 	// UnsupportedCodecs records elementary streams for which Tamsin has no
 	// defensible coding media type. The generated elemental Flow omits codec;
 	// the ingest layer warns and an explicit metadata override may supply the
@@ -65,7 +71,10 @@ type UnsupportedCodec struct {
 }
 
 func BuildFlow(probe Probe, identity Identity, detectedContentType string, storage EssenceStorage) (tams.Flow, FlowInfo, error) {
-	streams := contentStreams(probe.Streams)
+	streams, dropped := describableStreams(contentStreams(probe.Streams))
+	if len(streams) == 0 && len(dropped) > 0 {
+		return nil, FlowInfo{}, fmt.Errorf("input holds only data tracks Tamsin cannot describe: stream %d is %s", dropped[0].Index, streamCodecLabel(dropped[0]))
+	}
 	start, duration, err := probeTiming(probe, streams)
 	if err != nil {
 		return nil, FlowInfo{}, err
@@ -85,6 +94,11 @@ func BuildFlow(probe Probe, identity Identity, detectedContentType string, stora
 	}
 	if info.ReferenceOffset, err = referenceOffset(streams, start); err != nil {
 		return nil, FlowInfo{}, err
+	}
+	for _, stream := range dropped {
+		info.DroppedStreams = append(info.DroppedStreams, UnsupportedCodec{
+			Name: streamCodecLabel(stream), StreamType: stream.CodecType, StreamIndex: stream.Index,
+		})
 	}
 	for _, stream := range streams {
 		if codecMIME(stream.CodecName) == "" {
@@ -124,7 +138,7 @@ func BuildFlow(probe Probe, identity Identity, detectedContentType string, stora
 		info.ContentType = container.mediaType
 		info.ContainerSupported = container.supported
 
-		collected, err := collectEssenceFlows(streams, probe, identity, detectedContentType, start, duration, storage)
+		collected, err := collectEssenceFlows(streams, dropped, probe, identity, detectedContentType, start, duration, storage)
 		if err != nil {
 			return nil, FlowInfo{}, err
 		}
@@ -203,10 +217,11 @@ func provenanceTags(identity Identity) map[string]any {
 // a mux every track is described as its own essence. It reports whether the
 // stream was described as a still image.
 func applyEssence(flow tams.Flow, stream Stream, probe Probe, identity Identity, duration int64, allowStillImage bool) (bool, error) {
-	codec := codecMIME(stream.CodecName)
+	stillImage := allowStillImage && stream.CodecType == "video" && isStillImage(probe, stream, duration)
+	codec := essenceCodec(stream, stillImage)
 	switch stream.CodecType {
 	case "video":
-		if allowStillImage && isStillImage(probe, stream, duration) {
+		if stillImage {
 			if stream.Width <= 0 || stream.Height <= 0 {
 				return false, errorsForDimensions(identity.Label)
 			}
@@ -282,7 +297,9 @@ func applyEssence(flow tams.Flow, stream Stream, probe Probe, identity Identity,
 		if depth := bitDepth(stream); depth > 0 {
 			parameters["bit_depth"] = depth
 		}
-		if strings.HasPrefix(stream.CodecName, "pcm_") {
+		// Only linear PCM is uncompressed in the schema's sense; companded
+		// G.711 is a codec of its own.
+		if codec == "audio/x-raw-int" || codec == "audio/x-raw-float" {
 			parameters["unc_parameters"] = map[string]any{"unc_type": pcmUncompressedType(stream.CodecName)}
 		}
 		flow["format"] = "urn:x-nmos:format:audio"
@@ -314,6 +331,10 @@ type CollectedFlow struct {
 	// only on the child loses which particular collection/container it applies
 	// to when a Flow is collected more than once.
 	ContainerMapping map[string]any
+	// RenderedContainerMapping is the mapping inside a container Tamsin
+	// renders, which leaves out the tracks in FlowInfo.DroppedStreams. It is
+	// nil when that is the same as ContainerMapping.
+	RenderedContainerMapping map[string]any
 	// ContainerSupported describes the independently written essence Object. It
 	// is unused for a mapped essence inside a shared mux.
 	ContainerSupported bool
@@ -338,18 +359,33 @@ type CollectedFlow struct {
 // so its parent Collection Item carries container_mapping and the child has no
 // container of its own; an independently stored Flow owns its Media Objects,
 // so it declares a container and has no multiplex to map into.
-func collectEssenceFlows(streams []Stream, probe Probe, identity Identity, detectedContentType string, start, duration int64, storage EssenceStorage) ([]CollectedFlow, error) {
+func collectEssenceFlows(streams, dropped []Stream, probe Probe, identity Identity, detectedContentType string, start, duration int64, storage EssenceStorage) ([]CollectedFlow, error) {
 	formatCounts := make(map[string]int, len(streams))
 	for _, stream := range streams {
 		formatCounts[essenceRole(stream.CodecType)]++
 	}
 
-	seen := make(map[string]int, len(streams))
+	// Track indices count every track a reader finds in the container. In the
+	// source that includes dropped tracks; in a container Tamsin renders they
+	// are left out, so each kept stream also gets the index it has there.
+	seenRendered := make(map[string]int, len(streams))
+	droppedBefore := func(index int) (tracks int, sameFormat map[string]int) {
+		sameFormat = make(map[string]int)
+		for _, stream := range dropped {
+			if stream.Index < index {
+				tracks++
+				sameFormat[essenceRole(stream.CodecType)]++
+			}
+		}
+		return tracks, sameFormat
+	}
 	collected := make([]CollectedFlow, 0, len(streams))
 	for _, stream := range streams {
 		role := essenceRole(stream.CodecType)
-		formatTrackIndex := seen[role]
-		seen[role]++
+		droppedTracks, droppedSameFormat := droppedBefore(stream.Index)
+		formatTrackIndex := seenRendered[role] + droppedSameFormat[role]
+		renderedFormatTrackIndex := seenRendered[role]
+		seenRendered[role]++
 
 		flow := tams.Flow{
 			"label":       identity.Label + " (" + role + ")",
@@ -357,7 +393,7 @@ func collectEssenceFlows(streams []Stream, probe Probe, identity Identity, detec
 			"tags":        provenanceTags(identity),
 		}
 		container := describeContainer(probe.Format, stream.CodecType, detectedContentType)
-		var mapping map[string]any
+		var mapping, renderedMapping map[string]any
 		if storage == EssenceStorageIndependent {
 			// The essence is demultiplexed into its own Media Objects, so the Flow
 			// declares the container those Objects are written in.
@@ -370,6 +406,12 @@ func collectEssenceFlows(streams []Stream, probe Probe, identity Identity, detec
 				// container in front of it, attached pictures included.
 				"track_index":        stream.Index,
 				"format_track_index": formatTrackIndex,
+			}
+			if droppedTracks > 0 {
+				renderedMapping = map[string]any{
+					"track_index":        stream.Index - droppedTracks,
+					"format_track_index": renderedFormatTrackIndex,
+				}
 			}
 		}
 		// A still image is only meaningful for a whole single-stream input, so
@@ -389,11 +431,33 @@ func collectEssenceFlows(streams []Stream, probe Probe, identity Identity, detec
 			return nil, err
 		}
 		collected = append(collected, CollectedFlow{
-			Role: itemRole, Flow: flow, ContainerMapping: mapping,
+			Role: itemRole, Flow: flow, ContainerMapping: mapping, RenderedContainerMapping: renderedMapping,
 			ContainerSupported: container.supported, StreamIndex: stream.Index, Offset: offset,
 		})
 	}
 	return collected, nil
+}
+
+// ApplyRenderedTrackMapping switches every collected essence to the container
+// mapping of a rendered container, which omits DroppedStreams. It is for
+// treatments that write Media Objects with FFmpeg; a whole-file ingest keeps
+// the source container and with it the source track numbering.
+func ApplyRenderedTrackMapping(info *FlowInfo) {
+	for index := range info.Collected {
+		if mapping := info.Collected[index].RenderedContainerMapping; mapping != nil {
+			info.Collected[index].ContainerMapping = mapping
+			info.Collected[index].RenderedContainerMapping = nil
+		}
+	}
+}
+
+// DroppedStreamIndices lists the container tracks a render leaves out.
+func DroppedStreamIndices(info FlowInfo) []int {
+	indices := make([]int, 0, len(info.DroppedStreams))
+	for _, stream := range info.DroppedStreams {
+		indices = append(indices, stream.StreamIndex)
+	}
+	return indices
 }
 
 // streamOffset reports how long after containerStart a stream begins.
@@ -517,50 +581,112 @@ func ProbeTiming(probe Probe) (start, duration int64, err error) {
 // referenceOffset is how long after containerStart the reference stream (the
 // first video stream, otherwise the first content stream) begins.
 func referenceOffset(streams []Stream, containerStart int64) (int64, error) {
-	for _, stream := range streams {
-		if stream.CodecType == "video" {
-			return streamOffset(stream, containerStart)
-		}
-	}
-	if len(streams) > 0 {
-		return streamOffset(streams[0], containerStart)
+	if reference := referenceStream(streams); reference != nil {
+		return streamOffset(*reference, containerStart)
 	}
 	return 0, nil
 }
 
-// ProbeReference returns the start and span of an Object's reference stream:
-// the first video stream when there is one, otherwise the first content
-// stream. FFmpeg's segment muxer cuts on the same stream, so its first
-// presentation timestamp is what anchors the Segment on the Flow timeline,
-// while audio that leads or trails the cut belongs to the Object's own range.
-// Without per-stream timing, as for an unmeasured whole file, it is the
-// container timing.
-func ProbeReference(probe Probe) (start, span int64, err error) {
+// ReferenceTiming describes the stream a Segment is cut and placed on.
+type ReferenceTiming struct {
+	// Start and Span bound the stream's presentation on the Object's timeline.
+	// Span is the regularised value when Regular; MeasuredSpan is always what
+	// the timestamps record.
+	Start, Span, MeasuredSpan int64
+	// Period is the nominal sample duration of a fixed-rate stream, zero when
+	// the rate is unknown or variable. Regular says the stream's samples fill
+	// Span at that period, so its timeline is the nominal one.
+	Period  int64
+	Regular bool
+	// Samples and KeyFrames count the stream's samples and stream access
+	// points; LastSample is the presentation time of the last sample. They are
+	// valid only when Measured, that is after packet measurement.
+	Samples, KeyFrames int
+	LastSample         int64
+	Measured           bool
+}
+
+// ProbeReference describes an Object's reference stream: the first video
+// stream when there is one, otherwise the first content stream. FFmpeg's
+// segment muxer cuts on the same stream, so its first presentation timestamp
+// anchors the Segment on the Flow timeline, while audio that leads or trails
+// the cut belongs to the Object's own range.
+//
+// A fixed-rate video stream is regularised: containers such as Matroska keep
+// timestamps in milliseconds, so a measured span falls short of the true one
+// by up to a couple of ticks. When the measured span is within a quarter
+// period of the nominal one, the nominal span is used, as AppNote 0012
+// describes for regularised timelines. Without per-stream timing, as for an
+// unmeasured whole file, the result is the container timing.
+func ProbeReference(probe Probe) (ReferenceTiming, error) {
 	streams := contentStreams(probe.Streams)
-	var reference *Stream
-	for index := range streams {
-		if streams[index].CodecType == "video" {
-			reference = &streams[index]
-			break
-		}
-	}
-	if reference == nil && len(streams) > 0 {
-		reference = &streams[0]
-	}
+	reference := referenceStream(streams)
 	if reference == nil || reference.StartTime == "" || reference.StartTime == "N/A" ||
 		reference.Duration == "" || reference.Duration == "N/A" {
-		return probeTiming(probe, streams)
+		start, span, err := probeTiming(probe, streams)
+		return ReferenceTiming{Start: start, Span: span}, err
 	}
-	if start, err = ParseSeconds(reference.StartTime); err != nil {
-		return 0, 0, fmt.Errorf("parse reference stream start time: %w", err)
+	timing := ReferenceTiming{Samples: reference.SampleCount, KeyFrames: reference.KeyFrames, Measured: reference.LastSampleTime != ""}
+	var err error
+	if timing.Start, err = ParseSeconds(reference.StartTime); err != nil {
+		return ReferenceTiming{}, fmt.Errorf("parse reference stream start time: %w", err)
 	}
-	if span, err = ParseSeconds(reference.Duration); err != nil {
-		return 0, 0, fmt.Errorf("parse reference stream duration: %w", err)
+	if timing.Span, err = ParseSeconds(reference.Duration); err != nil {
+		return ReferenceTiming{}, fmt.Errorf("parse reference stream duration: %w", err)
 	}
-	if span < 0 {
-		return 0, 0, fmt.Errorf("reference stream %d duration cannot be negative", reference.Index)
+	if timing.Span < 0 {
+		return ReferenceTiming{}, fmt.Errorf("reference stream %d duration cannot be negative", reference.Index)
 	}
-	return start, span, nil
+	timing.MeasuredSpan = timing.Span
+	if timing.Measured {
+		if timing.LastSample, err = ParseSeconds(reference.LastSampleTime); err != nil {
+			return ReferenceTiming{}, fmt.Errorf("parse reference stream last sample time: %w", err)
+		}
+	}
+	if reference.CodecType == "video" && timing.Samples > 0 {
+		if numerator, denominator, ok := streamFrameRate(*reference); ok && numerator > 0 && denominator > 0 {
+			period := new(big.Rat).SetFrac64(denominator, numerator)
+			timing.Period = ratNanoseconds(period)
+			nominal := ratNanoseconds(new(big.Rat).Mul(period, big.NewRat(int64(timing.Samples), 1)))
+			// A quarter period separates timestamp rounding, which is at most a
+			// couple of container ticks, from a sample missing inside the Object,
+			// which is a whole period and must keep the measured span.
+			if difference := timing.Span - nominal; difference < timing.Period/4 && difference > -timing.Period/4 {
+				timing.Span = nominal
+				timing.Regular = true
+				if timing.Measured {
+					timing.LastSample = timing.Start + nominal - timing.Period
+				}
+			}
+		}
+	}
+	return timing, nil
+}
+
+func referenceStream(streams []Stream) *Stream {
+	for index := range streams {
+		if streams[index].CodecType == "video" {
+			return &streams[index]
+		}
+	}
+	if len(streams) > 0 {
+		return &streams[0]
+	}
+	return nil
+}
+
+// ratNanoseconds rounds a duration in seconds to the nearest nanosecond.
+func ratNanoseconds(seconds *big.Rat) int64 {
+	scaled := new(big.Rat).Mul(seconds, big.NewRat(nanosecondsPerSecond, 1))
+	quotient, remainder := new(big.Int).QuoRem(scaled.Num(), scaled.Denom(), new(big.Int))
+	if new(big.Int).Lsh(new(big.Int).Abs(remainder), 1).Cmp(scaled.Denom()) >= 0 {
+		if scaled.Num().Sign() < 0 {
+			quotient.Sub(quotient, big.NewInt(1))
+		} else {
+			quotient.Add(quotient, big.NewInt(1))
+		}
+	}
+	return quotient.Int64()
 }
 
 func probeTiming(probe Probe, streams []Stream) (start, duration int64, err error) {
@@ -636,19 +762,79 @@ func codecMIME(codec string) string {
 	known := map[string]string{
 		"aac": "audio/aac", "ac3": "audio/ac3", "eac3": "audio/eac3", "flac": "audio/flac", "mp2": "audio/mpeg", "mp3": "audio/mpeg", "opus": "audio/opus", "vorbis": "audio/vorbis",
 		"h264": "video/h264", "hevc": "video/h265", "av1": "video/AV1", "ffv1": "video/FFV1", "mpeg2video": "video/mpeg", "mpeg4": "video/mp4v-es", "prores": "video/quicktime", "vp8": "video/VP8", "vp9": "video/VP9",
+		"mpeg1video": "video/mpeg", "dvvideo": "video/DV", "dnxhd": "video/x-dnxhd",
 		"mjpeg": "image/jpeg", "jpeg2000": "image/jp2", "png": "image/png", "gif": "image/gif", "webp": "image/webp",
+		"dts": "audio/vnd.dts", "truehd": "audio/vnd.dolby.mlp", "s302m": "audio/x-smpte302m",
+		"pcm_alaw": "audio/PCMA", "pcm_mulaw": "audio/PCMU",
 		"subrip": "application/x-subrip", "ass": "text/x-ssa", "webvtt": "text/vtt", "ttml": "application/ttml+xml",
+		"mov_text": "text/x-quicktime-text", "dvb_subtitle": "application/x-dvb-subtitle",
+		"dvb_teletext": "application/x-dvb-teletext", "scte_35": "application/x-scte35",
 	}
 	if value := known[strings.ToLower(codec)]; value != "" {
 		return value
 	}
 	if strings.HasPrefix(codec, "pcm_") {
-		if strings.Contains(codec, "f32") || strings.Contains(codec, "f64") {
+		switch {
+		case strings.Contains(codec, "f32") || strings.Contains(codec, "f64"):
 			return "audio/x-raw-float"
+		case strings.Contains(codec, "f16") || strings.Contains(codec, "f24"):
+			// The schema allows only 32- and 64-bit floating point.
+			return ""
 		}
 		return "audio/x-raw-int"
 	}
 	return ""
+}
+
+// essenceCodec is the coding media type for a stream as the Flow describes
+// it. JPEG 2000 is image/jp2 for a still picture and video/jp2 for moving
+// pictures, the value the BBC examples use for J2K video Flows.
+func essenceCodec(stream Stream, stillImage bool) string {
+	codec := codecMIME(stream.CodecName)
+	if stream.CodecType == "video" && !stillImage && strings.EqualFold(stream.CodecName, "jpeg2000") {
+		return "video/jp2"
+	}
+	return codec
+}
+
+// describableStreams separates the streams Tamsin can describe as Flows from
+// data and attachment tracks that have no coding media type to declare. Video,
+// audio and subtitle streams are always kept: an unknown codec there is a
+// reason to stop, not to drop the essence.
+func describableStreams(streams []Stream) (kept, dropped []Stream) {
+	for _, stream := range streams {
+		if UndescribableDataStream(stream) {
+			dropped = append(dropped, stream)
+			continue
+		}
+		kept = append(kept, stream)
+	}
+	return kept, dropped
+}
+
+// streamCodecLabel names a stream's coding for diagnostics. FFprobe leaves
+// codec_name out for tracks FFmpeg has no decoder for, such as QuickTime
+// timecode, and reports only the container's four-character tag.
+func streamCodecLabel(stream Stream) string {
+	switch {
+	case stream.CodecName != "":
+		return stream.CodecName
+	case stream.CodecTagString != "":
+		return stream.CodecTagString
+	}
+	return "unknown"
+}
+
+// UndescribableDataStream reports a data or attachment track with no coding
+// media type Tamsin can name: a QuickTime timecode track, MXF ancillary data,
+// a font attachment. Such a track cannot be an elemental Flow, because the
+// schema requires a codec, so it stays in the multiplex undescribed.
+func UndescribableDataStream(stream Stream) bool {
+	switch stream.CodecType {
+	case "data", "attachment":
+		return codecMIME(stream.CodecName) == ""
+	}
+	return false
 }
 
 func pcmUncompressedType(codec string) string {

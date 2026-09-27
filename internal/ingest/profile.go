@@ -282,7 +282,9 @@ func validateMPEGTSSegmentCodecs(probe media.Probe) error {
 	}
 	essences := 0
 	for _, stream := range probe.Streams {
-		if stream.Disposition.AttachedPicture != 0 {
+		// Attached pictures and undescribable data tracks are left out of the
+		// transport stream, so they are not the muxer's concern.
+		if stream.Disposition.AttachedPicture != 0 || media.UndescribableDataStream(stream) {
 			continue
 		}
 		essences++

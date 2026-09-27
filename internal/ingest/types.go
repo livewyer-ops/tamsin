@@ -100,6 +100,12 @@ type Config struct {
 	FlowID            string
 	SourceID          string
 	FlowMetadata      tams.Flow
+	// CollectedFlowMetadata overrides one collected essence Flow at a time,
+	// keyed by its collection role ("video", "audio 1"), for facts an
+	// operator knows about one track of a multiplex, such as the codec of a
+	// data track Tamsin cannot name. Roles that the input does not produce
+	// are an error.
+	CollectedFlowMetadata map[string]tams.Flow
 	// TAMSFlowProfiles assigns immutable TAMS 8.2 Flow Profiles using
 	// [format[:index]=]UUID selectors.
 	TAMSFlowProfiles []string

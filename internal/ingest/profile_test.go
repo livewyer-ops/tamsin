@@ -224,6 +224,18 @@ func TestMPEGTSSegmentsRejectUnsupportedCodecs(t *testing.T) {
 	if err := validateMPEGTSSegmentCodecs(unsupported); err == nil || !strings.Contains(err.Error(), "audio/flac") {
 		t.Fatalf("unsupported codec error = %v", err)
 	}
+	// A timecode track is left out of the transport stream, so it is not
+	// the policy's concern; a described data track still is.
+	withTimecode := compatible
+	withTimecode.Streams = append(append([]media.Stream(nil), compatible.Streams...), media.Stream{Index: 2, CodecType: "data", CodecName: "tmcd"})
+	if err := validateMPEGTSSegmentCodecs(withTimecode); err != nil {
+		t.Fatalf("timecode track rejected: %v", err)
+	}
+	withSCTE := compatible
+	withSCTE.Streams = append(append([]media.Stream(nil), compatible.Streams...), media.Stream{Index: 2, CodecType: "data", CodecName: "scte_35"})
+	if err := validateMPEGTSSegmentCodecs(withSCTE); err == nil || !strings.Contains(err.Error(), "data/scte_35") {
+		t.Fatalf("described data track error = %v", err)
+	}
 }
 
 func TestMuxerChangingArgumentsMustMatchContainerPolicy(t *testing.T) {

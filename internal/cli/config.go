@@ -203,6 +203,7 @@ func configDefinitions() []configDefinition {
 		{key: "http.timeout", kind: configDuration, flag: "timeout", fileAllowed: true},
 		{key: "http.transfer_idle_timeout", kind: configDuration, flag: "transfer-idle-timeout", fileAllowed: true},
 		{key: "http.transfer_timeout", kind: configDuration, flag: "transfer-timeout", fileAllowed: true},
+		{key: "ingest.collected_flow_metadata", kind: configString, flag: "collected-flow-metadata", fileAllowed: true},
 		{key: "ingest.concurrency", kind: configInt, flag: "concurrency", defaultValue: min(runtime.GOMAXPROCS(0), 8), fileAllowed: true},
 		{key: "ingest.dry_run", kind: configString, flag: "dry-run", fileAllowed: true},
 		{key: "ingest.essence_storage", kind: configString, flag: "essence-storage", fileAllowed: true},

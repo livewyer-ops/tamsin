@@ -76,6 +76,7 @@ const (
 	FailureMessageMediaContainerUnknown    = "The input container could not be identified."
 	FailureMessageMediaUnsupported         = "The input codecs are not supported by the MPEG-TS segment policy."
 	FailureMessageMediaOptionsInvalid      = "The FFmpeg options conflict with the selected media treatment."
+	FailureMessageCollectedMetadataInvalid = "The collected Flow metadata names a role the input does not have."
 	FailureMessageMediaToolUnavailable     = "The configured media toolchain is unavailable."
 	FailureMessageMediaInvalidFlow         = "The input could not be described as a valid Flow."
 	FailureMessageMediaIdentityUnresolved  = "The media interpretation identity could not be derived."

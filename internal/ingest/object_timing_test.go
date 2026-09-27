@@ -5,6 +5,7 @@ import (
 	"math"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,10 +86,11 @@ func TestEmittedObjectPresentationTiming(t *testing.T) {
 					// ts_offset maps the reference stream's first presentation
 					// timestamp onto the Segment start exactly; the Object's own
 					// range may begin earlier when audio leads the cut.
-					referenceStart, _, err := media.ProbeReference(measured)
+					reference, err := media.ProbeReference(measured)
 					if err != nil {
 						t.Fatal(err)
 					}
+					referenceStart := reference.Start
 					objectStart, _, err := media.ProbeTiming(measured)
 					if err != nil {
 						t.Fatal(err)
@@ -127,5 +129,89 @@ func TestEmittedObjectPresentationTiming(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestMatroskaSegmentsRegulariseToTheNominalRate renders a 24 fps Matroska
+// source, whose millisecond timestamps make every 72-frame Segment measure a
+// millisecond short of three seconds, and requires the Flow to carry the
+// nominal timeline: Segments of exactly three seconds that abut.
+func TestMatroskaSegmentsRegulariseToTheNominalRate(t *testing.T) {
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip("requires " + tool)
+		}
+	}
+	ctx := context.Background()
+	input := filepath.Join(t.TempDir(), "synthetic.mkv")
+	command := exec.Command("ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+		"testsrc2=size=128x96:rate=24:duration=12", "-f", "lavfi", "-i",
+		"sine=frequency=440:sample_rate=48000:duration=12", "-c:v", "libx264",
+		"-preset", "veryfast", "-g", "72", "-bf", "2", "-sc_threshold", "0",
+		"-c:a", "aac", input)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("fixture: %v: %s", err, output)
+	}
+	for _, stream := range []int{0, media.AllStreams} {
+		name := "video"
+		if stream == media.AllStreams {
+			name = "muxed"
+		}
+		t.Run(name, func(t *testing.T) {
+			var records []media.SegmentRecord
+			if err := (media.FFmpeg{}).Segment(ctx, media.SegmentRequest{
+				Input: input, Duration: 3 * time.Second, Format: media.SegmentFormatSource, BitExact: true,
+				SourceContainer: media.SegmentContainer{Muxer: "matroska", Extension: ".mkv"},
+				StreamIndices:   []int{stream}, Directory: t.TempDir(),
+			}, func(record media.SegmentRecord) error {
+				records = append(records, record)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if len(records) != 4 {
+				t.Fatalf("expected four 3 s segments, got %d", len(records))
+			}
+			const start = int64(5 * time.Second)
+			pipeline, err := New(Config{Concurrency: 1, SegmentDuration: 3 * time.Second, Start: start},
+				newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			objects, cleanup, err := pipeline.prepareObjectsForStream(ctx, "test-flow",
+				stagedFile{path: input}, media.FlowInfo{}, stream, start, records)
+			defer cleanup()
+			if err != nil {
+				t.Fatal(err)
+			}
+			const period = int64(41666667)
+			for index, object := range objects {
+				want := start + int64(index)*int64(3*time.Second)
+				if object.start != want || object.duration != int64(3*time.Second) {
+					t.Fatalf("object %d: start=%d duration=%d, want %d and 3 s", index, object.start, object.duration, want)
+				}
+				if object.keyFrames != 1 || object.lastDuration != media.Timestamp(period) {
+					t.Fatalf("object %d hints: key frames %d, last duration %q", index, object.keyFrames, object.lastDuration)
+				}
+				// The Object's own range holds the regularised Segment.
+				objectStart, err := media.ParseTimestamp(strings.TrimPrefix(strings.SplitN(object.objectTimerange, "_", 2)[0], "["))
+				if err != nil {
+					t.Fatal(err)
+				}
+				objectEnd, err := media.ParseTimestamp(strings.TrimSuffix(strings.SplitN(object.objectTimerange, "_", 2)[1], ")"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				offset := int64(0)
+				if object.tsOffset != "" {
+					if offset, err = media.ParseTimestamp(object.tsOffset); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if objectStart+offset > object.start || objectEnd+offset < object.start+object.duration {
+					t.Fatalf("object %d range %s%s does not contain its segment %s", index, object.objectTimerange, object.tsOffset, object.timerange)
+				}
+			}
+		})
 	}
 }

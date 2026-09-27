@@ -23,7 +23,7 @@ func generatedRootFlowID(profileKey, mediaKey string) string {
 	return framedID("flow/content-profile/v1", profileKey, mediaKey)
 }
 
-func streamedFlowID(profileKey string, flow tams.Flow, info media.FlowInfo, overrides tams.Flow) (string, error) {
+func streamedFlowID(profileKey string, flow tams.Flow, info media.FlowInfo, overrides tams.Flow, collectedOverrides map[string]tams.Flow) (string, error) {
 	// Initial rate estimates and whole-input duration are not identity evidence.
 	// The same source revision must keep its IDs as segments establish cadence.
 	initial := func(flow tams.Flow) tams.Flow {
@@ -51,7 +51,18 @@ func streamedFlowID(profileKey string, flow tams.Flow, info media.FlowInfo, over
 	if err != nil {
 		return "", err
 	}
-	return framedID("flow/input-revision/v1", profileKey, mediaKey, string(encoded)), nil
+	if len(collectedOverrides) == 0 {
+		return framedID("flow/input-revision/v1", profileKey, mediaKey, string(encoded)), nil
+	}
+	perRole := make(map[string]tams.Flow, len(collectedOverrides))
+	for role, override := range collectedOverrides {
+		perRole[role] = flowIdentityFields(override)
+	}
+	encodedCollected, err := json.Marshal(perRole)
+	if err != nil {
+		return "", err
+	}
+	return framedID("flow/input-revision/v1", profileKey, mediaKey, string(encoded), string(encodedCollected)), nil
 }
 
 // generatedChildFlowID anchors every derived member to the root Flow. Besides
@@ -102,6 +113,7 @@ type mediaInterpretationIdentity struct {
 	SegmentContainer   media.SegmentContainer        `json:"segment_container"`
 	ContainerSupported bool                          `json:"container_supported"`
 	UnsupportedCodecs  []media.UnsupportedCodec      `json:"unsupported_codecs,omitempty"`
+	DroppedStreams     []media.UnsupportedCodec      `json:"dropped_streams,omitempty"`
 	Collected          []collectedFlowInterpretation `json:"collected,omitempty"`
 }
 
@@ -127,6 +139,7 @@ func mediaInterpretationFingerprint(flow tams.Flow, info media.FlowInfo) (string
 		ContentType: info.ContentType, SegmentContainer: info.SegmentContainer,
 		ContainerSupported: info.ContainerSupported,
 		UnsupportedCodecs:  info.UnsupportedCodecs,
+		DroppedStreams:     info.DroppedStreams,
 		Collected:          make([]collectedFlowInterpretation, len(info.Collected)),
 	}
 	for index, collected := range info.Collected {

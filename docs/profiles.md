@@ -93,7 +93,7 @@ TAMSin supports these combinations:
 | whole source-family essence (`demux@1`) | MP4/QuickTime/3GP/3G2, WebM/Matroska, MPEG-TS/PS, MXF, AVI, ASF, WAV, AIFF, FLAC, MP3, AAC/ADTS, AC-3/E-AC-3, Ogg, JPEG/JPEG 2000/PNG/GIF/WebP | stream copy; the source muxer must accept the source codec, otherwise FFmpeg fails before TAMS is mutated | independent | one complete Object per essence |
 | source-family multiplex (`muxed-segments@1`) | same source-family set as `demux@1` | stream copy with source-muxer compatibility | muxed | keyframe-aligned, nominally 10 seconds |
 | source-family essence (`essence-segments@1`) | same source-family set as `demux@1` | stream copy with source-muxer compatibility | independent | keyframe-aligned, nominally 10 seconds |
-| MPEG-TS (`mpegts-segments@1`) | MPEG-TS written by TAMSin regardless of input container | video: H.264, HEVC, MPEG-2; audio: AAC, MPEG Layer II/III, AC-3, E-AC-3; attached pictures are ignored; other stream types/codecs are rejected before FFmpeg or TAMS mutation | independent | keyframe-aligned, nominally 2 seconds |
+| MPEG-TS (`mpegts-segments@1`) | MPEG-TS written by TAMSin regardless of input container | video: H.264, HEVC, MPEG-2; audio: AAC, MPEG Layer II/III, AC-3, E-AC-3; attached pictures and data tracks without a coding media type are left out; other stream types/codecs are rejected before FFmpeg or TAMS mutation | independent | keyframe-aligned, nominally 2 seconds |
 
 Segment duration is a target. Stream copy cannot invent random-access points,
 so a GOP longer than the target produces longer Segments. The MPEG-TS profile
@@ -113,7 +113,14 @@ video stream, otherwise the first stream), so a multiplex keeps the source
 clock: audio that leads or trails a video cut stays inside the Object's
 `object_timerange` but outside the Segment's `timerange`. Adjacent Segments
 abut exactly; a gap in the source stays a gap on the Flow; a cut that is not a
-stream access point is refused. Releases up to `8.2.0-in2` advanced each
+stream access point is refused. A fixed-rate video reference stream is
+regularised to its nominal period when the container rounds its timestamps
+(Matroska keeps milliseconds, so 240 frames at 24 fps measure 9.999 s and are
+registered as 10 s), following AppNote 0012; a span that differs from the
+nominal by more than a quarter of a frame, such as a frame missing inside the
+Object, is kept as measured. Each measured Segment also carries
+`key_frame_count` (the reference stream's access points) and `last_duration`
+(how long its last sample presents). Releases up to `8.2.0-in2` advanced each
 Segment by the Object's whole span, which stretched multiplexed Flows by the
 audio/video offset at every cut, about 10 ms per Segment. Re-ingest affected
 media into new Flows to obtain corrected timing; existing Flows are not
@@ -205,6 +212,7 @@ FFprobe does not reliably establish PsF, so TAMSin never synthesises
 | PCM audio | `unc_parameters.unc_type` | Interleaved by default; planar for FFmpeg's `pcm_*_planar` family and `pcm_lxf` |
 | Still image | `frame_width`, `frame_height` | Required positive values; a zero-duration single image stream is not described as moving video |
 | Data | `essence_parameters` | Empty unless supplied by an operator; TAMSin does not invent a `data_type` URN |
+| Data without a codec | none | A data or attachment track whose codec has no media type below (QuickTime `tmcd` timecode, MXF ancillary data, font attachments) is not described as a Flow. A whole-file Object keeps the track; a rendered Object leaves it out and `track_index` counts the rendered container. A warning names the stream. Video, audio and subtitle streams with unknown codecs still stop the ingest |
 
 ### Codec media types
 
@@ -214,24 +222,33 @@ are the automatic mappings currently promised:
 | Essence | FFprobe names | TAMS `codec` |
 | --- | --- | --- |
 | Video | `h264`, `hevc`, `av1`, `ffv1` | `video/h264`, `video/h265`, `video/AV1`, `video/FFV1` |
-| Video | `mpeg2video`, `mpeg4`, `vp8`, `vp9` | `video/mpeg`, `video/mp4v-es`, `video/VP8`, `video/VP9` |
+| Video | `mpeg1video`, `mpeg2video`, `mpeg4`, `vp8`, `vp9` | `video/mpeg` (MPEG-1/2), `video/mp4v-es`, `video/VP8`, `video/VP9` |
 | Video | `prores` | `video/quicktime` (the established compatibility mapping; IANA has no ProRes coding subtype) |
-| Image coding | `mjpeg`, `jpeg2000`, `png`, `gif`, `webp` | `image/jpeg`, `image/jp2`, `image/png`, `image/gif`, `image/webp` |
+| Video | `dvvideo`, `dnxhd` | `video/DV`, `video/x-dnxhd` |
+| Video | `jpeg2000` on a moving-picture stream | `video/jp2`, as the BBC reference Flows use |
+| Image coding | `mjpeg`, `jpeg2000` (still image), `png`, `gif`, `webp` | `image/jpeg`, `image/jp2`, `image/png`, `image/gif`, `image/webp` |
 | Audio | `aac`, `ac3`, `eac3`, `flac`, `mp2`, `mp3`, `opus`, `vorbis` | `audio/aac`, `audio/ac3`, `audio/eac3`, `audio/flac`, `audio/mpeg` (MP2/MP3), `audio/opus`, `audio/vorbis` |
-| PCM audio | any `pcm_*` | `audio/x-raw-int` or `audio/x-raw-float`, the explicit vocabulary used by the pinned TAMS audio schema |
-| Timed text/data | `webvtt`, `ttml`, `subrip`, `ass` | `text/vtt`, `application/ttml+xml`, `application/x-subrip`, `text/x-ssa` |
+| Audio | `dts`, `truehd`, `s302m` | `audio/vnd.dts`, `audio/vnd.dolby.mlp`, `audio/x-smpte302m` |
+| Audio | `pcm_alaw`, `pcm_mulaw` | `audio/PCMA`, `audio/PCMU` (companded G.711 is a codec, so no `unc_parameters`) |
+| PCM audio | other `pcm_*` | `audio/x-raw-int` or `audio/x-raw-float`, the explicit vocabulary used by the pinned TAMS audio schema; 16- and 24-bit float, which the schema cannot describe, are unmapped |
+| Timed text/data | `webvtt`, `ttml`, `subrip`, `ass`, `mov_text` | `text/vtt`, `application/ttml+xml`, `application/x-subrip`, `text/x-ssa`, `text/x-quicktime-text` |
+| Broadcast data | `dvb_subtitle`, `dvb_teletext`, `scte_35` | `application/x-dvb-subtitle`, `application/x-dvb-teletext`, `application/x-scte35` |
 
-An FFmpeg codec outside this table produces no generated `codec`. TAMSin logs
-the codec name, stream type and stream index; it never constructs
-`video/x-<name>`, `audio/x-<name>`, or `application/x-<name>`. This is stricter
-than container fallback because the pinned elemental Flow schemas require
-`codec`: without a valid explicit override, final schema preflight rejects the
-Flow before TAMS mutation.
+Where IANA registers a coding media type it is used. The `x-` names above are
+the only ones TAMSin writes: they are fixed values for codecs with no
+registration, chosen once so that every TAMSin deployment names them the same
+way, and they are listed here so a consumer can match them. An FFmpeg codec
+outside this table produces no generated `codec`. TAMSin logs the codec name,
+stream type and stream index; it never constructs a name from the FFmpeg codec
+string. This is stricter than container fallback because the pinned elemental
+Flow schemas require `codec`: without a valid explicit override, final schema
+preflight rejects the Flow before TAMS mutation.
 
 `--flow-metadata` is most useful for a single-essence input whose workflow owns
-a more specific registry mapping. A multi-essence file may contain different
-unknown codecs, so one top-level override cannot safely describe every track;
-use a supported ingest profile rather than applying one codec value to all of
-them.
+a more specific registry mapping. In a multi-essence file each track may need a
+different value, so `--collected-flow-metadata` takes a JSON object keyed by
+collection role (`video`, `audio 1`, `data`) whose values are merged into that
+one essence Flow; a role the input does not produce is an error rather than a
+silently unused override. Overrides do not change generated identity.
 
 See [operations](operations.md) for staging, verification and recovery.

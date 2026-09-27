@@ -215,10 +215,15 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID, container strin
 
 	requests := make([]tams.SegmentRequest, 0, len(chunk))
 	for _, object := range chunk {
-		requests = append(requests, tams.SegmentRequest{
+		request := tams.SegmentRequest{
 			ObjectID: object.id, Timerange: object.timerange,
 			ObjectTimerange: object.objectTimerange, TSOffset: object.tsOffset,
-		})
+			LastDuration: object.lastDuration,
+		}
+		if object.keyFrames > 0 {
+			request.KeyFrameCount = new(object.keyFrames)
+		}
+		requests = append(requests, request)
 		setObjectDisposition(objectResults, object.id, ObjectDispositionRegistrationIndeterminate)
 	}
 	registrationRecovered := false

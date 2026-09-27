@@ -93,9 +93,13 @@ type SegmentRequest struct {
 	Format          SegmentFormat
 	SourceContainer SegmentContainer
 	StreamIndices   []int
-	Directory       string
-	AdditionalArgs  []string
-	BitExact        bool
+	// OmitStreams are left out of an AllStreams output: tracks the Flow graph
+	// does not describe, such as a QuickTime timecode track, which the target
+	// muxer may not accept and no Flow would reference.
+	OmitStreams    []int
+	Directory      string
+	AdditionalArgs []string
+	BitExact       bool
 	// StagingWindow applies process-level backpressure while a streaming sink
 	// commits and removes completed outputs. It is optional because callers
 	// which retain every output cannot safely acknowledge reclaimed space.
@@ -218,7 +222,13 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			mapSpec = "0:" + strconv.Itoa(streamIndex)
 			prefix = "essence-" + strconv.Itoa(streamIndex)
 		}
-		arguments = append(arguments, "-map", mapSpec, "-c", "copy")
+		arguments = append(arguments, "-map", mapSpec)
+		if streamIndex == AllStreams {
+			for _, omitted := range request.OmitStreams {
+				arguments = append(arguments, "-map", "-0:"+strconv.Itoa(omitted))
+			}
+		}
+		arguments = append(arguments, "-c", "copy")
 		if request.BitExact {
 			arguments = append(arguments, "-fflags", "+bitexact")
 		}

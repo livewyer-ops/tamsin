@@ -20,6 +20,31 @@ example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
   exposed; a cut that is not a stream access point is refused. The renderer
   identity epoch moves to 4, so re-ingests create new Flows rather than
   colliding with Flows written under the earlier placement.
+- Data and attachment tracks with no coding media type (QuickTime timecode,
+  MXF ancillary data, font attachments) no longer stop an ingest. They are not
+  described as Flows: a whole-file Object keeps them, a rendered Object leaves
+  them out, and the collection's `track_index` counts the container the
+  Objects are actually in. A warning names each dropped track. Unknown video,
+  audio and subtitle codecs still stop the ingest.
+- Name more broadcast codecs: DV, DNxHD, MPEG-1 video, DTS, TrueHD, SMPTE
+  302M, G.711 A-law and mu-law, QuickTime text, DVB subtitles and teletext and
+  SCTE-35 (see `docs/profiles.md` for the vocabulary). **Breaking for
+  generated identities of JPEG 2000 video:** moving-picture JPEG 2000 is now
+  `video/jp2`, as the BBC reference Flows use; still images stay `image/jp2`.
+  G.711 no longer carries `unc_parameters`, and 16- and 24-bit float PCM is
+  no longer described as integer PCM.
+- Add `--collected-flow-metadata` (`ingest.collected_flow_metadata`): a JSON
+  object of overrides keyed by collection role, merged into one collected
+  essence Flow each, for facts an operator knows about a single track of a
+  multiplex. A role the input does not produce is an error.
+- Send `key_frame_count` and `last_duration` with every Segment whose packets
+  were measured: the reference stream's stream access points and the
+  presentation duration of its last sample. Whole-file Objects, which are not
+  measured, send neither.
+- Regularise a fixed-rate video reference stream to its nominal period when
+  the container's timestamps round it short, as Matroska's millisecond
+  timestamps do: 240 frames at 24 fps make a 10 s Segment, not 9.999 s. Such
+  Flows previously carried a one-millisecond gap at every Segment boundary.
 - Never register a Segment that overlaps one already in the Flow. A Segment at
   the same timerange under another identifier is adopted when its bytes and
   timing match under readback; otherwise the input stops with the new

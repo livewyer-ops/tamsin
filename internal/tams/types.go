@@ -191,6 +191,8 @@ type Segment struct {
 	Timerange       string         `json:"timerange"`
 	ObjectTimerange string         `json:"object_timerange,omitempty"`
 	TSOffset        string         `json:"ts_offset,omitempty"`
+	LastDuration    string         `json:"last_duration,omitempty"`
+	KeyFrameCount   *int           `json:"key_frame_count,omitempty"`
 	GetURLs         []PresignedURL `json:"get_urls,omitempty"`
 	InitObject      *ObjectCore    `json:"init_object,omitempty"`
 }

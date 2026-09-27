@@ -81,6 +81,7 @@ flag or variable only. See the [CLI reference](cli.md) for each flag's meaning.
 | `ingest.storage_id` | `--storage-id` | `TAMSIN_INGEST_STORAGE_ID` | |
 | `ingest.tams_flow_profiles` | `--tams-flow-profile` | `TAMSIN_INGEST_TAMS_FLOW_PROFILES` | |
 | `ingest.flow_metadata` | `--flow-metadata` | `TAMSIN_INGEST_FLOW_METADATA` | |
+| `ingest.collected_flow_metadata` | `--collected-flow-metadata` | `TAMSIN_INGEST_COLLECTED_FLOW_METADATA` | |
 | `ingest.source_id` | `--source-id` | `TAMSIN_INGEST_SOURCE_ID` | |
 | `ingest.flow_id` | `--flow-id` | `TAMSIN_INGEST_FLOW_ID` | |
 | `ingest.staging_byte_budget` | `--staging-byte-budget` | `TAMSIN_INGEST_STAGING_BYTE_BUDGET` | `auto` |
