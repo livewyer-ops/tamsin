@@ -67,6 +67,20 @@ func ValidateFlowGet(version tams.APIVersion, flow tams.Flow) error {
 	return revision.validate(revision.revision.flowGet, flow)
 }
 
+// ValidateFlowStatus checks a Flow status value against the pinned
+// vocabulary. It is what remains checkable when a store newer than the pinned
+// revision returns Flow fields the pinned schemas do not know.
+func ValidateFlowStatus(version tams.APIVersion, status string) error {
+	revision, err := revisionFor(version)
+	if err != nil {
+		return err
+	}
+	if version.Minor == tams.CompatibilityMinor {
+		return revision.validate(revision.revision.flowGet, tams.Flow{"status": status})
+	}
+	return revision.validate("flow-status.json", status)
+}
+
 // ValidateProfile checks an immutable TAMS 8.2 Flow Profile.
 func ValidateProfile(profile tams.Profile) error {
 	return revisions[2].validate("profile.json", profile)

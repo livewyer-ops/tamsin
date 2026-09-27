@@ -2,6 +2,7 @@ package tams
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"math/rand/v2"
 	"net/http"
@@ -52,7 +54,19 @@ type Config struct {
 	Retries             int
 	UserAgent           string
 	Observability       *observability.Run
+	// DeletionTimeout bounds one Segment deletion end to end: the DELETE, the
+	// service's deletion request when it answers 202, and confirmation that
+	// the Segment is gone. Zero means DefaultDeletionTimeout.
+	DeletionTimeout time.Duration
+	// Logger receives operational warnings, such as a deletion request that
+	// cannot be monitored. Nil discards them.
+	Logger *slog.Logger
 }
+
+// DefaultDeletionTimeout is how long a Segment deletion may take when the
+// caller sets no DeletionTimeout. Deletion is asynchronous on the service side
+// and confirmed by polling, so it needs far longer than a metadata request.
+const DefaultDeletionTimeout = 5 * time.Minute
 
 // RequestTimeoutError reports a request-level deadline without confusing it
 // with cancellation of the caller's operation. The URL is redacted when the
@@ -73,6 +87,8 @@ type Client struct {
 	timeout             time.Duration
 	transferTimeout     time.Duration
 	transferIdleTimeout time.Duration
+	deletionTimeout     time.Duration
+	logger              *slog.Logger
 	base                *url.URL
 	http                *http.Client
 	external            *http.Client
@@ -117,6 +133,8 @@ func New(config Config) (*Client, error) {
 		timeout:             config.Timeout,
 		transferTimeout:     config.TransferTimeout,
 		transferIdleTimeout: config.TransferIdleTimeout,
+		deletionTimeout:     cmp.Or(config.DeletionTimeout, DefaultDeletionTimeout),
+		logger:              cmp.Or(config.Logger, slog.New(slog.DiscardHandler)),
 		base:                base,
 		http: &http.Client{
 			Transport: config.Transport, CheckRedirect: auth.RejectRedirect,
@@ -264,6 +282,9 @@ func (c *Client) UploadFile(ctx context.Context, destination PresignedURL, filen
 			for name, value := range destination.Headers {
 				request.Header.Set(name, value)
 			}
+			if digest := requestContentDigest(destination); digest != "" {
+				request.Header.Set("Content-Digest", digest)
+			}
 			if err := c.ensureURLAttemptCanStart(destination, "upload"); err != nil {
 				watch.Stop()
 				_ = file.Close()
@@ -306,18 +327,45 @@ func (c *Client) UploadFile(ctx context.Context, destination PresignedURL, filen
 	return receipt, err
 }
 
+// requestContentDigest is the RFC 9530 Content-Digest sent with an upload
+// whose bytes the caller has already hashed. Only an unsigned URL gets one: a
+// presigned URL's signature may cover the request headers, and a provider
+// that did not sign for a digest will not verify one. A digest header the
+// service itself instructed is left as it is.
+func requestContentDigest(destination PresignedURL) string {
+	if destination.Presigned || destination.ContentSHA256 == "" {
+		return ""
+	}
+	for name := range destination.Headers {
+		switch strings.ToLower(name) {
+		case "content-digest", "repr-digest", "digest", "x-amz-checksum-sha256":
+			return ""
+		}
+	}
+	raw, err := hex.DecodeString(destination.ContentSHA256)
+	if err != nil || len(raw) != sha256.Size {
+		return ""
+	}
+	return "sha-256=:" + base64.StdEncoding.EncodeToString(raw) + ":"
+}
+
 // uploadStorageSHA256 extracts only checksums whose semantics are SHA-256 over
-// the uploaded representation. Only response headers are evidence that
-// storage computed or accepted a checksum; a header TAMSin sent in the request
-// cannot prove that a backend understood it. ETag is deliberately excluded:
-// it is not reliably a content digest.
+// the uploaded representation: S3's checksum header and RFC 9530's
+// Repr-Digest, which describes the representation the request selected, plus
+// the older Digest header with the same meaning. Content-Digest is not
+// evidence: RFC 9530 defines it over the content of the message that carries
+// it, so on a response it describes the response body, and a gateway that
+// adds one would produce false integrity failures. Only response headers are
+// evidence that storage computed or accepted a checksum; a header TAMSin sent
+// in the request cannot prove that a backend understood it. ETag is
+// deliberately excluded: it is not reliably a content digest.
 func uploadStorageSHA256(response http.Header) (string, error) {
 	for _, candidate := range []struct {
 		name       string
 		structured bool
 	}{
 		{name: "X-Amz-Checksum-Sha256"},
-		{name: "Content-Digest", structured: true},
+		{name: "Repr-Digest", structured: true},
 		{name: "Digest", structured: true},
 	} {
 		for _, value := range response.Values(candidate.name) {

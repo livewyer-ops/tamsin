@@ -1311,6 +1311,11 @@ func TestListingsOnlyRequestDownloadURLsWhenRead(t *testing.T) {
 		if options.IncludeDownloadURLs {
 			t.Fatalf("listing %d asked for download URLs with verification off; nothing reads them", index)
 		}
+		// A resume asks only about the span it is about to write; a long-lived
+		// Flow can hold more Segments than one listing returns.
+		if options.Timerange == "" {
+			t.Fatalf("listing %d covers the whole Flow", index)
+		}
 	}
 }
 
@@ -1762,9 +1767,6 @@ func TestInvalidServiceLifetimesFailBeforeMutation(t *testing.T) {
 		{name: "below minimum", document: map[string]any{
 			"api_version": "8.1", "min_object_timeout": "299:0", "min_presigned_url_timeout": "30:0",
 		}, want: "requires at least 300:0"},
-		{name: "wrong ordering", document: map[string]any{
-			"api_version": "8.1", "min_object_timeout": "300:0", "min_presigned_url_timeout": "301:0",
-		}, want: "exceeds /min_object_timeout"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			filename := filepath.Join(t.TempDir(), "fixture.mp4")

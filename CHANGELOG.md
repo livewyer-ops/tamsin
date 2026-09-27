@@ -20,6 +20,27 @@ example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
   exposed; a cut that is not a stream access point is refused. The renderer
   identity epoch moves to 4, so re-ingests create new Flows rather than
   colliding with Flows written under the earlier placement.
+- Upload checksum evidence: a response `Content-Digest` is no longer read as
+  proof about the stored Object (RFC 9530 defines it over the response body);
+  `Repr-Digest` is, alongside `X-Amz-Checksum-Sha256` and `Digest`. An upload
+  to an unsigned URL now sends the Object's digest as `Content-Digest` so
+  storage that verifies digests refuses a corrupted transfer; presigned URLs
+  are sent exactly as issued.
+- Segment deletion has its own deadline, `--deletion-timeout`
+  (`http.deletion_timeout`, default five minutes), instead of the per-request
+  metadata timeout; detached cleanup follows it. A 202 without a usable
+  `Location` is confirmed by the Segment's absence instead of being reported
+  as a stranded Segment, and a deletion request that ends in `error` is
+  accepted when the Segment has nevertheless gone.
+- A store on a newer TAMS minor revision than the pinned 8.2 schemas may
+  return Flow fields they do not know; only the metadata Tamsin generates is
+  validated against them, and the store's fields are sent back untouched.
+- A service whose `min_presigned_url_timeout` exceeds `min_object_timeout`
+  is no longer refused: URLs are scheduled against the Object lifetime and a
+  warning is logged (`tamsin doctor` reports it under `service_lifetimes`).
+- A resume lists only the span it is about to write rather than the whole
+  Flow, and the fallback to service-assigned identifiers asks again when the
+  service hands out fewer than requested.
 - Data and attachment tracks with no coding media type (QuickTime timecode,
   MXF ancillary data, font attachments) no longer stop an ingest. They are not
   described as Flows: a whole-file Object keeps them, a rendered Object leaves

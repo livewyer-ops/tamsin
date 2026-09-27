@@ -43,11 +43,19 @@ func (p *Pipeline) setFlowStatus(ctx context.Context, flowID, status string) err
 	effective["status"] = status
 	profileID := stringField(existing, "profile_id")
 	request := flowPutProjection(effective, profileID)
-	if err := tamsschema.ValidateFlowGet(p.apiVersion, effective); err != nil {
-		return fmt.Errorf("flow %s status %s produces invalid expanded metadata at %w", flowID, status, err)
-	}
-	if err := tamsschema.ValidateFlowPut(p.apiVersion, request); err != nil {
-		return fmt.Errorf("flow %s status %s produces invalid PUT metadata at %w", flowID, status, err)
+	if p.storeIsNewerMinor() {
+		// The Flow came from a store newer than the pinned schemas; only the
+		// value Tamsin is changing is checked.
+		if err := tamsschema.ValidateFlowStatus(p.apiVersion, status); err != nil {
+			return fmt.Errorf("flow %s status %s is not a pinned status value at %w", flowID, status, err)
+		}
+	} else {
+		if err := tamsschema.ValidateFlowGet(p.apiVersion, effective); err != nil {
+			return fmt.Errorf("flow %s status %s produces invalid expanded metadata at %w", flowID, status, err)
+		}
+		if err := tamsschema.ValidateFlowPut(p.apiVersion, request); err != nil {
+			return fmt.Errorf("flow %s status %s produces invalid PUT metadata at %w", flowID, status, err)
+		}
 	}
 	if _, err := p.client.PutFlow(ctx, flowID, request); err != nil {
 		return fmt.Errorf("set Flow %s status to %s: %w", flowID, status, err)

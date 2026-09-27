@@ -331,11 +331,15 @@ func (p *Pipeline) finishRollingFlowMetadata(ctx context.Context, graph flowGrap
 			}
 		}
 		planned[index].request = flowPutProjection(planned[index].effective, planned[index].member.profileID)
-		if err := tamsschema.ValidateFlowGet(p.apiVersion, planned[index].effective); err != nil {
+		effective, request := planned[index].effective, planned[index].request
+		if p.storeIsNewerMinor() {
+			effective, request = member.flow, flowPutProjection(member.flow, planned[index].member.profileID)
+		}
+		if err := tamsschema.ValidateFlowGet(p.apiVersion, effective); err != nil {
 			return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
 				fmt.Errorf("final rolling Flow metadata for %s is invalid at %w", member.id, err))
 		}
-		if err := tamsschema.ValidateFlowPut(p.apiVersion, planned[index].request); err != nil {
+		if err := tamsschema.ValidateFlowPut(p.apiVersion, request); err != nil {
 			return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
 				fmt.Errorf("final rolling Flow PUT metadata for %s is invalid at %w", member.id, err))
 		}

@@ -95,6 +95,7 @@ Accepted by every command.
 | `--redirect-url` | `http://127.0.0.1:53682/callback` | Redirect URL used when obtaining the code |
 | `--scope` | | OAuth scope; repeat or comma-separate |
 | `--timeout` | `30s` | Per-request timeout for TAMS metadata operations |
+| `--deletion-timeout` | `5m0s` | Deadline for one Segment deletion, including the service's deletion request and confirmation that the Segment is gone |
 | `--transfer-idle-timeout` | `1m0s` | Maximum time a media transfer may make no progress |
 | `--transfer-timeout` | `0` (disabled) | Deadline for a complete media transfer |
 | `--retries` | `3` | Retries for safe HTTP operations; 0 to 20 |

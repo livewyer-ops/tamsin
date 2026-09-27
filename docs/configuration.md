@@ -63,6 +63,7 @@ flag or variable only. See the [CLI reference](cli.md) for each flag's meaning.
 | `auth.redirect_url` | `--redirect-url` | `TAMSIN_AUTH_REDIRECT_URL` | `http://127.0.0.1:53682/callback` |
 | `auth.allow_insecure_loopback` | `--allow-insecure-auth-loopback` | `TAMSIN_AUTH_ALLOW_INSECURE_LOOPBACK` | `false` |
 | `http.timeout` | `--timeout` | `TAMSIN_HTTP_TIMEOUT` | `30s` |
+| `http.deletion_timeout` | `--deletion-timeout` | `TAMSIN_HTTP_DELETION_TIMEOUT` | `5m` |
 | `http.transfer_timeout` | `--transfer-timeout` | `TAMSIN_HTTP_TRANSFER_TIMEOUT` | `0` |
 | `http.transfer_idle_timeout` | `--transfer-idle-timeout` | `TAMSIN_HTTP_TRANSFER_IDLE_TIMEOUT` | `1m` |
 | `http.retries` | `--retries` | `TAMSIN_HTTP_RETRIES` | `3`, range 0 to 20 |

@@ -178,7 +178,7 @@ func New(config Config, client TAMSClient, prober media.Prober, segmenter media.
 		profileAssignments: profileAssignments,
 		profileCache:       make(map[string]tams.Profile),
 		flowStatuses:       make(map[string]string),
-		recoveryTimeout:    retractionTimeout,
+		recoveryTimeout:    recoveryDeadline(client),
 		limits: tams.ServiceLimits{
 			ObjectRegistration: tams.MinimumObjectRegistration,
 			PresignedURL:       tams.MinimumPresignedURL,
@@ -1605,6 +1605,16 @@ func flowProfileForRendererEpoch(digest string, config Config, rendererEpoch str
 	parts = append(parts, config.TAMSFlowProfiles...)
 	parts = append(parts, rendererEpoch)
 	return identityFingerprint("media-treatment/v1", parts...)
+}
+
+// recoveryDeadline is how long detached cleanup may take. Retraction waits
+// for the service's deletion to complete, so it follows the client's deletion
+// deadline when that is longer than the cleanup floor.
+func recoveryDeadline(client TAMSClient) time.Duration {
+	if deadline, ok := client.(interface{ DeletionTimeout() time.Duration }); ok {
+		return max(retractionTimeout, deadline.DeletionTimeout())
+	}
+	return retractionTimeout
 }
 
 // ffmpegWritesOutput distinguishes probing from treatment. FFmpeg always

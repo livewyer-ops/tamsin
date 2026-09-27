@@ -222,6 +222,8 @@ func addPersistentFlags(command *cobra.Command) {
 	flags.String("log-format", "text", "diagnostic log format: text or json")
 	flags.String("log-level", "info", "diagnostic level: debug, info, warn, or error")
 	flags.Duration("timeout", 30*time.Second, "per-request timeout for TAMS metadata operations")
+	flags.Duration("deletion-timeout", tams.DefaultDeletionTimeout,
+		"deadline for one Segment deletion, including the service's deletion request and absence confirmation")
 	flags.Duration("transfer-timeout", 0,
 		"optional deadline for a complete media transfer (0 disables)")
 	flags.Duration("transfer-idle-timeout", netio.DefaultIdleTimeout,
@@ -703,7 +705,7 @@ func (a *application) tamsClient(ctx context.Context, endpoint string, base *htt
 		Endpoint: cleanEndpoint, Transport: transport, ExternalTransport: base,
 		Timeout: a.v.GetDuration("http.timeout"), TransferTimeout: a.v.GetDuration("http.transfer_timeout"), TransferIdleTimeout: a.v.GetDuration("http.transfer_idle_timeout"),
 		Retries: a.v.GetInt("http.retries"), UserAgent: "tamsin/" + version.Version,
-		Observability: run,
+		Observability: run, DeletionTimeout: a.v.GetDuration("http.deletion_timeout"), Logger: runLogger(run),
 	})
 	if err != nil {
 		return nil, "", err
@@ -793,6 +795,14 @@ func (a *application) reporter() progress.Reporter {
 		return progress.Discard{}
 	}
 	return progress.New(a.stderr, progress.Options{Mode: mode})
+}
+
+// runLogger is the run's logger, or nil before a run exists.
+func runLogger(run *observability.Run) *slog.Logger {
+	if run == nil {
+		return nil
+	}
+	return run.Logger()
 }
 
 // loggerFor serialises diagnostics with human progress on stderr.

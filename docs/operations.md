@@ -104,9 +104,16 @@ passes credentials by environment variable. The image runs as UID/GID 65532:
 ## Verification and network cost
 
 Default `--verify=auto` compares SHA-256 evidence from a successful upload's
-response (`X-Amz-Checksum-Sha256`, `Content-Digest` or `Digest`) with the digest
-of the uploaded bytes. Request-only checksum headers and ETags are not proof.
-Malformed evidence or a mismatch fails before Segment registration.
+response (`X-Amz-Checksum-Sha256`, `Repr-Digest` or `Digest`) with the digest
+of the uploaded bytes. A response `Content-Digest` describes the response body
+(RFC 9530), not the stored Object, so it is not evidence; nor are request-only
+checksum headers or ETags. Malformed evidence or a mismatch fails before
+Segment registration. An upload to an unsigned URL carries the Object's digest
+as `Content-Digest`, so storage that checks digests refuses a corrupted
+transfer; a presigned URL is sent exactly as issued. S3 returns
+`x-amz-checksum-sha256` only when the service's `put_url` instruction includes
+that header in the signed request, so without it readback remains the
+verification.
 
 Without storage evidence, TAMSin registers the Object and reads it back.
 TAMS requires unregistered Objects to return 404, so download verification
@@ -154,19 +161,24 @@ needs readback; otherwise, and for any partial overlap, the input stops with
 overlapping Segment.
 
 A failed verification retracts only the exact Object/timerange Segment.
-Cleanup is detached from cancellation and bounded. A 202 DELETE response is
-followed through its same-service deletion request to `done`; both 202 and 204
-require the exact Segment to become observably absent. Ambiguous transport
-errors and 404s are also reconciled by checking absence. Failed cleanup is
-reported alongside the original failure, never as successful retraction.
+Cleanup is detached from cancellation and bounded by `--deletion-timeout`
+(default five minutes), while each request inside it keeps `--timeout`. A 202
+DELETE response is followed through its same-service deletion request to
+`done`; a 202 without a usable `Location` (missing, on another origin, or
+outside the API path) is logged and confirmed by absence instead, and a request
+that ends in `error` is accepted when the Segment has nevertheless gone. Both
+202 and 204 require the exact Segment to become observably absent. Ambiguous
+transport errors and 404s are also reconciled by checking absence. Failed
+cleanup is reported alongside the original failure, never as successful
+retraction.
 
 A partial registration response identifies failed Segments; TAMSin retracts
 the registered complement. A lost response instead requires fresh readback:
 visible Segments are verified and unresolved ones receive targeted retraction.
 If readback fails, every Object in the batch is treated as possibly registered.
 Recovery shares one deadline across the batch and reports every outcome;
-ordinary verification cleanup has a shared 30-second deadline, not 30 seconds
-per Object.
+ordinary verification cleanup shares one deadline too (the deletion timeout,
+at least 30 seconds), not one per Object.
 
 ## Troubleshooting
 

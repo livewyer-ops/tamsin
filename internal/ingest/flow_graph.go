@@ -35,12 +35,19 @@ func (p *Pipeline) planFlowGraph(ctx context.Context, graph flowGraph) ([]planne
 		if err != nil {
 			return nil, err
 		}
-		if err := tamsschema.ValidateFlowGet(p.apiVersion, plan.effective); err != nil {
-			return nil, fmt.Errorf(
-				"final Flow metadata for %s (%s) is not valid against pinned TAMS %d.%d at %w",
-				member.id, member.role, tams.SpecMajor, tams.SpecMinor, err)
+		effective, request := plan.effective, plan.request
+		if p.storeIsNewerMinor() {
+			// A newer minor may return Flow fields the pinned schemas do not
+			// know. What Tamsin generated is still held to them; what the
+			// store added is sent back as it came.
+			effective, request = member.flow, flowPutProjection(member.flow, member.profileID)
 		}
-		if err := tamsschema.ValidateFlowPut(p.apiVersion, plan.request); err != nil {
+		if err := tamsschema.ValidateFlowGet(p.apiVersion, effective); err != nil {
+			return nil, fmt.Errorf(
+				"final Flow metadata for %s (%s) is not valid against the pinned TAMS schemas for %s at %w",
+				member.id, member.role, p.apiVersion, err)
+		}
+		if err := tamsschema.ValidateFlowPut(p.apiVersion, request); err != nil {
 			return nil, fmt.Errorf("flow PUT metadata for %s (%s) is not valid against TAMS %s at %w",
 				member.id, member.role, p.apiVersion, err)
 		}

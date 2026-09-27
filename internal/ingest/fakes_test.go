@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -296,13 +297,19 @@ type fakeClient struct {
 	registerSegmentsErr    error
 	registerSegmentsCommit int
 	onRegisterSegments     func()
-	listSegmentsErr        error
-	listSegmentsOverride   []tams.Segment
-	hasListingOverride     bool
-	listSegmentsCalls      int
-	deleteSegmentsErr      error
-	deleteSegmentsErrors   map[string]error
-	blockDeleteUntilDone   bool
+	// decorateFlowReads stands in for a store on a newer minor revision that
+	// returns Flow fields the pinned schemas do not know.
+	decorateFlowReads func(tams.Flow) tams.Flow
+	// allocationCap is the most identifiers one fresh allocation hands out,
+	// as a service that caps limit would.
+	allocationCap        int
+	listSegmentsErr      error
+	listSegmentsOverride []tams.Segment
+	hasListingOverride   bool
+	listSegmentsCalls    int
+	deleteSegmentsErr    error
+	deleteSegmentsErrors map[string]error
+	blockDeleteUntilDone bool
 	// onDownload fires as verification reads an Object back, which is the only
 	// point where a test can interrupt a run that has already registered.
 	onDownload func()
@@ -386,6 +393,9 @@ func (c *fakeClient) Flow(_ context.Context, id string) (tams.Flow, error) {
 			StatusCode: http.StatusNotFound, Status: "404 Not Found",
 		}
 	}
+	if c.decorateFlowReads != nil {
+		return c.decorateFlowReads(maps.Clone(flow)), nil
+	}
 	return flow, nil
 }
 
@@ -445,7 +455,11 @@ func (c *fakeClient) AllocateStorage(_ context.Context, flowID string, request t
 	ids := request.ObjectIDs
 	if request.Limit > 0 && len(ids) == 0 {
 		c.freshAllocations++
-		ids = make([]string, request.Limit)
+		count := request.Limit
+		if c.allocationCap > 0 {
+			count = min(count, c.allocationCap)
+		}
+		ids = make([]string, count)
 		for index := range ids {
 			ids[index] = fmt.Sprintf("fresh-%d-%d", c.freshAllocations, index)
 		}

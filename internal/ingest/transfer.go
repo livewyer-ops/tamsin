@@ -59,6 +59,9 @@ func outlastsRegistration(size int64, throughput float64, lifetime time.Duration
 // chunkTimerange covers the Segments in one registration operation, so an
 // ambiguous write can be reconciled without listing the whole Flow.
 func chunkTimerange(chunk []preparedObject) string {
+	if len(chunk) == 0 {
+		return ""
+	}
 	first, last := chunk[0].start, chunk[0].start+chunk[0].duration
 	for _, object := range chunk[1:] {
 		first = min(first, object.start)
@@ -185,6 +188,9 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID, container strin
 	var receiptsMu sync.Mutex
 	for _, object := range chunk {
 		destination := destinations[object.id]
+		// An unsigned upload carries the Object's digest so storage that
+		// verifies one can refuse a corrupted transfer before it is registered.
+		destination.ContentSHA256 = object.sha256
 		uploads.Go(func() error {
 			p.logger.Info("uploading object", "flow_id", flowID, "object_id", object.id, "bytes", object.size)
 			receipt, err := p.client.UploadFile(uploadCtx, destination, object.path)
@@ -365,14 +371,22 @@ func (p *Pipeline) allocateFreshObjects(ctx context.Context, flowID string, chun
 	if !errors.As(cause, &httpErr) || httpErr.StatusCode != http.StatusBadRequest {
 		return tams.StorageResponse{}, fmt.Errorf("allocate storage for %d objects: %w", len(chunk), cause)
 	}
-	fresh, err := p.client.AllocateStorage(ctx, flowID, tams.StorageRequest{Limit: len(chunk), StorageID: storageID})
-	if err != nil {
-		return tams.StorageResponse{}, fmt.Errorf("allocate storage for %d objects: %w", len(chunk), errors.Join(cause, err))
+	// The service may cap limit below what was asked, so it is asked again for
+	// the remainder; a response with no identifiers at all is a refusal.
+	var fresh tams.StorageResponse
+	for len(fresh.MediaObjects) < len(chunk) {
+		batch, err := p.client.AllocateStorage(ctx, flowID, tams.StorageRequest{Limit: len(chunk) - len(fresh.MediaObjects), StorageID: storageID})
+		if err != nil {
+			return tams.StorageResponse{}, fmt.Errorf("allocate storage for %d objects: %w", len(chunk), errors.Join(cause, err))
+		}
+		if len(batch.MediaObjects) == 0 {
+			return tams.StorageResponse{}, fmt.Errorf("allocate storage for %d objects: the service assigned no identifiers after rejecting the requested ones: %w",
+				len(chunk), cause)
+		}
+		fresh.MediaObjects = append(fresh.MediaObjects, batch.MediaObjects...)
 	}
-	if len(fresh.MediaObjects) != len(chunk) {
-		return tams.StorageResponse{}, fmt.Errorf("allocate storage for %d objects: the service assigned %d identifiers after rejecting the requested ones: %w",
-			len(chunk), len(fresh.MediaObjects), cause)
-	}
+	// Surplus identifiers are left to the service, which collects unused allocations.
+	fresh.MediaObjects = fresh.MediaObjects[:len(chunk)]
 	p.logger.Warn("requested object identifiers were rejected; continuing with service-assigned identifiers",
 		"flow_id", flowID, "objects", len(chunk), "cause", cause)
 	for index := range chunk {
@@ -509,8 +523,11 @@ func (p *Pipeline) registerFlow(ctx context.Context, flowID, container string, o
 	// Object cost a round trip each, which dominates on a high-latency link.
 	// It answers identity only: a verification worker asks for its own URL
 	// after it holds a transfer slot, so the service is spared signing one per
-	// Segment for a listing that is only being asked which Objects exist.
-	existing, err := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{})
+	// Segment for a listing that is only being asked which Objects exist. It
+	// covers just the span this batch will write: a long-lived Flow can hold
+	// far more Segments than the listing cap, and none outside the span can
+	// overlap what is about to be registered.
+	existing, err := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{Timerange: chunkTimerange(objects)})
 	if err != nil {
 		return fmt.Errorf("list existing segments: %w", err)
 	}

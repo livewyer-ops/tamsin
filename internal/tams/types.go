@@ -71,6 +71,11 @@ type PresignedURL struct {
 	// rather than silently sending either the media or the text.
 	Body      *string `json:"body,omitempty"`
 	Presigned bool    `json:"presigned,omitempty"`
+	// ContentSHA256 is the hex SHA-256 the caller has already computed over
+	// the body it is about to upload. An unsigned upload sends it as an RFC
+	// 9530 Content-Digest so storage that verifies digests can refuse a
+	// corrupted transfer. It is not part of TAMS JSON.
+	ContentSHA256 string `json:"-"`
 	// StartBefore is the latest time another HTTP attempt may begin. It is
 	// populated by the ingest scheduler from min_presigned_url_timeout after a
 	// URL-producing response arrives and is deliberately not part of TAMS JSON.
@@ -93,6 +98,7 @@ func (p *PresignedURL) UnmarshalJSON(data []byte) error {
 	p.URL = raw.URL
 	p.Body = raw.Body
 	p.Presigned = raw.Presigned
+	p.ContentSHA256 = ""
 	p.StartBefore = time.Time{}
 	var err error
 	p.Headers, err = normalizePresignedHeaders(raw.Headers)

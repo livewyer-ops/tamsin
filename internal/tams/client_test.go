@@ -38,11 +38,14 @@ func TestUploadStorageSHA256RecognizesOnlyStrongEvidence(t *testing.T) {
 		wantErr  bool
 	}{
 		{name: "S3 response", response: http.Header{"X-Amz-Checksum-Sha256": []string{encoded}}, want: want},
-		{name: "content digest response", response: http.Header{"Content-Digest": []string{"sha-256=:" + encoded + ":"}}, want: want},
+		{name: "representation digest response", response: http.Header{"Repr-Digest": []string{"sha-256=:" + encoded + ":"}}, want: want},
 		{name: "Digest response", response: http.Header{"Digest": []string{"sha-512=ignored, sha-256=" + encoded}}, want: want},
+		// RFC 9530: a response's Content-Digest describes the response body,
+		// so a gateway that adds one says nothing about the stored Object.
+		{name: "content digest describes the response body", response: http.Header{"Content-Digest": []string{"sha-256=:" + encoded + ":"}}},
 		{name: "request header is not storage evidence"},
 		{name: "etag is not evidence", response: http.Header{"ETag": []string{"\"not-a-checksum\""}}},
-		{name: "malformed evidence", response: http.Header{"Content-Digest": []string{"sha-256=:bad:"}}, wantErr: true},
+		{name: "malformed evidence", response: http.Header{"Repr-Digest": []string{"sha-256=:bad:"}}, wantErr: true},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -52,6 +55,48 @@ func TestUploadStorageSHA256RecognizesOnlyStrongEvidence(t *testing.T) {
 				t.Fatalf("uploadStorageSHA256() = %q, %v; want %q, error=%t", got, err, testCase.want, testCase.wantErr)
 			}
 		})
+	}
+}
+
+func TestUploadSendsContentDigestOnlyOnUnsignedURLs(t *testing.T) {
+	t.Parallel()
+	content := []byte("media")
+	sum := sha256.Sum256(content)
+	want := "sha-256=:" + base64.StdEncoding.EncodeToString(sum[:]) + ":"
+	var (
+		mu      sync.Mutex
+		digests []string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.Copy(io.Discard, request.Body)
+		mu.Lock()
+		digests = append(digests, request.Header.Get("Content-Digest"))
+		mu.Unlock()
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	filename := filepath.Join(t.TempDir(), "object")
+	if err := os.WriteFile(filename, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := New(Config{Endpoint: "https://tams.example.test", ExternalTransport: server.Client().Transport, TransferIdleTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, destination := range []PresignedURL{
+		{URL: server.URL, ContentSHA256: hex.EncodeToString(sum[:])},
+		{URL: server.URL, ContentSHA256: hex.EncodeToString(sum[:]), Presigned: true},
+		{URL: server.URL, ContentSHA256: hex.EncodeToString(sum[:]), Headers: map[string]string{"Content-Digest": "sha-256=:instructed:"}},
+		{URL: server.URL},
+	} {
+		if _, err := client.UploadFile(context.Background(), destination, filename); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(digests) != 4 || digests[0] != want || digests[1] != "" || digests[2] != "sha-256=:instructed:" || digests[3] != "" {
+		t.Fatalf("Content-Digest per upload = %q; want the digest only on the unsigned URL without an instruction", digests)
 	}
 }
 
@@ -1103,6 +1148,7 @@ func TestParseServiceLimits(t *testing.T) {
 		document map[string]any
 		object   time.Duration
 		url      time.Duration
+		warnings int
 		wantErr  string
 	}{
 		{
@@ -1180,16 +1226,21 @@ func TestParseServiceLimits(t *testing.T) {
 			wantErr: "requires at least 300:0",
 		},
 		{
+			// The specification's own example does this. The client can only
+			// rely on the shorter lifetime, so it schedules against it and says so.
 			name: "presigned lifetime exceeds Object lifetime",
 			document: map[string]any{
 				"min_object_timeout": "300:0", "min_presigned_url_timeout": "301:0",
 			},
-			wantErr: "exceeds /min_object_timeout",
+			object: 5 * time.Minute, url: 5 * time.Minute, warnings: 1,
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			limits, err := ParseServiceLimits(testCase.document)
+			if len(limits.Warnings) != testCase.warnings {
+				t.Errorf("Warnings = %q, want %d", limits.Warnings, testCase.warnings)
+			}
 			if testCase.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), testCase.wantErr) {
 					t.Fatalf("ParseServiceLimits() error = %v, want containing %q", err, testCase.wantErr)

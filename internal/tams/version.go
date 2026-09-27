@@ -93,6 +93,9 @@ type ServiceLimits struct {
 	// directions. When the service does not say, this is the pinned
 	// specification minimum rather than an unlimited zero value.
 	PresignedURL time.Duration
+	// Warnings are inconsistencies in the service's declared limits that the
+	// client tolerated by scheduling conservatively.
+	Warnings []string
 }
 
 // ServiceLimitError identifies the service-document field that makes Object
@@ -130,15 +133,17 @@ func ParseServiceLimits(document map[string]any) (ServiceLimits, error) {
 			return ServiceLimits{}, err
 		}
 	}
+	limits := ServiceLimits{ObjectRegistration: object, PresignedURL: presigned}
 	if presigned > object {
-		return ServiceLimits{}, &ServiceLimitError{
-			Field: "min_presigned_url_timeout",
-			Err: fmt.Errorf(
-				"TAMS service /min_presigned_url_timeout (%s) exceeds /min_object_timeout (%s); TAMS 8.1 requires it to be no greater",
-				formatDurationTimestamp(presigned), formatDurationTimestamp(object)),
-		}
+		// The specification asks for the URL lifetime to be no greater than
+		// the Object lifetime, and its own example breaks that. A client can
+		// only rely on the shorter of the two, so it schedules against it.
+		limits.Warnings = append(limits.Warnings, fmt.Sprintf(
+			"TAMS service /min_presigned_url_timeout (%s) exceeds /min_object_timeout (%s), which the specification requires to be no smaller; presigned URLs are scheduled against the Object lifetime",
+			formatDurationTimestamp(presigned), formatDurationTimestamp(object)))
+		limits.PresignedURL = object
 	}
-	return ServiceLimits{ObjectRegistration: object, PresignedURL: presigned}, nil
+	return limits, nil
 }
 
 func requiredLifetime(document map[string]any, field string, minimum time.Duration) (time.Duration, error) {
@@ -159,7 +164,7 @@ func requiredLifetime(document map[string]any, field string, minimum time.Durati
 	if duration < minimum {
 		return 0, &ServiceLimitError{
 			Field: field,
-			Err: fmt.Errorf("TAMS service /%s is %s; TAMS 8.1 requires at least %s",
+			Err: fmt.Errorf("TAMS service /%s is %s; TAMS requires at least %s",
 				field, formatDurationTimestamp(duration), formatDurationTimestamp(minimum)),
 		}
 	}

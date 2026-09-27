@@ -57,6 +57,9 @@ func (p *Pipeline) runStartupPreflight(ctx context.Context) (string, error) {
 		return "", withFailure(FailureCodePreflightFailed, FailureMessageTransferLifetimeInvalid, true,
 			fmt.Errorf("validate TAMS service lifetimes: %w", err))
 	}
+	for _, warning := range limits.Warnings {
+		p.logger.Warn(warning)
+	}
 	p.limits = limits
 	p.logger.Debug("store lifetimes",
 		"object_registration", p.limits.ObjectRegistration, "presigned_url", p.limits.PresignedURL)
@@ -65,6 +68,13 @@ func (p *Pipeline) runStartupPreflight(ctx context.Context) (string, error) {
 		return "", withFailure(FailureCodeStorageUnavailable, FailureMessageStorageUnavailable, true, err)
 	}
 	return selection.Backend.ID, nil
+}
+
+// storeIsNewerMinor reports a store on a later minor revision than the
+// pinned schemas describe. Minor revisions add fields, so a Flow read from
+// such a store may legitimately fail the pinned closed schemas.
+func (p *Pipeline) storeIsNewerMinor() bool {
+	return p.apiVersion.Major == tams.SpecMajor && p.apiVersion.Minor > tams.SpecMinor
 }
 
 // APICompatibility is the result of comparing a service document with the

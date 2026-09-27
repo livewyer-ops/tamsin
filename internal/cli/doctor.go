@@ -369,10 +369,14 @@ func (a *application) runDoctorOnline(ctx context.Context, run *doctorRun, stora
 		if limitsErr != nil {
 			run.fail("service_lifetimes", safeLifetimeError(limitsErr), ExitRemote, nil)
 		} else {
-			run.pass("service_lifetimes", map[string]any{
+			detail := map[string]any{
 				"object_registration": limits.ObjectRegistration.String(),
 				"presigned_url":       limits.PresignedURL.String(),
-			})
+			}
+			if len(limits.Warnings) > 0 {
+				detail["warnings"] = limits.Warnings
+			}
+			run.pass("service_lifetimes", detail)
 		}
 	}
 

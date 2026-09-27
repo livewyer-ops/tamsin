@@ -198,6 +198,7 @@ func configDefinitions() []configDefinition {
 		{key: "config", kind: configString, flag: "config"},
 		{key: "endpoint", kind: configString, flag: "endpoint", redactURL: true, fileAllowed: true},
 		{key: "format", kind: configString, flag: "format", fileAllowed: true},
+		{key: "http.deletion_timeout", kind: configDuration, flag: "deletion-timeout", fileAllowed: true},
 		{key: "http.insecure_skip_verify", kind: configBool, flag: "insecure-skip-verify", fileAllowed: true},
 		{key: "http.retries", kind: configInt, flag: "retries", fileAllowed: true},
 		{key: "http.timeout", kind: configDuration, flag: "timeout", fileAllowed: true},
