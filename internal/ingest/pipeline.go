@@ -1079,7 +1079,10 @@ func (p *Pipeline) renderSegmentsTo(ctx context.Context, staged stagedFile, flow
 		Input: staged.path, Duration: p.config.SegmentDuration, Format: p.config.SegmentFormat,
 		SourceContainer: flowInfo.SegmentContainer, StreamIndices: streamIndices,
 		Directory: directory, AdditionalArgs: additionalArgs, StagingWindow: window,
-		BitExact: staged.bridge != nil,
+		// Every render is bit-exact so an identical re-run produces identical
+		// bytes, and with them identical Object identifiers: without it the
+		// Matroska muxer writes a random segment UID into every output.
+		BitExact: true,
 	}, func(record media.SegmentRecord) error {
 		if err := segmentCtx.Err(); err != nil {
 			return err

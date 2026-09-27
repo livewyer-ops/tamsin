@@ -108,6 +108,7 @@ func TestPublishedFailureCodesAreStable(t *testing.T) {
 		{FailureCodePreflightFailed, "tams.preflight_failed"},
 		{FailureCodeStorageUnavailable, "tams.storage_unavailable"},
 		{FailureCodeFlowPlanFailed, "flow.plan_failed"},
+		{FailureCodeSegmentConflict, "tams.segment_conflict"},
 		{FailureCodeFlowWriteFailed, "flow.write_failed"},
 		{FailureCodeTAMSRegistrationFailed, "tams.registration_failed"},
 		{FailureCodeStagingCapacity, "staging.capacity"},

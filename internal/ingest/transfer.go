@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/livewyer-ops/tamsin/internal/media"
+	"github.com/livewyer-ops/tamsin/internal/observability"
 	"github.com/livewyer-ops/tamsin/internal/progress"
 	"github.com/livewyer-ops/tamsin/internal/tams"
+	"github.com/livewyer-ops/tamsin/internal/tamstime"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -266,6 +268,85 @@ func (p *Pipeline) commitReadyChunk(ctx context.Context, flowID, container strin
 	return transferred, nil
 }
 
+// adoptOccupyingSegment handles an Object whose identifier the Flow does not
+// know while its timerange is already taken. TAMS forbids overlapping
+// Segments, so registering here would be refused or would corrupt the Flow.
+// A Segment at exactly this timerange whose bytes and timing match ours is the
+// same media under another identifier: an earlier run that fell back to a
+// service-assigned identifier, a render that was not byte-stable, or another
+// producer. It is adopted and reported as resumed. Anything else stops the
+// input with a conflict the operator can act on; nothing is uploaded.
+func (p *Pipeline) adoptOccupyingSegment(ctx context.Context, flowID string, object *preparedObject,
+	existing []tams.Segment, results []ObjectResult) (bool, error) {
+	var occupying []tams.Segment
+	for _, segment := range existing {
+		overlaps, err := tamstime.TimeRangesOverlap(segment.Timerange, object.timerange)
+		if err != nil {
+			return false, withFailure(FailureCodeSegmentConflict, FailureMessageSegmentConflict, true,
+				fmt.Errorf("flow %s lists segment %s with an unreadable timerange", flowID, segment.ObjectID))
+		}
+		if overlaps {
+			occupying = append(occupying, segment)
+		}
+	}
+	if len(occupying) == 0 {
+		return false, nil
+	}
+	conflict := func(detail string) error {
+		return withFailure(FailureCodeSegmentConflict, FailureMessageSegmentConflict, true,
+			fmt.Errorf("flow %s already has segment %s at %s overlapping %s: %s",
+				flowID, occupying[0].ObjectID, occupying[0].Timerange, object.timerange, detail))
+	}
+	if len(occupying) != 1 || !tamstime.EqualTimeRanges(occupying[0].Timerange, object.timerange) {
+		return false, conflict("the timeranges differ, so the segment cannot stand in for this object; re-ingest into a new Flow ID")
+	}
+	candidate := occupying[0]
+	if p.config.VerificationMode == VerificationNone {
+		return false, conflict("its bytes cannot be compared without verification; run with --verify readback to adopt it when they match, or use a new Flow ID")
+	}
+	release, err := p.acquireTransfer(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	segments, err := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{
+		ObjectID: candidate.ObjectID, Timerange: object.timerange,
+		IncludeDownloadURLs: true, IncludeObjectTimerange: true,
+	})
+	if err != nil {
+		return false, fmt.Errorf("read segment %s for adoption: %w", candidate.ObjectID, err)
+	}
+	segment := matchingSegment(segments, candidate.ObjectID, object.timerange)
+	if segment == nil {
+		return false, conflict("it was listed but could not be read back")
+	}
+	// Same bytes at a different offset is what a Flow written by an earlier
+	// placement looks like; adopting it would keep the wrong timing.
+	if !tamstime.EqualTimestamps(segment.TSOffset, object.tsOffset) ||
+		(segment.ObjectTimerange != "" && !tamstime.EqualTimeRanges(segment.ObjectTimerange, object.objectTimerange)) {
+		return false, conflict("its media timing differs from this input's; re-ingest into a new Flow ID")
+	}
+	startBefore := time.Now().Add(p.limits.PresignedURL)
+	for index := range segment.GetURLs {
+		if segment.GetURLs[index].Presigned {
+			segment.GetURLs[index].StartBefore = startBefore
+		}
+	}
+	if err := p.verifyObject(ctx, *object, *segment); err != nil {
+		return false, conflict("its bytes differ from this input's; re-ingest into a new Flow ID (" + err.Error() + ")")
+	}
+	renameObjectResult(results, object.id, candidate.ObjectID)
+	object.id = candidate.ObjectID
+	p.advanceProgress(ctx, progress.PhaseStore, 1, object.size)
+	setObjectDisposition(results, object.id, ObjectDispositionResumed)
+	setObjectVerification(results, object.id, ObjectVerificationVerified, VerificationMethodReadback)
+	p.observability.Verification(object.size, observability.OutcomeVerified)
+	p.advanceProgress(ctx, progress.PhaseVerify, 1, object.size)
+	p.logger.Info("adopted the segment already registered at this timerange",
+		"flow_id", flowID, "object_id", object.id, "timerange", object.timerange)
+	return true, nil
+}
+
 // allocateFreshObjects recovers a batch whose deterministic identifiers the
 // service refused. TAMS rejects object_ids that already exist, and an earlier
 // attempt that uploaded but never registered leaves its identifier occupied
@@ -447,10 +528,19 @@ func (p *Pipeline) registerPreparedObjects(ctx context.Context, flowID, containe
 	objectResults []ObjectResult, storageID string, existing []tams.Segment, throughput *float64) error {
 	missing := make([]preparedObject, 0, len(objects))
 	var resumed []preparedObject
+	adopted := make(map[string]struct{})
 	for _, object := range objects {
 		segment := matchingSegment(existing, object.id, object.timerange)
 		if segment == nil {
-			missing = append(missing, object)
+			ok, err := p.adoptOccupyingSegment(ctx, flowID, &object, existing, objectResults)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				missing = append(missing, object)
+				continue
+			}
+			adopted[object.id] = struct{}{}
 			continue
 		}
 		// A resumed Object credits the upload it did not need to repeat. Its
@@ -466,11 +556,12 @@ func (p *Pipeline) registerPreparedObjects(ctx context.Context, flowID, containe
 	if err := p.verifyAll(ctx, flowID, resumed, objectResults, false); err != nil {
 		return err
 	}
-	if len(resumed) > 0 {
-		completed := make(map[string]struct{}, len(resumed))
-		for _, object := range resumed {
-			completed[object.id] = struct{}{}
-		}
+	completed := make(map[string]struct{}, len(resumed)+len(adopted))
+	for _, object := range resumed {
+		completed[object.id] = struct{}{}
+	}
+	maps.Copy(completed, adopted)
+	if len(completed) > 0 {
 		if err := p.observeObjectBatch(ctx, flowID, objectResults, completed); err != nil {
 			return err
 		}

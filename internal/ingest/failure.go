@@ -42,6 +42,7 @@ const (
 	FailureCodeSourceChanged          = "source.changed"
 	FailureCodeMediaOptionsIgnored    = "media.options_ignored"
 	FailureCodeStreamUnavailable      = "source.stream_unavailable"
+	FailureCodeSegmentConflict        = "tams.segment_conflict"
 
 	FailureMessageConfigInvalid            = "The command arguments or configuration are invalid."
 	FailureMessageAuthFailed               = "Authentication did not complete successfully."
@@ -78,6 +79,7 @@ const (
 	FailureMessageMediaToolUnavailable     = "The configured media toolchain is unavailable."
 	FailureMessageMediaInvalidFlow         = "The input could not be described as a valid Flow."
 	FailureMessageMediaIdentityUnresolved  = "The media interpretation identity could not be derived."
+	FailureMessageSegmentConflict          = "Another Media Object occupies a Segment timerange in this Flow."
 	FailureMessageMediaPrepareFailed       = "Media Objects could not be prepared."
 	FailureMessageSourceChanged            = "The input changed while it was being ingested."
 	FailureMessageMediaStreamPrepareFailed = "An elemental media stream could not be prepared."

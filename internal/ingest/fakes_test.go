@@ -22,6 +22,7 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/media"
 	"github.com/livewyer-ops/tamsin/internal/source"
 	"github.com/livewyer-ops/tamsin/internal/tams"
+	"github.com/livewyer-ops/tamsin/internal/tamstime"
 )
 
 type presentationCountingProber struct {
@@ -465,6 +466,7 @@ func (c *fakeClient) RegisterSegment(_ context.Context, flowID string, request t
 	}
 	c.segments[flowID][request.ObjectID] = tams.Segment{
 		ObjectID: request.ObjectID, Timerange: request.Timerange,
+		ObjectTimerange: request.ObjectTimerange, TSOffset: request.TSOffset,
 		GetURLs: []tams.PresignedURL{{URL: "mem://" + request.ObjectID}},
 	}
 	return nil
@@ -556,8 +558,25 @@ func (c *fakeClient) ListSegments(ctx context.Context, flowID string, options ta
 		return override, nil
 	}
 	segments, err := c.Segments(ctx, flowID, options.ObjectID)
-	if err != nil || options.IncludeDownloadURLs {
-		return segments, err
+	if err != nil {
+		return nil, err
+	}
+	// Mirror the service's overlap filter so a narrowed listing is exercised.
+	if options.Timerange != "" {
+		overlapping := segments[:0]
+		for _, segment := range segments {
+			overlaps, err := tamstime.TimeRangesOverlap(options.Timerange, segment.Timerange)
+			if err != nil {
+				return nil, err
+			}
+			if overlaps {
+				overlapping = append(overlapping, segment)
+			}
+		}
+		segments = overlapping
+	}
+	if options.IncludeDownloadURLs {
+		return segments, nil
 	}
 	// Mirror the service: without presigned URLs requested, none come back.
 	lean := make([]tams.Segment, len(segments))

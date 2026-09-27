@@ -11,6 +11,12 @@ example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
 
 ## Unreleased
 
+- Never register a Segment that overlaps one already in the Flow. A Segment at
+  the same timerange under another identifier is adopted when its bytes and
+  timing match under readback; otherwise the input stops with the new
+  `tams.segment_conflict` failure code before anything is uploaded. Renders
+  are bit-exact for every input so an identical re-run yields identical
+  Objects; Matroska outputs previously changed between runs.
 - Send API credentials only with unsigned media URLs on the API origin. A
   presigned URL, whether on the API origin or elsewhere, is requested exactly
   as issued; a bearer header or `access_token` query added to it could

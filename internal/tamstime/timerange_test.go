@@ -61,3 +61,42 @@ func TestCanonicalTimeRange(t *testing.T) {
 		}
 	}
 }
+
+func TestTimeRangesOverlap(t *testing.T) {
+	t.Parallel()
+	for _, pair := range [][2]string{
+		{"[0:0_1:0)", "[0:500000000_2:0)"},
+		{"[1:0]", "[1:0_2:0)"},
+		{"[0:0_1:0]", "[1:0_2:0)"},
+		{"_", "[5:0]"},
+		{"0:0_1:0", "[0:0]"},
+		{"[0:0_", "[10000000000:0]"},
+	} {
+		if overlap, err := TimeRangesOverlap(pair[0], pair[1]); err != nil || !overlap {
+			t.Errorf("%q and %q should overlap (%v)", pair[0], pair[1], err)
+		}
+	}
+	for _, pair := range [][2]string{
+		{"[0:0_1:0)", "[1:0_2:0)"},
+		{"[0:0_1:0)", "()"},
+		{"(1:0_2:0)", "[1:0]"},
+		{"[0:0_1:0)", "[2:0_"},
+	} {
+		if overlap, err := TimeRangesOverlap(pair[0], pair[1]); err != nil || overlap {
+			t.Errorf("%q and %q should not overlap (%v)", pair[0], pair[1], err)
+		}
+	}
+	if _, err := TimeRangesOverlap("nonsense", "[0:0]"); err == nil {
+		t.Error("an invalid range compared as if it were clear")
+	}
+}
+
+func TestEqualTimestamps(t *testing.T) {
+	t.Parallel()
+	if !EqualTimestamps("", "0:0") || !EqualTimestamps("-0:0", "0:0") || !EqualTimestamps("01:5", "1:5") {
+		t.Error("equivalent timestamps compared unequal")
+	}
+	if EqualTimestamps("0:1", "") || EqualTimestamps("-1:0", "1:0") || EqualTimestamps("x", "x") {
+		t.Error("different or invalid timestamps compared equal")
+	}
+}

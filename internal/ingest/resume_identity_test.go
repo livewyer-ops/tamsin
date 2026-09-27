@@ -73,6 +73,67 @@ func TestRetryAfterLostRegistrationUsesFreshObjectIDs(t *testing.T) {
 	if _, registered := client.segments[flow.FlowID][replaced.ObjectID]; !registered {
 		t.Fatalf("the fresh Object %s was not registered", replaced.ObjectID)
 	}
+	client.lock.Unlock()
+
+	// A third run computes the deterministic identifier again and must adopt
+	// the Segment registered under the fresh one rather than register over it.
+	third := runOnce(t, client, item)
+	client.lock.Lock()
+	if third.Status != ResultStatusResumed || third.rootFlow().Objects[0].ObjectID != replaced.ObjectID ||
+		third.rootFlow().Objects[0].Verification != ObjectVerificationVerified {
+		t.Fatalf("the fresh Segment was not adopted on the next run: %#v", third.rootFlow().Objects)
+	}
+	if client.uploads != 2 || client.freshAllocations != 1 || len(client.segments[flow.FlowID]) != 1 {
+		t.Fatalf("adoption allocated or uploaded again: uploads=%d fresh=%d segments=%d",
+			client.uploads, client.freshAllocations, len(client.segments[flow.FlowID]))
+	}
+}
+
+// TestOccupiedTimerangeIsAConflictWithoutVerification pins the one case where
+// adoption is refused for the right reason: without a readback there is no way
+// to know the other Object holds the same bytes.
+func TestOccupiedTimerangeIsAConflictWithoutVerification(t *testing.T) {
+	t.Parallel()
+	item := ingestFixture(t)
+	client := newFakeClient()
+	first := runOnce(t, client, item)
+	flow := first.rootFlow()
+	original := flow.Objects[0].ObjectID
+	// Re-register the same bytes under another identifier at the same timerange.
+	client.lock.Lock()
+	segment := client.segments[flow.FlowID][original]
+	delete(client.segments[flow.FlowID], original)
+	segment.ObjectID = "other-producer"
+	segment.GetURLs = []tams.PresignedURL{{URL: "mem://other-producer"}}
+	client.segments[flow.FlowID][segment.ObjectID] = segment
+	client.objects["other-producer"] = client.objects[original]
+	client.lock.Unlock()
+
+	pipeline, err := New(Config{VerificationMode: VerificationNone}, client, fakeProber{}, nil, discardLogger(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := pipeline.Run(context.Background(), []source.Item{item})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batch.Failed != 1 || batch.Results[0].Failure == nil || batch.Results[0].Failure.Code != FailureCodeSegmentConflict ||
+		!strings.Contains(batch.Results[0].Error, "--verify readback") {
+		t.Fatalf("unverified adoption was not refused as a conflict: %#v / %s", batch.Results[0].Failure, batch.Results[0].Error)
+	}
+	client.lock.Lock()
+	defer client.lock.Unlock()
+	if client.uploads != 1 {
+		t.Fatalf("a conflict must not upload; uploads=%d", client.uploads)
+	}
+
+	// With readback the same Segment is adopted.
+	client.lock.Unlock()
+	adopted := runOnce(t, client, item)
+	client.lock.Lock()
+	if adopted.Status != ResultStatusResumed || adopted.rootFlow().Objects[0].ObjectID != "other-producer" {
+		t.Fatalf("matching bytes were not adopted under readback: %#v", adopted.rootFlow().Objects)
+	}
 }
 
 // TestAllocationRejectionsOtherThanOccupiedIDsAreReported keeps the fallback

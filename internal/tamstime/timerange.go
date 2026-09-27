@@ -140,3 +140,56 @@ func CanonicalTimeRange(value string) (string, error) {
 	}
 	return start + "_" + end, nil
 }
+
+// EqualTimestamps compares two Timestamps by value. An empty string is the
+// schema default of 0:0, as for an omitted ts_offset.
+func EqualTimestamps(left, right string) bool {
+	if left == "" {
+		left = "0:0"
+	}
+	if right == "" {
+		right = "0:0"
+	}
+	a, err := parseTimestamp(left)
+	if err != nil {
+		return false
+	}
+	b, err := parseTimestamp(right)
+	return err == nil && a.compare(b) == 0
+}
+
+// TimeRangesOverlap reports whether two TimeRanges share at least one instant,
+// which is the selection the TAMS timerange query parameter makes. Invalid
+// input is an error rather than "no overlap", so a caller deciding whether a
+// registration is safe cannot mistake a malformed answer for a clear one.
+func TimeRangesOverlap(left, right string) (bool, error) {
+	a, err := CanonicalTimeRange(left)
+	if err != nil {
+		return false, err
+	}
+	b, err := CanonicalTimeRange(right)
+	if err != nil {
+		return false, err
+	}
+	if a == "()" || b == "()" {
+		return false, nil
+	}
+	if a == "_" || b == "_" {
+		return true, nil
+	}
+	aStart, aEnd, _ := strings.Cut(a, "_")
+	bStart, bEnd, _ := strings.Cut(b, "_")
+	return startReachesEnd(aStart, bEnd) && startReachesEnd(bStart, aEnd), nil
+}
+
+// startReachesEnd reports whether a canonical start bound lies at or before a
+// canonical end bound, counting a shared instant only when both are inclusive.
+func startReachesEnd(start, end string) bool {
+	if start == "" || end == "" {
+		return true
+	}
+	s, _ := parseTimestamp(start[1:])
+	e, _ := parseTimestamp(end[:len(end)-1])
+	cmp := s.compare(e)
+	return cmp < 0 || (cmp == 0 && start[0] == '[' && end[len(end)-1] == ']')
+}

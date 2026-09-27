@@ -146,6 +146,13 @@ uploads and discards queued output. Already committed valid segments remain;
 the Flow is not marked `closed_complete`. Use `--input-mode=stage` when the whole
 input must pass media preflight before the first upload.
 
+A Segment that already occupies an Object's exact timerange under another
+identifier (an earlier run that fell back to a service-assigned identifier,
+or another producer) is adopted only when its bytes and timing match, which
+needs readback; otherwise, and for any partial overlap, the input stops with
+`tams.segment_conflict` and nothing is uploaded. TAMSin never registers an
+overlapping Segment.
+
 A failed verification retracts only the exact Object/timerange Segment.
 Cleanup is detached from cancellation and bounded. A 202 DELETE response is
 followed through its same-service deletion request to `done`; both 202 and 204
