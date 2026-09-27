@@ -166,13 +166,30 @@ func TestCompatibilityPageNamesPinnedTAMSRevisions(t *testing.T) {
 			pins["scripts/e2e-kind.sh"] = append(pins["scripts/e2e-kind.sh"], revision.FindAllString(line, -1)...)
 		}
 	}
+	pinned := make(map[string]bool)
 	for file, revisions := range pins {
 		if len(revisions) == 0 {
 			t.Fatalf("%s pins no TAMS revision", file)
 		}
-		for _, pinned := range revisions {
-			if !strings.Contains(page, pinned) {
-				t.Errorf("docs/compatibility.md does not name the TAMS revision %s pinned in %s", pinned, file)
+		for _, revision := range revisions {
+			pinned[revision] = true
+			if !strings.Contains(page, revision) {
+				t.Errorf("docs/compatibility.md does not name the TAMS revision %s pinned in %s", revision, file)
+			}
+		}
+	}
+	// A document may link to the upstream repository at a specific revision,
+	// as the operations guide does for an ADR. Such a link must name one of
+	// the pinned revisions, so that a pin change is not left half applied.
+	upstream := regexp.MustCompile(`bbc/tams/(?:blob/|tree/|raw/)?([0-9a-f]{40})`)
+	for _, file := range markdownFiles(t) {
+		body, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, match := range upstream.FindAllStringSubmatch(string(body), -1) {
+			if !pinned[match[1]] {
+				t.Errorf("%s links bbc/tams at %s, which is not a pinned TAMS revision", file, match[1])
 			}
 		}
 	}
