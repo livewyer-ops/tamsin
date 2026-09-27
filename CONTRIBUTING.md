@@ -37,9 +37,10 @@ See [Releasing](docs/releasing.md) for the binary and container release steps.
 
 ## Pull requests
 
-Use a Conventional Commit-style, user-meaningful title. Keep the description to
-the problem, user-visible decision, security/resource impact and verification.
-Keep stdout machine-readable, diagnostics on stderr, credentials redacted and
+Use a Conventional Commit title; the squash merge uses it as the commit
+subject. Keep the description to one or two sentences on what the change does
+and, where it is not obvious, why. Put detail in the commit messages. Keep
+stdout machine-readable, diagnostics on stderr, credentials redacted and
 retries bounded.
 
 Contributors are responsible for every submitted change regardless of the

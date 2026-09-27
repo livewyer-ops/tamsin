@@ -120,12 +120,10 @@ registered as 10 s), following AppNote 0012; a span that differs from the
 nominal by more than a quarter of a frame, such as a frame missing inside the
 Object, is kept as measured. Each measured Segment also carries
 `key_frame_count` (the reference stream's access points) and `last_duration`
-(how long its last sample presents). Releases up to `8.2.0-in2` advanced each
-Segment by the Object's whole span, which stretched multiplexed Flows by the
-audio/video offset at every cut, about 10 ms per Segment. Re-ingest affected
-media into new Flows to obtain corrected timing; existing Flows are not
-rewritten. The renderer epoch changes at each such correction so an automatic
-retry cannot silently reuse an older rendered Flow.
+(how long its last sample presents). A correction to placement changes the
+renderer epoch, so a retry creates new Flows rather than reusing Flows written
+under the earlier rule; existing Flows are never rewritten. The
+[changelog](../CHANGELOG.md) records each such change.
 
 TAMSin owns the output muxer through `--segment-format`. An explicit FFmpeg
 `-f`, `-format`, or `-segment_format` is accepted only when it repeats the
