@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 ARG FFMPEG_RUNTIME_IMAGE=ghcr.io/livewyer-ops/tamsin-ffmpeg-runtime:5.1.9-bookworm-r3@sha256:24a359b276bbd568c2ab2ca52a3eedc3f3d6cbb6d1b361962e93bef995dbdae8
-FROM --platform=$BUILDPLATFORM golang:1.26-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81 AS source
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195 AS source
 
 WORKDIR /src
 COPY go.mod go.sum ./

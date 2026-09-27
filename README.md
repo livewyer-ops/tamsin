@@ -1,7 +1,7 @@
 # TAMSin
 
 [![CI](https://github.com/livewyer-ops/tamsin/actions/workflows/ci.yml/badge.svg)](https://github.com/livewyer-ops/tamsin/actions/workflows/ci.yml)
-[![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go)](go.mod)
+[![Go 1.27](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go)](go.mod)
 [![TAMS 8.2](https://img.shields.io/badge/BBC%20TAMS-8.2-5B2C6F)](docs/compatibility.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 

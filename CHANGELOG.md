@@ -11,6 +11,8 @@ example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
 
 ## Unreleased
 
+- Build with Go 1.27.1: `go.mod` and the `golang:1.27-bookworm` build image
+  move together.
 - **Breaking for generated identities:** place each rendered Segment where
   FFmpeg cut it on the source timeline and size it by the stream it was cut on,
   instead of advancing by the Object's whole span. Multiplexed Flows no longer
