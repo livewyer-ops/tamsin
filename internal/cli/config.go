@@ -18,6 +18,7 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/ingest"
 	"github.com/livewyer-ops/tamsin/internal/media"
 	"github.com/livewyer-ops/tamsin/internal/tams"
+	"github.com/livewyer-ops/tamsin/internal/tamstime"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"go.yaml.in/yaml/v3"
@@ -589,6 +590,9 @@ func (s *settings) validate() error {
 	}
 	if _, err := media.ParseTimestamp(s.GetString("ingest.start")); err != nil {
 		return err
+	}
+	if start := s.GetString("ingest.start"); !tamstime.CanonicalTimestamp(start) {
+		return fmt.Errorf("ingest.start %q is not a canonical TAMS timestamp: use seconds:nanoseconds with no plus sign or leading zeros, such as 0:0 or -12:500000000", start)
 	}
 	for _, identifier := range []struct{ key, label string }{
 		{key: "ingest.flow_id", label: "flow ID"},

@@ -190,6 +190,31 @@ func (c *Client) PutFlow(ctx context.Context, flowID string, flow Flow) (Flow, e
 	return result, nil
 }
 
+func (c *Client) Source(ctx context.Context, sourceID string) (Source, error) {
+	var result Source
+	if err := c.doJSON(ctx, http.MethodGet, "sources/"+escapeSegment(sourceID), nil, &result, http.StatusOK); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// PutSourceLabel, PutSourceDescription and PutSourceTag write the Source
+// properties the API exposes as sub-resources. Each body is a JSON string and
+// success is 204.
+func (c *Client) PutSourceLabel(ctx context.Context, sourceID, label string) error {
+	return c.doJSON(ctx, http.MethodPut, "sources/"+escapeSegment(sourceID)+"/label", label, nil, http.StatusNoContent)
+}
+
+func (c *Client) PutSourceDescription(ctx context.Context, sourceID, description string) error {
+	return c.doJSON(ctx, http.MethodPut, "sources/"+escapeSegment(sourceID)+"/description", description, nil, http.StatusNoContent)
+}
+
+// PutSourceTag writes one Source tag. A tag value is a string or a list of
+// strings, so it is sent as the JSON value it is.
+func (c *Client) PutSourceTag(ctx context.Context, sourceID, name string, value any) error {
+	return c.doJSON(ctx, http.MethodPut, "sources/"+escapeSegment(sourceID)+"/tags/"+escapeSegment(name), value, nil, http.StatusNoContent)
+}
+
 func (c *Client) AllocateStorage(ctx context.Context, flowID string, request StorageRequest) (StorageResponse, error) {
 	var result StorageResponse
 	if err := c.doJSON(ctx, http.MethodPost, "flows/"+escapeSegment(flowID)+"/storage", request, &result, http.StatusCreated); err != nil {

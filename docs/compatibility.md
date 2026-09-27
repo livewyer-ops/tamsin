@@ -48,8 +48,11 @@ deletion-request monitoring are covered by HTTP-level tests, not induced
 against the live store.
 
 TAMSin uses service/storage discovery, Flow reads and writes, Segment listing,
-registration and retraction, Object allocation/readback, and assigned Profile
-reads. Changes to the upstream pins require reviewing the affected BBC
+registration and retraction, Object allocation/readback, assigned Profile
+reads, and Source reads with label, description and tag writes (AppNote 0007:
+a Source Tamsin's Flow derives receives the Flow's label and description when
+it has none, and Tamsin's `_tamsin_` provenance tags; operator edits are
+kept). Changes to the upstream pins require reviewing the affected BBC
 specification, application notes and ADRs, updating focused tests and passing
 both live jobs.
 
@@ -64,10 +67,14 @@ valid committed prefix. Staged input receives whole-input media preflight.
 A TAMS 8.2 Profile must match the generated technical metadata by strict JSON
 structure and exact numeric value. Integers larger than 2^53 retain precision;
 strings never equal numbers, array order matters, and object key order does
-not. Missing, null and empty fields remain distinct. Omitted optional fields
-stay omitted: a Profile can fail if it omits a field TAMSin generates, even
-when a schema default would give it the same meaning. TAMSin does not rewrite
-metadata to force a match.
+not. Missing, null and empty fields remain distinct. `format`, `codec`,
+`container`, `segment_duration` and `container_mapping` must agree in both
+directions. Inside `essence_parameters` the Profile is the fuller description:
+a parameter the Profile declares and the probe could not establish (component
+type, chroma subsampling, codec profile and level) is adopted from the Profile,
+while every parameter TAMSin did establish must be declared by the Profile
+with the same value. TAMSin does not rewrite generated metadata to force a
+match.
 
 Profile-backed Flows are written in compact `profile_id` form. `avg_bit_rate`
 is the Profile's encoding target, not measured output; `max_bit_rate` remains
@@ -88,7 +95,10 @@ identity instead, while the remote revision must still be pinned.
 
 Switching between streaming and staging changes generated IDs. Explicit Flow
 reuse with a different input revision or incompatible technical metadata fails
-before mutation. Input revision and checksum tags cannot be overridden.
+before mutation, for staged and streamed input alike: a Flow that already
+declares `format`, `codec`, `container`, `essence_parameters` or
+`segment_duration` is never rewritten to describe other media. Input revision
+and checksum tags cannot be overridden.
 Segment timeranges do not overlap. TAMS 8.2 initial Object identity is
 supported, but TAMSin does not manufacture fragmented-MP4 initialisation media.
 
@@ -97,6 +107,20 @@ TAMSin does not infer editorial purpose or source lineage generation.
 format or collection ownership. Resume preserves operator labels, descriptions
 and non-`_tamsin_` tags. See [profiles](profiles.md) for media limits and
 [operations](operations.md) for verification and recovery.
+
+## Known deviations
+
+- **Time-shifted re-ingest keeps the Source ID.** AppNote 0017 says two Flows
+  that are technically identical but time-shifted are different Flows of
+  different Sources. TAMSin derives a generated Source ID from the input's
+  content identity alone, so `--start` changes the Flow ID but not the Source
+  ID. Changing that changes every generated Source ID, which this policy
+  reserves for the next TAMS API version; until then supply `--source-id` when
+  a time-shifted copy must be its own Source.
+- **Redirects on media URLs are refused.** A storage URL that answers with a
+  redirect is not followed, because the redirect target was not what the
+  store issued and a signed URL's credentials must not travel; the store
+  should issue the final URL.
 
 Before updating production, read the [changelog](../CHANGELOG.md), pin the
 binary or image digest, run `tamsin doctor --format json --online`, and test an

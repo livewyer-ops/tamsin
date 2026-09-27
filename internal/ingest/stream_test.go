@@ -285,6 +285,23 @@ func TestStreamRevisionAndMetadataGuardExplicitFlowID(t *testing.T) {
 	if _, err := pipeline.planFlowWrite(t.Context(), graphFlow{id: flowID, flow: flow}); err == nil || !strings.Contains(err.Error(), "/essence_parameters") {
 		t.Fatalf("technical metadata guard: %v", err)
 	}
+
+	// The same guard holds for staged input: an explicit --flow-id pointing
+	// at a different file must fail before mutation, while the same file
+	// resumes and a Flow that declares no technical metadata may be described.
+	staged := tams.Flow{"source_id": "source", "tags": map[string]any{}, "format": "urn:x-nmos:format:video", "codec": "video/h264", "container": "video/mp4"}
+	client.flows[flowID] = tams.Flow{"source_id": "source", "tags": map[string]any{}, "format": "urn:x-nmos:format:video", "codec": "video/h265", "container": "video/mp4"}
+	if _, err := pipeline.planFlowWrite(t.Context(), graphFlow{id: flowID, flow: staged}); err == nil || !strings.Contains(err.Error(), "/codec") || client.putFlowCalls != 0 {
+		t.Fatalf("staged technical metadata guard: %v, writes=%d", err, client.putFlowCalls)
+	}
+	client.flows[flowID] = maps.Clone(staged)
+	if _, err := pipeline.planFlowWrite(t.Context(), graphFlow{id: flowID, flow: staged}); err != nil {
+		t.Fatalf("identical staged Flow did not resume: %v", err)
+	}
+	client.flows[flowID] = tams.Flow{"source_id": "source", "tags": map[string]any{}, "label": "placeholder"}
+	if _, err := pipeline.planFlowWrite(t.Context(), graphFlow{id: flowID, flow: staged}); err != nil {
+		t.Fatalf("a Flow without technical metadata could not be described: %v", err)
+	}
 }
 
 func TestStreamingFallsBackBeforeMutationWhenInitialCadenceIsUnknown(t *testing.T) {

@@ -20,6 +20,33 @@ example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
   exposed; a cut that is not a stream access point is refused. The renderer
   identity epoch moves to 4, so re-ingests create new Flows rather than
   colliding with Flows written under the earlier placement.
+- TAMS 8.2 Flow Profile matching adopts, inside `essence_parameters`, what
+  the Profile declares and the probe could not establish (component type,
+  chroma subsampling, codec profile and level), while every generated
+  parameter must still be declared by the Profile with the same value; the
+  BBC reference Profiles no longer fail before the first write. Top-level
+  fields stay strict in both directions.
+- A Flow that already declares technical metadata is never rewritten to
+  describe other media, for staged input as well as streamed: an explicit
+  `--flow-id` pointing at a different file fails before mutation, as the
+  compatibility page already promised.
+- Sources derived from Tamsin's Flows receive the Flow's label and
+  description when they have none, and Tamsin's `_tamsin_` provenance tags
+  (AppNote 0007). Operator edits are kept; a Source that cannot be written
+  is a warning.
+- `--start` must be a canonical TAMS timestamp: `+5:0`, `05:0` and `1:05`
+  are refused instead of being read leniently.
+- `bit_depth` from a pixel format reads only an explicit depth suffix:
+  `nv12` and `yuv410p` no longer claim 12 and 10 bits, and `rgb48` is 16.
+- **Breaking for generated identities of whole-file multiplexes:** collection
+  items of a whole-file Flow now carry the container's own track identifier
+  in `container_mapping` (`mp2ts_container.pid` for MPEG-TS,
+  `isobmff_container.track_id` for MP4 and QuickTime) alongside the
+  positional indices; rendered Segments, whose identifiers FFmpeg reassigns,
+  keep positional mapping only. Generated identities already change in this
+  release through the renderer epoch.
+- `docs/compatibility.md` records the known deviation that a time-shifted
+  re-ingest keeps its Source ID until the next TAMS API version.
 - Upload checksum evidence: a response `Content-Digest` is no longer read as
   proof about the stored Object (RFC 9530 defines it over the response body);
   `Repr-Digest` is, alongside `X-Amz-Checksum-Sha256` and `Digest`. An upload

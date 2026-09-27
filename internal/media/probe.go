@@ -42,7 +42,10 @@ var mediaToolEnvironmentNames = map[string]struct{}{
 }
 
 type Stream struct {
-	Index     int    `json:"index"`
+	Index int `json:"index"`
+	// ID is the container's own identifier for the track, as FFprobe reports
+	// it: the MPEG-TS PID or the ISO BMFF track ID, hexadecimal with 0x.
+	ID        string `json:"id"`
 	CodecName string `json:"codec_name"`
 	// CodecTagString is the container's four-character tag, the only name
 	// FFprobe gives a track FFmpeg cannot decode, such as QuickTime timecode.

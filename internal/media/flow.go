@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -332,8 +333,9 @@ type CollectedFlow struct {
 	// to when a Flow is collected more than once.
 	ContainerMapping map[string]any
 	// RenderedContainerMapping is the mapping inside a container Tamsin
-	// renders, which leaves out the tracks in FlowInfo.DroppedStreams. It is
-	// nil when that is the same as ContainerMapping.
+	// renders, which leaves out the tracks in FlowInfo.DroppedStreams and
+	// carries no source container identifiers. It is nil for an
+	// independently stored essence, which has no mapping at all.
 	RenderedContainerMapping map[string]any
 	// ContainerSupported describes the independently written essence Object. It
 	// is unused for a mapped essence inside a shared mux.
@@ -407,12 +409,14 @@ func collectEssenceFlows(streams, dropped []Stream, probe Probe, identity Identi
 				"track_index":        stream.Index,
 				"format_track_index": formatTrackIndex,
 			}
-			if droppedTracks > 0 {
-				renderedMapping = map[string]any{
-					"track_index":        stream.Index - droppedTracks,
-					"format_track_index": renderedFormatTrackIndex,
-				}
+			// A container Tamsin renders is written by FFmpeg: dropped tracks
+			// are left out and container identifiers such as PIDs and track
+			// IDs are reassigned, so it is mapped by position alone.
+			renderedMapping = map[string]any{
+				"track_index":        stream.Index - droppedTracks,
+				"format_track_index": renderedFormatTrackIndex,
 			}
+			addContainerIdentifiers(mapping, probe.Format, stream)
 		}
 		// A still image is only meaningful for a whole single-stream input, so
 		// streams inside a mux are always described as their own essence type.
@@ -439,9 +443,10 @@ func collectEssenceFlows(streams, dropped []Stream, probe Probe, identity Identi
 }
 
 // ApplyRenderedTrackMapping switches every collected essence to the container
-// mapping of a rendered container, which omits DroppedStreams. It is for
-// treatments that write Media Objects with FFmpeg; a whole-file ingest keeps
-// the source container and with it the source track numbering.
+// mapping of a rendered container, which omits DroppedStreams and the source
+// container's own identifiers. It is for treatments that write Media Objects
+// with FFmpeg; a whole-file ingest keeps the source container and with it the
+// source track numbering, PIDs and track IDs.
 func ApplyRenderedTrackMapping(info *FlowInfo) {
 	for index := range info.Collected {
 		if mapping := info.Collected[index].RenderedContainerMapping; mapping != nil {
@@ -449,6 +454,39 @@ func ApplyRenderedTrackMapping(info *FlowInfo) {
 			info.Collected[index].RenderedContainerMapping = nil
 		}
 	}
+}
+
+// addContainerIdentifiers records the container's own name for a track where
+// AppNote 0006 defines one: the MPEG-TS packet identifier and the ISO BMFF
+// track ID, both of which FFprobe reports as the stream id. They let a reader
+// find the track without trusting stream order.
+func addContainerIdentifiers(mapping map[string]any, format Format, stream Stream) {
+	id, ok := parseStreamID(stream.ID)
+	if !ok {
+		return
+	}
+	names := ffprobeFormatNames(format.Name)
+	switch {
+	case names["mpegts"]:
+		mapping["mp2ts_container"] = map[string]any{"pid": id}
+	case names["mov"] || names["mp4"] || names["m4a"] || names["3gp"] || names["3g2"] || names["mj2"]:
+		mapping["isobmff_container"] = map[string]any{"track_id": id}
+	}
+}
+
+// parseStreamID reads FFprobe's stream id, which is hexadecimal with a 0x
+// prefix for the containers that have one.
+func parseStreamID(value string) (int64, bool) {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return 0, false
+	}
+	if hexadecimal, found := strings.CutPrefix(value, "0x"); found {
+		id, err := strconv.ParseInt(hexadecimal, 16, 64)
+		return id, err == nil && id >= 0
+	}
+	id, err := strconv.ParseInt(value, 10, 64)
+	return id, err == nil && id >= 0
 }
 
 // DroppedStreamIndices lists the container tracks a render leaves out.
@@ -1122,11 +1160,46 @@ func bitDepth(stream Stream) int {
 			return depth
 		}
 	}
-	for _, candidate := range []string{"16", "14", "12", "10", "8"} {
-		if strings.Contains(stream.PixelFormat, candidate) {
-			depth, _ := strconv.Atoi(candidate)
-			return depth
-		}
+	return pixelFormatDepth(stream.PixelFormat)
+}
+
+var (
+	planarDepthPattern = regexp.MustCompile(`p(9|1[0-6])$`)
+	grayDepthPattern   = regexp.MustCompile(`^(?:gray|ya)(9|1[0-6]|32)f?$`)
+	semiPlanarPattern  = regexp.MustCompile(`^p[024](10|12|16)$`)
+	packedRGB16Pattern = regexp.MustCompile(`^(?:rgb|bgr)48$|^(?:rgba|bgra)64$`)
+	packedRGB10Pattern = regexp.MustCompile(`^x2(?:rgb|bgr)10$`)
+)
+
+// pixelFormatDepth reads the sample depth an FFmpeg pixel format name states
+// explicitly: the planar suffix (yuv420p10le, gbrp12be), gray and gray-alpha
+// depths, semi-planar P010/P016, and the 16-bit packed RGB forms. Formats
+// that state no depth, such as yuv420p or nv12, give zero rather than a
+// guess: digits in a chroma-subsampling group are not a depth.
+func pixelFormatDepth(name string) int {
+	name = strings.ToLower(strings.TrimSpace(name))
+	name = strings.TrimSuffix(strings.TrimSuffix(name, "le"), "be")
+	if name == "" {
+		return 0
+	}
+	depth := func(digits string) int {
+		value, _ := strconv.Atoi(digits)
+		return value
+	}
+	switch {
+	case packedRGB16Pattern.MatchString(name):
+		return 16
+	case packedRGB10Pattern.MatchString(name):
+		return 10
+	}
+	if match := semiPlanarPattern.FindStringSubmatch(name); match != nil {
+		return depth(match[1])
+	}
+	if match := grayDepthPattern.FindStringSubmatch(name); match != nil {
+		return depth(match[1])
+	}
+	if match := planarDepthPattern.FindStringSubmatch(name); match != nil {
+		return depth(match[1])
 	}
 	return 0
 }

@@ -30,6 +30,7 @@ func (p *Pipeline) executeFlowPlan(ctx context.Context, inputURI string, graph f
 	if err := p.writeFlowGraph(ctx, planned, results); err != nil {
 		return err
 	}
+	p.populateSources(ctx, planned)
 	defer p.finishFlowStatus(ctx, graph, "Flow graph", &returnErr)
 	for _, target := range targets {
 		if target.role != "" {

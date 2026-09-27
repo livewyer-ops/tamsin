@@ -112,6 +112,14 @@ func TestCLIIngestSupportsBothStorageURLModes(t *testing.T) {
 						}
 						_ = json.NewEncoder(w).Encode(listed)
 					}
+				case strings.HasPrefix(r.URL.Path, "/api/sources/"):
+					// Sources are derived by the store; their label, description
+					// and tags are written through sub-resources.
+					if r.Method == http.MethodPut {
+						w.WriteHeader(http.StatusNoContent)
+						return
+					}
+					_, _ = io.WriteString(w, `{"id":"`+strings.TrimPrefix(r.URL.Path, "/api/sources/")+`","tags":{}}`)
 				case strings.HasPrefix(r.URL.Path, "/api/flows/"):
 					if r.Method == http.MethodPut {
 						var flow tams.Flow

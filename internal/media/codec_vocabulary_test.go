@@ -99,8 +99,8 @@ func TestUndescribableDataTracksAreDroppedNotInvented(t *testing.T) {
 	if audio.RenderedContainerMapping["track_index"] != 1 || audio.RenderedContainerMapping["format_track_index"] != 0 {
 		t.Fatalf("rendered mapping = %#v", audio.RenderedContainerMapping)
 	}
-	if info.Collected[0].RenderedContainerMapping != nil {
-		t.Fatalf("video precedes the dropped track and needs no rendered mapping: %#v", info.Collected[0].RenderedContainerMapping)
+	if video := info.Collected[0].RenderedContainerMapping; video["track_index"] != 0 || video["format_track_index"] != 0 {
+		t.Fatalf("video precedes the dropped track and keeps its position: %#v", video)
 	}
 	ApplyRenderedTrackMapping(&info)
 	if info.Collected[1].ContainerMapping["track_index"] != 1 || info.Collected[1].RenderedContainerMapping != nil {
@@ -139,5 +139,71 @@ func TestOnlyUndescribableTracksIsAnError(t *testing.T) {
 	}
 	if !UndescribableDataStream(probe.Streams[0]) || UndescribableDataStream(Stream{CodecType: "video", CodecName: "unknown"}) {
 		t.Fatal("undescribable rule misclassifies streams")
+	}
+}
+
+func TestPixelFormatDepthReadsOnlyExplicitDepths(t *testing.T) {
+	t.Parallel()
+	for format, want := range map[string]int{
+		"yuv420p10le": 10, "yuv422p12be": 12, "yuv444p16le": 16, "gbrp14le": 14, "yuva420p9be": 9,
+		"gray16be": 16, "gray10le": 10, "ya16le": 16, "p010le": 10, "p016le": 16, "p210be": 10,
+		"rgb48le": 16, "bgra64be": 16, "x2rgb10le": 10,
+		// Digits in a chroma-subsampling group are not a depth, and formats
+		// that state none give none.
+		"nv12": 0, "nv21": 0, "yuv410p": 0, "yuv411p": 0, "yuv420p": 0, "yuvj422p": 0, "rgb24": 0, "gray": 0, "": 0,
+	} {
+		if got := pixelFormatDepth(format); got != want {
+			t.Errorf("pixelFormatDepth(%q) = %d, want %d", format, got, want)
+		}
+	}
+}
+
+func TestContainerMappingCarriesContainerIdentifiersForWholeFiles(t *testing.T) {
+	t.Parallel()
+	transport := Probe{
+		Format: Format{Name: "mpegts", StartTime: "1.4", Duration: "10.0"},
+		Streams: []Stream{
+			{Index: 0, ID: "0x100", CodecType: "video", CodecName: "h264", Width: 64, Height: 64, AverageFrameRate: "25/1"},
+			{Index: 1, ID: "0x101", CodecType: "audio", CodecName: "aac", SampleRate: "48000", Channels: 2},
+		},
+	}
+	_, info, err := BuildFlow(transport, testIdentity(), "video/mp2t", EssenceStorageMuxed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audio := info.Collected[1]
+	if pid, _ := audio.ContainerMapping["mp2ts_container"].(map[string]any); pid["pid"] != int64(0x101) || audio.ContainerMapping["track_index"] != 1 {
+		t.Fatalf("transport stream mapping = %#v", audio.ContainerMapping)
+	}
+	// FFmpeg reassigns PIDs when it renders, so a rendered Segment maps by
+	// position alone.
+	if _, present := audio.RenderedContainerMapping["mp2ts_container"]; present || audio.RenderedContainerMapping["track_index"] != 1 {
+		t.Fatalf("rendered mapping = %#v", audio.RenderedContainerMapping)
+	}
+
+	quicktime := transport
+	quicktime.Format.Name = "mov,mp4,m4a,3gp,3g2,mj2"
+	quicktime.Streams = []Stream{
+		{Index: 0, ID: "0x1", CodecType: "video", CodecName: "h264", Width: 64, Height: 64, AverageFrameRate: "24/1"},
+		{Index: 1, ID: "0x3", CodecType: "audio", CodecName: "aac", SampleRate: "48000", Channels: 2},
+	}
+	if _, info, err = BuildFlow(quicktime, testIdentity(), "video/quicktime", EssenceStorageMuxed); err != nil {
+		t.Fatal(err)
+	}
+	if track, _ := info.Collected[1].ContainerMapping["isobmff_container"].(map[string]any); track["track_id"] != int64(3) {
+		t.Fatalf("QuickTime mapping = %#v", info.Collected[1].ContainerMapping)
+	}
+	// A container with no identifier vocabulary in AppNote 0006 carries none,
+	// and an unreadable id is left out rather than guessed.
+	matroska := quicktime
+	matroska.Format.Name = "matroska,webm"
+	if _, info, err = BuildFlow(matroska, testIdentity(), "video/matroska", EssenceStorageMuxed); err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Collected[1].ContainerMapping) != 2 {
+		t.Fatalf("Matroska mapping = %#v", info.Collected[1].ContainerMapping)
+	}
+	if id, ok := parseStreamID("0xzz"); ok || id != 0 {
+		t.Fatalf("unreadable id parsed as %d", id)
 	}
 }

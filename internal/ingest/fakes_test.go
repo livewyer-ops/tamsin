@@ -302,7 +302,13 @@ type fakeClient struct {
 	decorateFlowReads func(tams.Flow) tams.Flow
 	// allocationCap is the most identifiers one fresh allocation hands out,
 	// as a service that caps limit would.
-	allocationCap        int
+	allocationCap int
+	// sources are derived from written Flows as a store does; sourceWrites
+	// counts label, description and tag writes; sourceWriteErr fails them.
+	sources              map[string]tams.Source
+	sourceWrites         int
+	sourceWriteErr       error
+	sourceReadErr        error
 	listSegmentsErr      error
 	listSegmentsOverride []tams.Segment
 	hasListingOverride   bool
@@ -333,6 +339,7 @@ func newFakeClient() *fakeClient {
 		objects: make(map[string][]byte), backends: []tams.StorageBackend{{ID: "storage", DefaultStorage: true}},
 		flowOrder:          make(map[string]int),
 		profiles:           make(map[string]tams.Profile),
+		sources:            make(map[string]tams.Source),
 		occupiedObjectIDs:  make(map[string]bool),
 		uploadContentTypes: make(map[string]string),
 		downloadErrors:     make(map[string]error),
@@ -429,7 +436,70 @@ func (c *fakeClient) PutFlow(_ context.Context, id string, flow tams.Flow) (tams
 		}
 	}
 	c.flows[id] = stored
+	if sourceID, _ := stored["source_id"].(string); sourceID != "" {
+		if _, derived := c.sources[sourceID]; !derived {
+			c.sources[sourceID] = tams.Source{"id": sourceID, "format": stored["format"], "tags": map[string]any{}}
+		}
+	}
 	return stored, nil
+}
+
+func (c *fakeClient) Source(_ context.Context, id string) (tams.Source, error) {
+	c.record("sourceRead:" + id)
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	if c.sourceReadErr != nil {
+		return nil, c.sourceReadErr
+	}
+	source, present := c.sources[id]
+	if !present {
+		return nil, &tams.HTTPError{Method: http.MethodGet, URL: "sources/" + id, StatusCode: http.StatusNotFound, Status: "404 Not Found"}
+	}
+	clone := make(tams.Source, len(source))
+	for key, value := range source {
+		clone[key] = value
+	}
+	if tags, ok := source["tags"].(map[string]any); ok {
+		clone["tags"] = maps.Clone(tags)
+	}
+	return clone, nil
+}
+
+func (c *fakeClient) putSourceField(id string, apply func(tams.Source)) error {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	if c.sourceWriteErr != nil {
+		return c.sourceWriteErr
+	}
+	source, present := c.sources[id]
+	if !present {
+		return &tams.HTTPError{Method: http.MethodPut, URL: "sources/" + id, StatusCode: http.StatusNotFound, Status: "404 Not Found"}
+	}
+	c.sourceWrites++
+	apply(source)
+	return nil
+}
+
+func (c *fakeClient) PutSourceLabel(_ context.Context, id, label string) error {
+	c.record("sourceLabel:" + id)
+	return c.putSourceField(id, func(source tams.Source) { source["label"] = label })
+}
+
+func (c *fakeClient) PutSourceDescription(_ context.Context, id, description string) error {
+	c.record("sourceDescription:" + id)
+	return c.putSourceField(id, func(source tams.Source) { source["description"] = description })
+}
+
+func (c *fakeClient) PutSourceTag(_ context.Context, id, name string, value any) error {
+	c.record("sourceTag:" + id)
+	return c.putSourceField(id, func(source tams.Source) {
+		tags, _ := source["tags"].(map[string]any)
+		if tags == nil {
+			tags = map[string]any{}
+			source["tags"] = tags
+		}
+		tags[name] = value
+	})
 }
 
 func (c *fakeClient) record(call string) {

@@ -304,6 +304,7 @@ func (p *Pipeline) beginRollingFlowPlan(ctx context.Context, graph flowGraph,
 	if err := p.writeFlowGraph(ctx, planned, results); err != nil {
 		return nil, err
 	}
+	p.populateSources(ctx, planned)
 	return planned, nil
 }
 

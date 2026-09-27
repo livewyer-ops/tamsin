@@ -203,6 +203,11 @@ type Segment struct {
 	InitObject      *ObjectCore    `json:"init_object,omitempty"`
 }
 
+// Source is a TAMS Source as the service derives it from its Flows. Its
+// label, description and tags are written through sub-resources, so it is
+// read whole and written by parts.
+type Source map[string]any
+
 // ObjectCore is the object metadata nested under an 8.2 Segment for an
 // initialisation object. Extra storage metadata is retained without forcing
 // the client to know every provider-specific field.

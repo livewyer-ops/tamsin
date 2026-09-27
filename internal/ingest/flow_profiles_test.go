@@ -221,6 +221,58 @@ func TestProfileMismatchReportsNestedJSONPointerAndPresence(t *testing.T) {
 	}
 }
 
+// TestProfileAdoptsParametersTheProbeCannotEstablish pins the one-sided rule
+// inside essence_parameters: the BBC reference Profiles declare component
+// type, chroma subsampling and codec parameters no probe reports, and a Flow
+// must still be able to take such a Profile. What the probe did establish must
+// agree with the Profile, and the Profile must declare it.
+func TestProfileAdoptsParametersTheProbeCannotEstablish(t *testing.T) {
+	t.Parallel()
+	flow := tams.Flow{
+		"format": "urn:x-nmos:format:video", "codec": "video/h264", "container": "video/mp4",
+		"essence_parameters": map[string]any{
+			"frame_width": 1920, "frame_height": 1080,
+			"frame_rate": map[string]any{"numerator": int64(25), "denominator": int64(1)},
+		},
+	}
+	client := newFakeClient()
+	client.profiles[testVideoProfileID] = tams.Profile{
+		"id": testVideoProfileID,
+		"flow_metadata": map[string]any{
+			"format": "urn:x-nmos:format:video", "codec": "video/h264", "container": "video/mp4",
+			"essence_parameters": map[string]any{
+				"frame_width": json.Number("1920"), "frame_height": json.Number("1080"),
+				"frame_rate":     map[string]any{"numerator": json.Number("25"), "denominator": json.Number("1")},
+				"component_type": "YCbCr", "horiz_chroma_subs": json.Number("2"), "vert_chroma_subs": json.Number("2"),
+				"avc_parameters": map[string]any{"profile": json.Number("100"), "level": json.Number("40"), "flags": json.Number("0")},
+				"vfr":            false,
+			},
+		},
+	}
+	pipeline := &Pipeline{client: client, profileCache: make(map[string]tams.Profile)}
+	expanded, err := pipeline.expandFlowProfile(context.Background(), graphFlow{
+		id: "f3b1a8de-6c1e-4a0b-9d2f-1c7e5a904bb1", flow: flow, profileID: testVideoProfileID,
+	})
+	if err != nil {
+		t.Fatalf("a fuller Profile was refused: %v", err)
+	}
+	parameters, _ := expanded.flow["essence_parameters"].(map[string]any)
+	if parameters["component_type"] != "YCbCr" || parameters["avc_parameters"] == nil || parameters["vfr"] != false {
+		t.Fatalf("Profile parameters were not adopted: %#v", parameters)
+	}
+
+	// A parameter the probe established but the Profile does not declare
+	// would be silently lost in compact form, so it is still a mismatch.
+	flow["essence_parameters"].(map[string]any)["colorspace"] = "BT709"
+	delete(pipeline.profileCache, testVideoProfileID)
+	_, err = pipeline.expandFlowProfile(context.Background(), graphFlow{
+		id: "f3b1a8de-6c1e-4a0b-9d2f-1c7e5a904bb1", flow: flow, profileID: testVideoProfileID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "/flow_metadata/essence_parameters/colorspace") || !strings.Contains(err.Error(), "profile=<missing>") {
+		t.Fatalf("undeclared generated parameter accepted: %v", err)
+	}
+}
+
 func TestProfileMismatchMessageRedactsExtensionKeysAndValues(t *testing.T) {
 	t.Parallel()
 	mismatch := &jsonValueMismatch{

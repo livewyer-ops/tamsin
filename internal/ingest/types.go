@@ -25,6 +25,10 @@ type TAMSClient interface {
 	ListSegments(context.Context, string, tams.SegmentListOptions) ([]tams.Segment, error)
 	UploadFile(context.Context, tams.PresignedURL, string) (tams.UploadReceipt, error)
 	DownloadDigest(context.Context, tams.PresignedURL, int64) (int64, string, error)
+	Source(context.Context, string) (tams.Source, error)
+	PutSourceLabel(context.Context, string, string) error
+	PutSourceDescription(context.Context, string, string) error
+	PutSourceTag(context.Context, string, string, any) error
 }
 
 // graphFlow describes one member of the complete empty Flow graph which must

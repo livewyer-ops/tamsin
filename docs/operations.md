@@ -172,6 +172,13 @@ transport errors and 404s are also reconciled by checking absence. Failed
 cleanup is reported alongside the original failure, never as successful
 retraction.
 
+After the Flow graph is written, TAMSin reads each Source the store derived
+and sets its label and description when they are empty, plus its own
+`_tamsin_` provenance tags, so a Source lists under a readable name (AppNote
+0007). A label or description already present, an operator's for instance, is
+left alone. A Source that cannot be read or written is logged as a warning;
+the ingest does not depend on it.
+
 A partial registration response identifies failed Segments; TAMSin retracts
 the registered complement. A lost response instead requires fresh readback:
 visible Segments are verified and unresolved ones receive targeted retraction.

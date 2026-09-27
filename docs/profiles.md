@@ -223,7 +223,7 @@ are the automatic mappings currently promised:
 | --- | --- | --- |
 | Video | `h264`, `hevc`, `av1`, `ffv1` | `video/h264`, `video/h265`, `video/AV1`, `video/FFV1` |
 | Video | `mpeg1video`, `mpeg2video`, `mpeg4`, `vp8`, `vp9` | `video/mpeg` (MPEG-1/2), `video/mp4v-es`, `video/VP8`, `video/VP9` |
-| Video | `prores` | `video/quicktime` (the established compatibility mapping; IANA has no ProRes coding subtype) |
+| Video | `prores` | `video/quicktime` (the established compatibility mapping; IANA has no ProRes coding subtype). `video/mpeg` for MPEG-1 and MPEG-2 video is likewise also the MPEG programme stream container type; on an elemental Flow it names the coding |
 | Video | `dvvideo`, `dnxhd` | `video/DV`, `video/x-dnxhd` |
 | Video | `jpeg2000` on a moving-picture stream | `video/jp2`, as the BBC reference Flows use |
 | Image coding | `mjpeg`, `jpeg2000` (still image), `png`, `gif`, `webp` | `image/jpeg`, `image/jp2`, `image/png`, `image/gif`, `image/webp` |
