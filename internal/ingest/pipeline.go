@@ -37,7 +37,7 @@ const multiOutputEssenceThreshold = 4
 // rendererIdentityEpoch changes only when TAMSin deliberately changes the
 // semantics of media it writes. Package rebuilds and FFmpeg patch releases are
 // provenance, not a new ingest policy, and must not manufacture a new Flow.
-const rendererIdentityEpoch = "3"
+const rendererIdentityEpoch = "4"
 
 func New(config Config, client TAMSClient, prober media.Prober, segmenter media.Segmenter, logger *slog.Logger, reporter progress.Reporter) (*Pipeline, error) {
 	if config.InputMode == "" {
@@ -750,11 +750,15 @@ type preparedObject struct {
 }
 
 // objectMeasurement is what reading and probing one Segment establishes.
+// objectStart and duration span every stream in the Object; referenceStart
+// and referenceSpan describe the stream the Segment is cut and placed on.
 type objectMeasurement struct {
-	size        int64
-	checksum    string
-	objectStart int64
-	duration    int64
+	size           int64
+	checksum       string
+	objectStart    int64
+	duration       int64
+	referenceStart int64
+	referenceSpan  int64
 }
 
 // ingestIndependently extracts each elementary stream into its own Media
@@ -1182,6 +1186,7 @@ func (p *Pipeline) prepareObjectsForStream(ctx context.Context, flowID string, s
 				measurements[index] = objectMeasurement{
 					size: staged.size, checksum: staged.sha256,
 					objectStart: flowInfo.Start, duration: flowInfo.Duration,
+					referenceStart: flowInfo.Start, referenceSpan: flowInfo.Duration,
 				}
 				return nil
 			}
@@ -1197,13 +1202,16 @@ func (p *Pipeline) prepareObjectsForStream(ctx context.Context, flowID string, s
 			if err != nil {
 				return err
 			}
-			entry := objectMeasurement{size: size, checksum: checksum, objectStart: flowInfo.Start, duration: flowInfo.Duration}
+			entry := objectMeasurement{
+				size: size, checksum: checksum, objectStart: flowInfo.Start, duration: flowInfo.Duration,
+				referenceStart: flowInfo.Start, referenceSpan: flowInfo.Duration,
+			}
 			if probeSegments {
 				probe, probeErr := p.probeObject(groupCtx, path)
 				if probeErr != nil {
 					return probeErr
 				}
-				if entry.objectStart, entry.duration, err = media.ProbeTiming(probe); err != nil {
+				if entry, err = measureObject(probe, size, checksum); err != nil {
 					return err
 				}
 			}
@@ -1221,46 +1229,71 @@ func (p *Pipeline) prepareObjectsForStream(ctx context.Context, flowID string, s
 	}
 
 	objects := make([]preparedObject, 0, len(paths))
-	flowPosition := start
+	firstTimedStart := start
+	if streamIndex == media.AllStreams {
+		firstTimedStart, err = media.TimestampShift(start, flowInfo.ReferenceOffset)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	cursor := newTimelineCursor(start, firstTimedStart, p.logger)
 	for index, path := range paths {
-		object, next, err := placeObject(flowID, path, measurements[index], flowPosition)
+		position, err := cursor.place(records[index], measurements[index])
+		if err != nil {
+			return nil, nil, err
+		}
+		object, err := placeObject(flowID, path, measurements[index], position)
 		if err != nil {
 			return nil, nil, err
 		}
 		objects = append(objects, object)
-		flowPosition = next
 	}
 	return objects, cleanup, nil
 }
 
-// placeObject puts one measured Segment at flowPosition on the Flow timeline
-// and returns it with the position where the next Segment begins.
-func placeObject(flowID, path string, measured objectMeasurement, flowPosition int64) (preparedObject, int64, error) {
-	timerange, err := media.TimeRange(flowPosition, measured.duration)
+// measureObject reads the timing a probed Segment establishes: the span of
+// every stream for the Object's own range, and the reference stream for the
+// Segment's place on the Flow timeline.
+func measureObject(probe media.Probe, size int64, checksum string) (objectMeasurement, error) {
+	entry := objectMeasurement{size: size, checksum: checksum}
+	var err error
+	if entry.objectStart, entry.duration, err = media.ProbeTiming(probe); err != nil {
+		return objectMeasurement{}, err
+	}
+	if entry.referenceStart, entry.referenceSpan, err = media.ProbeReference(probe); err != nil {
+		return objectMeasurement{}, err
+	}
+	return entry, nil
+}
+
+// placeObject describes one measured Segment at position on the Flow
+// timeline. The Segment's timerange is the reference stream's span from
+// there; the Object's own range is every stream's span, so audio that leads or
+// trails a video cut is inside the Object but outside the Segment, which an
+// explicit object_timerange expresses. ts_offset maps the reference stream's
+// first presentation timestamp onto position exactly.
+func placeObject(flowID, path string, measured objectMeasurement, position int64) (preparedObject, error) {
+	timerange, err := media.TimeRange(position, measured.referenceSpan)
 	if err != nil {
-		return preparedObject{}, 0, err
+		return preparedObject{}, err
 	}
 	objectTimerange, err := media.TimeRange(measured.objectStart, measured.duration)
 	if err != nil {
-		return preparedObject{}, 0, err
+		return preparedObject{}, err
 	}
-	offset, err := media.TimestampOffset(flowPosition, measured.objectStart)
+	offset, err := media.TimestampOffset(position, measured.referenceStart)
 	if err != nil {
-		return preparedObject{}, 0, err
+		return preparedObject{}, err
 	}
 	object := preparedObject{
 		id: namedID("object", flowID, measured.checksum, timerange), path: path,
-		size: measured.size, sha256: measured.checksum, start: flowPosition, duration: measured.duration,
+		size: measured.size, sha256: measured.checksum, start: position, duration: measured.referenceSpan,
 		timerange: timerange, objectTimerange: objectTimerange,
 	}
 	if offset != 0 {
 		object.tsOffset = media.Timestamp(offset)
 	}
-	next, err := media.TimestampShift(flowPosition, measured.duration)
-	if err != nil {
-		return preparedObject{}, 0, err
-	}
-	return object, next, nil
+	return object, nil
 }
 
 // Directory scans grow with the Segment count. Four checks per second catches

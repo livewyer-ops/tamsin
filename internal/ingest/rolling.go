@@ -20,17 +20,23 @@ const (
 )
 
 type rollingObjectPreparer struct {
-	pipeline     *Pipeline
-	flowID       string
-	streamIndex  int
+	pipeline    *Pipeline
+	flowID      string
+	streamIndex int
+	cursor      *timelineCursor
+	// flowPosition is where the last placed Segment ends on the Flow timeline.
 	flowPosition int64
 	rates        *media.SegmentBitRateAccumulator
 }
 
-func newRollingObjectPreparer(p *Pipeline, flowID string, streamIndex int, start int64) *rollingObjectPreparer {
+// newRollingObjectPreparer places a stream's Segments from start. A muxed
+// render is anchored where its reference stream begins, referenceStart, which
+// differs from start when that stream begins after the container does.
+func newRollingObjectPreparer(p *Pipeline, flowID string, streamIndex int, start, referenceStart int64) *rollingObjectPreparer {
 	return &rollingObjectPreparer{
 		pipeline: p, flowID: flowID, streamIndex: streamIndex,
-		flowPosition: start, rates: media.NewSegmentBitRateAccumulator(p.config.SegmentDuration),
+		cursor: newTimelineCursor(start, referenceStart, p.logger), flowPosition: start,
+		rates: media.NewSegmentBitRateAccumulator(p.config.SegmentDuration),
 	}
 }
 
@@ -58,18 +64,20 @@ func (p *rollingObjectPreparer) prepare(ctx context.Context, record media.Segmen
 		}
 		measured = &probe
 	}
-	objectStart, duration, err := media.ProbeTiming(*measured)
+	measurement, err := measureObject(*measured, size, checksum)
 	if err != nil {
 		return preparedObject{}, err
 	}
-	object, next, err := placeObject(p.flowID, record.Path, objectMeasurement{
-		size: size, checksum: checksum, objectStart: objectStart, duration: duration,
-	}, p.flowPosition)
+	position, err := p.cursor.place(record, measurement)
 	if err != nil {
 		return preparedObject{}, err
 	}
-	p.flowPosition = next
-	p.rates.Add(media.SegmentMeasurement{Bytes: size, Duration: duration})
+	object, err := placeObject(p.flowID, record.Path, measurement, position)
+	if err != nil {
+		return preparedObject{}, err
+	}
+	p.flowPosition = p.cursor.position
+	p.rates.Add(media.SegmentMeasurement{Bytes: size, Duration: measurement.referenceSpan})
 	return object, nil
 }
 
@@ -367,7 +375,7 @@ func (p *Pipeline) ingestMuxedRolling(ctx context.Context, staged stagedFile, fl
 	}
 	state := &rollingFlowState{
 		flowID: root.id, resultIndex: len(result.Flows) - 1, flow: root.flow,
-		preparer: newRollingObjectPreparer(p, root.id, media.AllStreams, p.config.Start),
+		preparer: newRollingObjectPreparer(p, root.id, media.AllStreams, p.config.Start, p.config.Start+flowInfo.ReferenceOffset),
 	}
 	window := p.rollingStagingWindow(staged)
 	execution := newRollingExecution(p, ctx, &result, storageID, window, state)
@@ -425,7 +433,7 @@ func (p *Pipeline) ingestIndependentRolling(ctx context.Context, staged stagedFi
 		states = append(states, &rollingFlowState{
 			flowID: member.id, resultIndex: len(result.Flows), flow: member.flow,
 			preparer: newRollingObjectPreparer(
-				p, member.id, essence.StreamIndex, p.config.Start+essence.Offset),
+				p, member.id, essence.StreamIndex, p.config.Start+essence.Offset, p.config.Start+essence.Offset),
 		})
 		result.Flows = append(result.Flows, flowResult)
 		graph.flows = append(graph.flows, member)

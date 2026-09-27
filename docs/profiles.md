@@ -107,11 +107,18 @@ MP4 segments are ordinary MP4 files, not fragmented MP4 HLS segments.
 
 TAMSin measures each rendered Object's presentation timestamps and sample
 durations to register its Segment range and `ts_offset`; it does not infer
-these from FFmpeg's segment-list decode timestamps or container duration.
-Release `8.2.0-in2` corrects this mapping and negative timestamp formatting.
-Re-ingest affected media into new Flows to obtain corrected metadata; existing
-Flows are not rewritten. The renderer epoch changes to prevent an automatic
-retry from silently reusing an older rendered Flow.
+these from container duration. Each Segment is placed where FFmpeg cut it on
+the source timeline and covers the span of the stream it was cut on (the first
+video stream, otherwise the first stream), so a multiplex keeps the source
+clock: audio that leads or trails a video cut stays inside the Object's
+`object_timerange` but outside the Segment's `timerange`. Adjacent Segments
+abut exactly; a gap in the source stays a gap on the Flow; a cut that is not a
+stream access point is refused. Releases up to `8.2.0-in2` advanced each
+Segment by the Object's whole span, which stretched multiplexed Flows by the
+audio/video offset at every cut, about 10 ms per Segment. Re-ingest affected
+media into new Flows to obtain corrected timing; existing Flows are not
+rewritten. The renderer epoch changes at each such correction so an automatic
+retry cannot silently reuse an older rendered Flow.
 
 TAMSin owns the output muxer through `--segment-format`. An explicit FFmpeg
 `-f`, `-format`, or `-segment_format` is accepted only when it repeats the

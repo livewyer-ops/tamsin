@@ -46,6 +46,11 @@ type FlowInfo struct {
 	// Collected holds the mono-essence Flows a multi-essence Flow gathers, in
 	// container track order. Empty for single-essence inputs.
 	Collected []CollectedFlow
+	// ReferenceOffset is how long after the container start the reference
+	// stream (the first video stream, otherwise the first stream) begins. A
+	// muxed Flow's first rendered Segment is anchored there, because FFmpeg
+	// cuts and reports Segments on that stream.
+	ReferenceOffset int64
 	// UnsupportedCodecs records elementary streams for which Tamsin has no
 	// defensible coding media type. The generated elemental Flow omits codec;
 	// the ingest layer warns and an explicit metadata override may supply the
@@ -77,6 +82,9 @@ func BuildFlow(probe Probe, identity Identity, detectedContentType string, stora
 	info := FlowInfo{
 		Start: start, Duration: duration,
 		SegmentContainer: SourceSegmentContainer(probe.Format, detectedContentType),
+	}
+	if info.ReferenceOffset, err = referenceOffset(streams, start); err != nil {
+		return nil, FlowInfo{}, err
 	}
 	for _, stream := range streams {
 		if codecMIME(stream.CodecName) == "" {
@@ -504,6 +512,55 @@ func contentStreams(streams []Stream) []Stream {
 // that distinction preserves delayed audio, subtitle, and data tracks.
 func ProbeTiming(probe Probe) (start, duration int64, err error) {
 	return probeTiming(probe, contentStreams(probe.Streams))
+}
+
+// referenceOffset is how long after containerStart the reference stream (the
+// first video stream, otherwise the first content stream) begins.
+func referenceOffset(streams []Stream, containerStart int64) (int64, error) {
+	for _, stream := range streams {
+		if stream.CodecType == "video" {
+			return streamOffset(stream, containerStart)
+		}
+	}
+	if len(streams) > 0 {
+		return streamOffset(streams[0], containerStart)
+	}
+	return 0, nil
+}
+
+// ProbeReference returns the start and span of an Object's reference stream:
+// the first video stream when there is one, otherwise the first content
+// stream. FFmpeg's segment muxer cuts on the same stream, so its first
+// presentation timestamp is what anchors the Segment on the Flow timeline,
+// while audio that leads or trails the cut belongs to the Object's own range.
+// Without per-stream timing, as for an unmeasured whole file, it is the
+// container timing.
+func ProbeReference(probe Probe) (start, span int64, err error) {
+	streams := contentStreams(probe.Streams)
+	var reference *Stream
+	for index := range streams {
+		if streams[index].CodecType == "video" {
+			reference = &streams[index]
+			break
+		}
+	}
+	if reference == nil && len(streams) > 0 {
+		reference = &streams[0]
+	}
+	if reference == nil || reference.StartTime == "" || reference.StartTime == "N/A" ||
+		reference.Duration == "" || reference.Duration == "N/A" {
+		return probeTiming(probe, streams)
+	}
+	if start, err = ParseSeconds(reference.StartTime); err != nil {
+		return 0, 0, fmt.Errorf("parse reference stream start time: %w", err)
+	}
+	if span, err = ParseSeconds(reference.Duration); err != nil {
+		return 0, 0, fmt.Errorf("parse reference stream duration: %w", err)
+	}
+	if span < 0 {
+		return 0, 0, fmt.Errorf("reference stream %d duration cannot be negative", reference.Index)
+	}
+	return start, span, nil
 }
 
 func probeTiming(probe Probe, streams []Stream) (start, duration int64, err error) {

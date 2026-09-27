@@ -11,6 +11,15 @@ example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
 
 ## Unreleased
 
+- **Breaking for generated identities:** place each rendered Segment where
+  FFmpeg cut it on the source timeline and size it by the stream it was cut on,
+  instead of advancing by the Object's whole span. Multiplexed Flows no longer
+  stretch by the audio/video offset at every cut (about 10 ms per Segment,
+  620 ms over a ten-minute programme). Audio that leads or trails a cut stays
+  inside `object_timerange` and outside `timerange`; gaps in the source are
+  exposed; a cut that is not a stream access point is refused. The renderer
+  identity epoch moves to 4, so re-ingests create new Flows rather than
+  colliding with Flows written under the earlier placement.
 - Never register a Segment that overlaps one already in the Flow. A Segment at
   the same timerange under another identifier is adopted when its bytes and
   timing match under readback; otherwise the input stops with the new

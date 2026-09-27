@@ -28,10 +28,13 @@ func TestEmittedObjectPresentationTiming(t *testing.T) {
 		t.Fatalf("fixture: %v: %s", err, output)
 	}
 	for _, format := range []media.SegmentFormat{media.SegmentFormatSource, media.SegmentFormatMPEGTS} {
-		for _, stream := range []int{0, 1} {
+		for _, stream := range []int{0, 1, media.AllStreams} {
 			name := string(format) + "/video"
-			if stream == 1 {
+			switch stream {
+			case 1:
 				name = string(format) + "/audio"
+			case media.AllStreams:
+				name = string(format) + "/muxed"
 			}
 			t.Run(name, func(t *testing.T) {
 				var records []media.SegmentRecord
@@ -45,20 +48,21 @@ func TestEmittedObjectPresentationTiming(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-				pipeline, err := New(Config{Concurrency: 1, SegmentDuration: 3 * time.Second},
+				const start = int64(5 * time.Second)
+				pipeline, err := New(Config{Concurrency: 1, SegmentDuration: 3 * time.Second, Start: start},
 					newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
 				if err != nil {
 					t.Fatal(err)
 				}
-				const start = int64(5 * time.Second)
 				staged, cleanup, err := pipeline.prepareObjectsForStream(ctx, "test-flow",
 					stagedFile{path: input}, media.FlowInfo{}, stream, start, records)
 				defer cleanup()
 				if err != nil {
 					t.Fatal(err)
 				}
-				rolling := newRollingObjectPreparer(pipeline, "test-flow", stream, start)
-				streamed := newRollingObjectPreparer(pipeline, "test-flow", stream, start)
+				rolling := newRollingObjectPreparer(pipeline, "test-flow", stream, start, start)
+				streamed := newRollingObjectPreparer(pipeline, "test-flow", stream, start, start)
+				var previous *preparedObject
 				for index, record := range records {
 					object, err := rolling.prepare(ctx, record, nil)
 					if err != nil {
@@ -78,6 +82,13 @@ func TestEmittedObjectPresentationTiming(t *testing.T) {
 							t.Fatalf("timing differs across ingest paths: %#v / %#v", candidate, object)
 						}
 					}
+					// ts_offset maps the reference stream's first presentation
+					// timestamp onto the Segment start exactly; the Object's own
+					// range may begin earlier when audio leads the cut.
+					referenceStart, _, err := media.ProbeReference(measured)
+					if err != nil {
+						t.Fatal(err)
+					}
 					objectStart, _, err := media.ProbeTiming(measured)
 					if err != nil {
 						t.Fatal(err)
@@ -89,13 +100,24 @@ func TestEmittedObjectPresentationTiming(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					if objectStart+offset != object.start {
+					if referenceStart+offset != object.start {
 						t.Fatalf("object %d does not map to its Flow timeline", index)
 					}
-					if stream == 0 && (object.duration != int64(3*time.Second) || object.start != start+int64(index)*int64(3*time.Second)) {
-						t.Fatalf("video object %d: start=%d duration=%d", index, object.start, object.duration)
+					if objectStart > referenceStart {
+						t.Fatalf("object %d range starts after its reference stream", index)
 					}
+					// Segments follow one another exactly: a source without gaps
+					// must not gain or lose time at any boundary.
+					if previous != nil && object.start != previous.start+previous.duration {
+						t.Fatalf("object %d starts at %d, previous ended at %d", index, object.start, previous.start+previous.duration)
+					}
+					if stream != 1 && (object.duration != int64(3*time.Second) || object.start != start+int64(index)*int64(3*time.Second)) {
+						t.Fatalf("video-anchored object %d: start=%d duration=%d", index, object.start, object.duration)
+					}
+					previous = &object
 				}
+				// The Flow spans exactly the source: 24 s of video, or 24 s of
+				// audio plus the one AAC frame the encoder appends.
 				want := 24.0
 				if stream == 1 {
 					want += 1024.0 / 48000
