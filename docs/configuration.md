@@ -31,76 +31,6 @@ or segmentation. YAML lists contain strings; environment lists accept
 whitespace-separated values or a JSON array when an item contains spaces.
 Repeat list flags where the CLI permits it.
 
-## Settings
-
-The keys below are the complete set. Any other `TAMSIN_*` variable or YAML
-key fails with exit `2` before source resolution. `config` is accepted as a
-flag or variable only. See the [CLI reference](cli.md) for each flag's meaning.
-
-| Key | Flag | Environment | Default |
-| --- | --- | --- | --- |
-| `endpoint` | `-o`, `--endpoint` | `TAMSIN_ENDPOINT` | |
-| `input` | `-i`, `--input` | `TAMSIN_INPUT` | |
-| `config` | `--config` | `TAMSIN_CONFIG` | `$XDG_CONFIG_HOME/tamsin/config.yaml` |
-| `format` | `--format` | `TAMSIN_FORMAT` | `human` |
-| `progress` | `--progress` | `TAMSIN_PROGRESS` | `auto` |
-| `color` | `--color` | `TAMSIN_COLOR` | `auto` |
-| `quiet` | `-q`, `--quiet` | `TAMSIN_QUIET` | `false` |
-| `verbose` | `-v`, `--verbose` | `TAMSIN_VERBOSE` | `false` |
-| `log.level` | `--log-level` | `TAMSIN_LOG_LEVEL` | `info` |
-| `log.format` | `--log-format` | `TAMSIN_LOG_FORMAT` | `text` |
-| `auth.mode` | `--auth` | `TAMSIN_AUTH_MODE` | `auto` |
-| `auth.token` | `--token` | `TAMSIN_AUTH_TOKEN` | |
-| `auth.username` | `--username` | `TAMSIN_AUTH_USERNAME` | |
-| `auth.password` | `--password` | `TAMSIN_AUTH_PASSWORD` | |
-| `auth.url_token` | `--url-token` | `TAMSIN_AUTH_URL_TOKEN` | |
-| `auth.token_url` | `--token-url` | `TAMSIN_AUTH_TOKEN_URL` | |
-| `auth.client_id` | `--client-id` | `TAMSIN_AUTH_CLIENT_ID` | |
-| `auth.client_secret` | `--client-secret` | `TAMSIN_AUTH_CLIENT_SECRET` | |
-| `auth.scopes` | `--scope` | `TAMSIN_AUTH_SCOPES` | |
-| `auth.code` | `--oauth-code` | `TAMSIN_AUTH_CODE` | |
-| `auth.pkce_verifier` | `--pkce-verifier` | `TAMSIN_AUTH_PKCE_VERIFIER` | |
-| `auth.redirect_url` | `--redirect-url` | `TAMSIN_AUTH_REDIRECT_URL` | `http://127.0.0.1:53682/callback` |
-| `auth.allow_insecure_loopback` | `--allow-insecure-auth-loopback` | `TAMSIN_AUTH_ALLOW_INSECURE_LOOPBACK` | `false` |
-| `http.timeout` | `--timeout` | `TAMSIN_HTTP_TIMEOUT` | `30s` |
-| `http.deletion_timeout` | `--deletion-timeout` | `TAMSIN_HTTP_DELETION_TIMEOUT` | `5m` |
-| `http.transfer_timeout` | `--transfer-timeout` | `TAMSIN_HTTP_TRANSFER_TIMEOUT` | `0` |
-| `http.transfer_idle_timeout` | `--transfer-idle-timeout` | `TAMSIN_HTTP_TRANSFER_IDLE_TIMEOUT` | `1m` |
-| `http.retries` | `--retries` | `TAMSIN_HTTP_RETRIES` | `3`, range 0 to 20 |
-| `http.insecure_skip_verify` | `--insecure-skip-verify` | `TAMSIN_HTTP_INSECURE_SKIP_VERIFY` | `false` |
-| `ingest.profile` | `--profile` | `TAMSIN_INGEST_PROFILE` | |
-| `ingest.input_mode` | `--input-mode` | `TAMSIN_INGEST_INPUT_MODE` | `auto` |
-| `ingest.dry_run` | `--dry-run` | `TAMSIN_INGEST_DRY_RUN` | `off` |
-| `ingest.verify` | `--verify` | `TAMSIN_INGEST_VERIFY` | `auto` |
-| `ingest.concurrency` | `-j`, `--concurrency` | `TAMSIN_INGEST_CONCURRENCY` | CPU count, at most 8; range 1 to 256 |
-| `ingest.transfers` | `--transfers` | `TAMSIN_INGEST_TRANSFERS` | `0` (follows concurrency); range 0 to 256 |
-| `ingest.probe_concurrency` | `--probe-concurrency` | `TAMSIN_INGEST_PROBE_CONCURRENCY` | `2`; range 0 to 256 |
-| `ingest.segment_duration` | `-d`, `--segment-duration` | `TAMSIN_INGEST_SEGMENT_DURATION` | from `ingest.profile` |
-| `ingest.segment_format` | `--segment-format` | `TAMSIN_INGEST_SEGMENT_FORMAT` | from `ingest.profile` |
-| `ingest.essence_storage` | `--essence-storage` | `TAMSIN_INGEST_ESSENCE_STORAGE` | from `ingest.profile` |
-| `ingest.start` | `--start` | `TAMSIN_INGEST_START` | `0:0` |
-| `ingest.storage_id` | `--storage-id` | `TAMSIN_INGEST_STORAGE_ID` | |
-| `ingest.tams_flow_profiles` | `--tams-flow-profile` | `TAMSIN_INGEST_TAMS_FLOW_PROFILES` | |
-| `ingest.flow_metadata` | `--flow-metadata` | `TAMSIN_INGEST_FLOW_METADATA` | |
-| `ingest.collected_flow_metadata` | `--collected-flow-metadata` | `TAMSIN_INGEST_COLLECTED_FLOW_METADATA` | |
-| `ingest.source_id` | `--source-id` | `TAMSIN_INGEST_SOURCE_ID` | |
-| `ingest.flow_id` | `--flow-id` | `TAMSIN_INGEST_FLOW_ID` | |
-| `ingest.staging_byte_budget` | `--staging-byte-budget` | `TAMSIN_INGEST_STAGING_BYTE_BUDGET` | `auto` |
-| `ingest.temp_directory` | `--temp-dir` | `TAMSIN_INGEST_TEMP_DIRECTORY` | system temporary directory |
-| `ingest.max_inputs` | `--max-inputs` | `TAMSIN_INGEST_MAX_INPUTS` | `10000` |
-| `media.ffmpeg` | `--ffmpeg` | `TAMSIN_MEDIA_FFMPEG` | `ffmpeg` |
-| `media.ffprobe` | `--ffprobe` | `TAMSIN_MEDIA_FFPROBE` | `ffprobe` |
-| `media.ffmpeg_args` | `--ffmpeg-arg` | `TAMSIN_MEDIA_FFMPEG_ARGS` | |
-| `source.stdin_name` | `--stdin-name` | `TAMSIN_SOURCE_STDIN_NAME` | `stdin.bin` |
-| `source.http_headers` | `--input-header` | `TAMSIN_SOURCE_HTTP_HEADERS` | |
-| `source.s3_endpoint` | `--s3-endpoint` | `TAMSIN_SOURCE_S3_ENDPOINT` | |
-| `source.s3_region` | `--s3-region` | `TAMSIN_SOURCE_S3_REGION` | |
-| `source.s3_path_style` | `--s3-path-style` | `TAMSIN_SOURCE_S3_PATH_STYLE` | `false` |
-
-Credential values, `media.ffmpeg_args` and `source.http_headers` are treated
-as secrets and never appear in diagnostics. On Unix, a configuration file
-containing secrets that is group- or world-readable produces a warning.
-
 ## Authentication
 
 Prefer workload secret injection or environment variables to flags, which can
@@ -152,6 +82,47 @@ Keep configuration private. Input headers and FFmpeg arguments may contain
 secrets too. TAMSin redacts known credentials and URL queries from its own
 diagnostics, but cannot make an unsafe external FFmpeg argument harmless.
 See [Security](../SECURITY.md).
+
+## Ingest an HTTP or S3 input
+
+Configure your TAMS endpoint and [authentication](#authentication) first.
+Source credentials are separate from credentials for the destination store.
+
+For HTTP, use the media URL in an exact dry run, then ingest with the same
+settings:
+
+```sh
+tamsin ingest --profile essence-segments --dry-run=exact \
+  --input https://media.example.com/programme.ts
+tamsin ingest --profile essence-segments \
+  --input https://media.example.com/programme.ts
+```
+
+With `auto` input mode, a stable source with byte ranges can stream; otherwise
+TAMSin logs a fallback and stages it. The exact dry run reads and renders media
+but makes no TAMS writes. Keep a signed URL valid for the whole run, including
+range reads. Supply private input headers through `source.http_headers` in a
+protected configuration file or `TAMSIN_SOURCE_HTTP_HEADERS` from your secret
+mechanism. TAMS credentials are not source credentials.
+
+For S3, configure the normal AWS credential chain with read access to the
+source, then select the region if the environment does not supply it:
+
+```sh
+tamsin ingest --profile essence-segments --s3-region eu-west-1 \
+  --dry-run=exact --input s3://media-bucket/programme.ts
+tamsin ingest --profile essence-segments --s3-region eu-west-1 \
+  --input s3://media-bucket/programme.ts
+```
+
+For an S3-compatible service, add `--s3-endpoint` and, if required by that
+service, `--s3-path-style` to both commands. A key ending in `/` expands to a
+prefix, so use a concrete key when only one object is intended.
+
+Add `--input-mode=stage` to both commands when the whole source must pass
+preflight before the first upload. Allow space for the full source and rendered
+output. Keep the mode and source revision unchanged for a retry; see
+[input modes](#input-modes) and [recovery](operations.md#resume-an-interrupted-ingest).
 
 ## Inputs
 
@@ -222,3 +193,74 @@ If initial segments cannot establish metadata for every essence within the
 spool, `auto` releases the spool and stages before any TAMS mutation. `stream`
 fails instead. Later contradictions stop the ingest and can leave an already
 committed valid prefix; see [recovery](operations.md#recovery).
+
+## Settings
+
+The keys below are the complete set. Any other `TAMSIN_*` variable or YAML
+key fails with exit `2` before source resolution. `config` is accepted as a
+flag or variable only. See the [CLI reference](cli.md) for defaults, value bounds
+and flag meanings.
+
+| Key | Flag | Environment |
+| --- | --- | --- |
+| `endpoint` | `-o`, `--endpoint` | `TAMSIN_ENDPOINT` |
+| `input` | `-i`, `--input` | `TAMSIN_INPUT` |
+| `config` | `--config` | `TAMSIN_CONFIG` |
+| `format` | `--format` | `TAMSIN_FORMAT` |
+| `progress` | `--progress` | `TAMSIN_PROGRESS` |
+| `color` | `--color` | `TAMSIN_COLOR` |
+| `quiet` | `-q`, `--quiet` | `TAMSIN_QUIET` |
+| `verbose` | `-v`, `--verbose` | `TAMSIN_VERBOSE` |
+| `log.level` | `--log-level` | `TAMSIN_LOG_LEVEL` |
+| `log.format` | `--log-format` | `TAMSIN_LOG_FORMAT` |
+| `auth.mode` | `--auth` | `TAMSIN_AUTH_MODE` |
+| `auth.token` | `--token` | `TAMSIN_AUTH_TOKEN` |
+| `auth.username` | `--username` | `TAMSIN_AUTH_USERNAME` |
+| `auth.password` | `--password` | `TAMSIN_AUTH_PASSWORD` |
+| `auth.url_token` | `--url-token` | `TAMSIN_AUTH_URL_TOKEN` |
+| `auth.token_url` | `--token-url` | `TAMSIN_AUTH_TOKEN_URL` |
+| `auth.client_id` | `--client-id` | `TAMSIN_AUTH_CLIENT_ID` |
+| `auth.client_secret` | `--client-secret` | `TAMSIN_AUTH_CLIENT_SECRET` |
+| `auth.scopes` | `--scope` | `TAMSIN_AUTH_SCOPES` |
+| `auth.code` | `--oauth-code` | `TAMSIN_AUTH_CODE` |
+| `auth.pkce_verifier` | `--pkce-verifier` | `TAMSIN_AUTH_PKCE_VERIFIER` |
+| `auth.redirect_url` | `--redirect-url` | `TAMSIN_AUTH_REDIRECT_URL` |
+| `auth.allow_insecure_loopback` | `--allow-insecure-auth-loopback` | `TAMSIN_AUTH_ALLOW_INSECURE_LOOPBACK` |
+| `http.timeout` | `--timeout` | `TAMSIN_HTTP_TIMEOUT` |
+| `http.deletion_timeout` | `--deletion-timeout` | `TAMSIN_HTTP_DELETION_TIMEOUT` |
+| `http.transfer_timeout` | `--transfer-timeout` | `TAMSIN_HTTP_TRANSFER_TIMEOUT` |
+| `http.transfer_idle_timeout` | `--transfer-idle-timeout` | `TAMSIN_HTTP_TRANSFER_IDLE_TIMEOUT` |
+| `http.retries` | `--retries` | `TAMSIN_HTTP_RETRIES` |
+| `http.insecure_skip_verify` | `--insecure-skip-verify` | `TAMSIN_HTTP_INSECURE_SKIP_VERIFY` |
+| `ingest.profile` | `--profile` | `TAMSIN_INGEST_PROFILE` |
+| `ingest.input_mode` | `--input-mode` | `TAMSIN_INGEST_INPUT_MODE` |
+| `ingest.dry_run` | `--dry-run` | `TAMSIN_INGEST_DRY_RUN` |
+| `ingest.verify` | `--verify` | `TAMSIN_INGEST_VERIFY` |
+| `ingest.concurrency` | `-j`, `--concurrency` | `TAMSIN_INGEST_CONCURRENCY` |
+| `ingest.transfers` | `--transfers` | `TAMSIN_INGEST_TRANSFERS` |
+| `ingest.probe_concurrency` | `--probe-concurrency` | `TAMSIN_INGEST_PROBE_CONCURRENCY` |
+| `ingest.segment_duration` | `-d`, `--segment-duration` | `TAMSIN_INGEST_SEGMENT_DURATION` |
+| `ingest.segment_format` | `--segment-format` | `TAMSIN_INGEST_SEGMENT_FORMAT` |
+| `ingest.essence_storage` | `--essence-storage` | `TAMSIN_INGEST_ESSENCE_STORAGE` |
+| `ingest.start` | `--start` | `TAMSIN_INGEST_START` |
+| `ingest.storage_id` | `--storage-id` | `TAMSIN_INGEST_STORAGE_ID` |
+| `ingest.tams_flow_profiles` | `--tams-flow-profile` | `TAMSIN_INGEST_TAMS_FLOW_PROFILES` |
+| `ingest.flow_metadata` | `--flow-metadata` | `TAMSIN_INGEST_FLOW_METADATA` |
+| `ingest.collected_flow_metadata` | `--collected-flow-metadata` | `TAMSIN_INGEST_COLLECTED_FLOW_METADATA` |
+| `ingest.source_id` | `--source-id` | `TAMSIN_INGEST_SOURCE_ID` |
+| `ingest.flow_id` | `--flow-id` | `TAMSIN_INGEST_FLOW_ID` |
+| `ingest.staging_byte_budget` | `--staging-byte-budget` | `TAMSIN_INGEST_STAGING_BYTE_BUDGET` |
+| `ingest.temp_directory` | `--temp-dir` | `TAMSIN_INGEST_TEMP_DIRECTORY` |
+| `ingest.max_inputs` | `--max-inputs` | `TAMSIN_INGEST_MAX_INPUTS` |
+| `media.ffmpeg` | `--ffmpeg` | `TAMSIN_MEDIA_FFMPEG` |
+| `media.ffprobe` | `--ffprobe` | `TAMSIN_MEDIA_FFPROBE` |
+| `media.ffmpeg_args` | `--ffmpeg-arg` | `TAMSIN_MEDIA_FFMPEG_ARGS` |
+| `source.stdin_name` | `--stdin-name` | `TAMSIN_SOURCE_STDIN_NAME` |
+| `source.http_headers` | `--input-header` | `TAMSIN_SOURCE_HTTP_HEADERS` |
+| `source.s3_endpoint` | `--s3-endpoint` | `TAMSIN_SOURCE_S3_ENDPOINT` |
+| `source.s3_region` | `--s3-region` | `TAMSIN_SOURCE_S3_REGION` |
+| `source.s3_path_style` | `--s3-path-style` | `TAMSIN_SOURCE_S3_PATH_STYLE` |
+
+Credential values, `media.ffmpeg_args` and `source.http_headers` are treated
+as secrets and never appear in diagnostics. On Unix, a configuration file
+containing secrets that is group- or world-readable produces a warning.

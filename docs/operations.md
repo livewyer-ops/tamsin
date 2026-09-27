@@ -78,10 +78,12 @@ limit. Staging needs the whole remote source plus its output allowance.
 
 Updates to one root Flow are serialised within a process only. Schedule one
 writer per explicit or deterministic root Flow across processes, or provide
-external coordination. SIGINT/SIGTERM stop new work and allow bounded cleanup;
-give workloads more than the shared 30-second cleanup deadline before a hard
-kill. A second signal, crash or hard kill can leave `tamsin-input-*` or
-`tamsin-segments-*` directories. Remove them only after confirming no process
+external coordination. SIGINT/SIGTERM stop new work and allow bounded cleanup.
+Set the workload's termination grace period above `--deletion-timeout`
+(default five minutes), with headroom for shutdown; cleanup has a minimum
+allowance of 30 seconds. See [recovery](#recovery). A second signal, crash or
+hard kill can leave `tamsin-input-*` or `tamsin-segments-*` directories.
+Remove them only after confirming no process
 uses them; age alone is not sufficient.
 
 ## Containers
@@ -144,6 +146,36 @@ the API credentials. Uploads carry the store's header instructions; with no
 each advertised download URL in turn, presigned first.
 
 ## Recovery
+
+### Resume an interrupted ingest
+
+1. Wait for the original process to exit, including its cleanup. Keep its
+   receipt or event stream and confirm no other worker is writing the same Flow.
+2. Inspect any result with `action_required: true` in your store. Retain the
+   exact Flow, Object and timerange identifiers. Resolve stranded or
+   indeterminate state before retrying; do not delete a whole Flow merely to
+   clear one failed Segment.
+3. Restore the same input revision, binary, profile, start time, input mode,
+   metadata and explicit IDs, if any. Check readiness and rerun the original
+   command. For a local file previously ingested with `essence-segments`:
+
+   ```sh
+   tamsin doctor --online --profile essence-segments
+   tamsin ingest --profile essence-segments --verbose --input ./programme.ts
+   ```
+
+4. Check the final receipt and exit status. A partial ingest can reuse verified
+   Objects and upload the missing ones; a fully stored input reports
+   `RESUMED AND VERIFIED`. A `tams.segment_conflict` needs investigation of the
+   existing Segment's bytes and timing. Changing the Flow ID would create a
+   separate ingest, not repair that conflict.
+
+For a remote input, a renewed signed URL or changed validator can change its
+generated identity. Check [identity rules](concepts.md#generated-identity-and-resume)
+before treating it as the same retry. After an upgrade, check the
+[changelog](../CHANGELOG.md) for deliberate identity renewals.
+
+### Registration and cleanup behaviour
 
 Streaming writes the complete Flow graph only after initial segments establish
 its metadata and assigned Profiles match. It then commits the first valid

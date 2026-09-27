@@ -12,16 +12,31 @@ with that repository as `origin`. Confirm its push URL with
 `git remote get-url --push origin` before tagging. Push only the intended tag
 using an explicit refspec; do not use `--tags` or `--mirror`.
 
-See [Contributing](../CONTRIBUTING.md) for prerequisites. Before tagging:
+See [Contributing](../CONTRIBUTING.md) for prerequisites. Select an unused
+version and keep it in the same shell for the commands below (replace the
+placeholder before running them):
 
-1. ensure CI is green on `main`;
-2. add a `## [8.2.0-in1] - YYYY-MM-DD` section to [CHANGELOG.md](../CHANGELOG.md)
-   with the full version in brackets and a non-empty body; the workflow takes
+```sh
+version=MAJOR.MINOR.PATCH-inN
+```
+
+For a candidate, include its `-rcM` suffix. Before tagging:
+
+1. move the intended unreleased notes into a dated section in
+   [CHANGELOG.md](../CHANGELOG.md), with the exact value of `$version` in
+   brackets and a non-empty body; the workflow takes
    the release notes from it and fails without it;
-3. run `make verify` from a fresh clone of the release commit, then
+2. for a stable release, update the README downloads, image example and
+   documentation version links to the selected version; for a candidate, keep
+   the stable install links and identify the candidate documentation explicitly;
+3. merge the release documentation changes into `main` and wait for green CI;
+4. run `make verify` from a fresh clone of the release commit, then
    `make image-smoke` and the live `make e2e` matrix;
-4. confirm the `ghcr.io/livewyer-ops/tamsin-ffmpeg-runtime` package is public
-   and that the runtime tag and digest in `Dockerfile` resolve.
+5. confirm the `ghcr.io/livewyer-ops/tamsin-ffmpeg-runtime` package is public
+   and that the runtime tag and digest in `Dockerfile` resolve;
+6. verify the first-ingest tutorial with that build.
+   For a candidate, record the current major, minor and `latest` image digests
+   so they can be checked for unintended movement afterwards.
 
 Create and push the tag:
 
@@ -29,8 +44,8 @@ Create and push the tag:
 git fetch origin
 git switch main
 git merge --ff-only origin/main
-git tag -a 8.2.0-in1 -m 'Release 8.2.0-in1'
-git push origin refs/tags/8.2.0-in1:refs/tags/8.2.0-in1
+git tag -a "$version" -m "Release $version"
+git push origin "refs/tags/$version:refs/tags/$version"
 ```
 
 The release workflow repeats verification and both TAMOSS compatibility tests,
@@ -48,8 +63,11 @@ then:
 - creates the GitHub release from the matching changelog section.
 
 After completion, verify one binary and the versioned image from a clean
-machine and confirm that `latest` and the minor tag share its digest. Do not
-move or recreate an existing release tag; publish a new `-inN` or `-rcM` tag
+machine. For a stable release, confirm that the major, minor and `latest`
+image tags share the versioned image's digest. For a candidate, confirm that
+the moving tags retain their previous digests and the GitHub release is marked
+as a prerelease. Do not move or recreate an existing release tag; publish a new
+`-inN` or `-rcM` tag
 instead. `go install` is not a supported install path: the binaries and the
 image are the distribution.
 

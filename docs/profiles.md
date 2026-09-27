@@ -242,11 +242,44 @@ string. This is stricter than container fallback because the pinned elemental
 Flow schemas require `codec`: without a valid explicit override, final schema
 preflight rejects the Flow before TAMS mutation.
 
+## Supply Flow metadata
+
+For a label or other workflow-owned fields, write a JSON object and preview
+the ingest before uploading:
+
+```sh
+printf '%s\n' '{"label":"Studio programme","description":"Ingested master"}' > flow.json
+tamsin ingest --profile preserve --flow-metadata flow.json \
+  --dry-run=exact --input ./programme.ts
+tamsin ingest --profile preserve --flow-metadata flow.json --input ./programme.ts
+```
+
 `--flow-metadata` is most useful for a single-essence input whose workflow owns
 a more specific registry mapping. In a multi-essence file each track may need a
 different value, so `--collected-flow-metadata` takes a JSON object keyed by
 collection role (`video`, `audio 1`, `data`) whose values are merged into that
 one essence Flow; a role the input does not produce is an error rather than a
-silently unused override. Overrides do not change generated identity.
+silently unused override. For example, if planning reports roles `video` and
+`audio`, label each one with:
+
+```json
+{
+  "video": {"label": "Programme video"},
+  "audio": {"label": "Programme audio"}
+}
+```
+
+Save that object as `collected.json` and add
+`--collected-flow-metadata collected.json` to both the exact dry run and the
+real command. This setting is new since `8.2.0-in2`; use a development build
+until the next release. Use the exact roles from your input's `flow.planned`
+events, including numbered roles such as `audio 1` for multiple audio tracks.
+Supply technical fields only when you know the output's properties; complete
+`essence_parameters` replace that object rather than patching individual fields.
+
+Overrides cannot directly set IDs. Technical overrides can change generated
+IDs for streamed inputs; see [identity and resume](concepts.md#generated-identity-and-resume).
+Resume keeps existing operator labels and descriptions, so ingest metadata
+is not a way to edit the labels of an existing Flow.
 
 See [operations](operations.md) for staging, verification and recovery.

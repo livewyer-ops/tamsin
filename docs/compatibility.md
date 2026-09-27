@@ -10,6 +10,14 @@ inputs; and documented mutation, verification, rollback and redaction
 boundaries. A release targeting a new TAMS API version may change them; the
 [changelog](../CHANGELOG.md) lists every break.
 
+A deliberate renderer-epoch renewal is an exception to generated-identity
+stability within that line. It allows a corrected media interpretation and its
+associated metadata changes to create new Flows without rewriting existing
+ones. Each renewal and its upgrade consequences must be stated in the
+changelog. Repeating an earlier ingest after an affected upgrade can create
+new Flows rather than resume the old ones. An explicit old Flow ID must not be
+used to force incompatible media back into the earlier timeline.
+
 Compatible releases may add optional JSON fields, event types, settings or
 profiles. Consumers must ignore unknown fields and event types within a
 supported protocol major. Changing the meaning of an existing value requires
@@ -103,9 +111,12 @@ Segment timeranges do not overlap. TAMS 8.2 initial Object identity is
 supported, but TAMSin does not manufacture fragmented-MP4 initialisation media.
 
 TAMSin does not infer editorial purpose or source lineage generation.
-`--flow-metadata` supplies workflow-owned metadata but cannot change identity,
-format or collection ownership. Resume preserves operator labels, descriptions
-and non-`_tamsin_` tags. See [profiles](profiles.md) for media limits and
+`--flow-metadata` supplies workflow-owned metadata but cannot directly set
+identity fields, format or collection ownership. Technical overrides do
+participate in generated identities for streamed inputs; see
+[generated identity and resume](concepts.md#generated-identity-and-resume).
+Resume preserves operator labels, descriptions and non-`_tamsin_` tags.
+See [profiles](profiles.md) for media limits and
 [operations](operations.md) for verification and recovery.
 
 ## Known deviations

@@ -8,6 +8,14 @@
 TAMSin is a command-line utility for ingesting media into a
 [BBC Time-addressable Media Store](https://github.com/bbc/tams). It creates
 Flow graphs, uploads and registers Media Objects, and verifies the stored bytes.
+It runs as a standalone client. [TAMOSS](https://github.com/livewyer-ops/tamoss)
+is one compatible store; Go and Kubernetes are not required to run TAMSin.
+
+This branch documents development towards the next release, including changes
+to generated identities. The downloads below are `8.2.0-in2`; use the
+[8.2.0-in2 documentation](https://github.com/livewyer-ops/tamsin/tree/8.2.0-in2/docs)
+with that version. Read the [unreleased changes](CHANGELOG.md#unreleased)
+before testing a development build against existing media.
 
 ## Features
 
@@ -60,13 +68,16 @@ Run `tamsin --version`. If your shell cannot find it, see [PATH setup](docs/oper
 
 ## Quick start
 
+For a worked example with a generated audio sample, follow
+[Your first ingest](docs/first-ingest.md).
+
 You need:
 
 - A [supported media file](docs/profiles.md); replace `./programme.ts` below with its path.
 - A TAMS 8.2 service, or a compatible 8.1 service, and credentials authorised to ingest.
 
-Go and Kubernetes are not required to run the binary. If you need a store for
-evaluation, see [TAMOSS](https://github.com/livewyer-ops/tamoss#quickstart).
+If you need a store for evaluation, see
+[TAMOSS](https://github.com/livewyer-ops/tamoss#quickstart).
 
 Supply `TAMSIN_AUTH_TOKEN` through secret injection or an
 [interactive prompt](docs/configuration.md#authentication), then set your endpoint:
@@ -92,11 +103,7 @@ Video analysis can scan the entire input even with `preserve`, and default
 verification may download uploaded Objects again. See
 [resource budgets and verification costs](docs/operations.md).
 
-For remote inputs, segmented treatments stream automatically when the server
-provides stable byte ranges. Closed segments use temporary disk space; the
-whole source need not fit. Use `--input-mode=stage` for complete input preflight
-before upload. See [input modes](docs/configuration.md#input-modes) for fallback
-and identity rules.
+For remote media, follow [Ingest an HTTP or S3 input](docs/configuration.md#ingest-an-http-or-s3-input).
 
 ### Using Docker
 
@@ -146,26 +153,23 @@ tamsin ingest --format json --profile preserve --input ./programme.ts \
   > run.events.jsonl
 ```
 
-JSON mode writes one NDJSON event at a time to stdout, including progress and
-diagnostics; supporting logs use stderr. Flow planning records describe
-identifiers, relationships, format, container and assigned Profile, not complete
-Flow metadata. Consumers must drain both streams and require `run.finished`;
-EOF before it is incomplete. The finite `doctor` and `profiles` commands emit
-one JSON document instead. See [events and exit codes](docs/events.md).
+JSON mode streams NDJSON on stdout; supporting logs use stderr. See the
+[event protocol](docs/events.md) for payloads, examples and consumer rules.
 
 ## Documentation
 
-Use `tamsin --help` or `tamsin COMMAND --help` for installed flags and defaults.
+Use the [documentation map](docs/README.md) to find a guide by task, or
+`tamsin COMMAND --help` for the installed version's flags and defaults.
 
-| Guide | Use it to |
+| Task | Start here |
 | --- | --- |
-| [CLI reference](docs/cli.md) | Look up commands, flags, defaults, value bounds and exit codes |
-| [Configuration and inputs](docs/configuration.md) | Set credentials, YAML, environment variables and source options |
-| [Profiles and media](docs/profiles.md) | Choose packaging and understand supported metadata and codecs |
-| [Operations and recovery](docs/operations.md) | Check readiness, budget resources and investigate failures |
-| [Events and exit codes](docs/events.md) | Integrate with the streaming process output |
-| [Compatibility](docs/compatibility.md) | Check TAMS versions, Profile matching and upgrade boundaries |
-| [Releasing](docs/releasing.md) | Build and publish verified binary and container releases |
+| Ingest a sample and verify a retry | [Your first ingest](docs/first-ingest.md) |
+| Understand the stored media and generated IDs | [Media, identity and verification](docs/concepts.md) |
+| Configure a job or ingest remote media | [Configuration and inputs](docs/configuration.md) |
+| Choose packaging | [Profiles and supported media](docs/profiles.md) |
+| Recover an interrupted run | [Operations and recovery](docs/operations.md#resume-an-interrupted-ingest) |
+| Integrate the CLI with an application | [CLI reference](docs/cli.md), [event protocol](docs/events.md) |
+| Plan an upgrade | [Compatibility](docs/compatibility.md), [changelog](CHANGELOG.md) |
 
 ## Development
 
@@ -177,7 +181,7 @@ make image-smoke
 
 `make e2e` exercises both pinned TAMOSS versions. See
 [Contributing](CONTRIBUTING.md) for prerequisites and change guidance, and the
-[Changelog](CHANGELOG.md) for release notes.
+[release procedure](docs/releasing.md) for maintainers.
 
 ## Support and licence
 

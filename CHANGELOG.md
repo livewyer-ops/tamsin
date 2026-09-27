@@ -11,6 +11,13 @@ example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
 
 ## Unreleased
 
+Upgrading from `8.2.0-in2` renews generated identities through renderer epoch 4.
+Test an exact dry run and a real ingest on evaluation media before upgrading
+workers. A repeated input can create new Flows and upload media again; existing
+Flows remain unchanged. Keep the previous binary and settings if an interrupted
+job must resume its old identities. Do not force the old Flow UUID into a new
+treatment to bypass a conflict.
+
 - Build with Go 1.27.1: `go.mod` and the `golang:1.27-bookworm` build image
   move together.
 - **Breaking for generated identities:** place each rendered Segment where
