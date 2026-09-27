@@ -1,10 +1,6 @@
 # Contributing
 
-TAMSin is an ingest utility. Prefer a small change that
-solves a demonstrated operator problem over a new abstraction or subsystem.
-Use existing code, the Go standard library, platform features and current
-dependencies before adding another implementation or dependency.
-
+TAMSin is an ingest utility.
 Open an issue before investing in a large feature or public-contract change.
 General TAMS administration is outside the project's scope.
 
@@ -29,20 +25,17 @@ Both versions must pass before release.
 
 Changes to source resolution, authentication, Flow/Object identity, mutation,
 verification, output events or exit codes need an observable behaviour test.
-Tests must be deterministic and safe to run with the complete suite. Do not
-commit generated binaries, media fixtures, credentials, Kind state or TAMOSS
-source caches.
+Tests must be deterministic and safe to run with the complete suite. Keep
+stdout machine-readable, diagnostics on stderr, credentials redacted and
+retries bounded. Do not commit generated binaries, media fixtures,
+credentials, Kind state or TAMOSS source caches.
 
 See [Releasing](docs/releasing.md) for the binary and container release steps.
 
 ## Pull requests
 
 Use a Conventional Commit title; the squash merge uses it as the commit
-subject. Keep the description to one or two sentences on what the change does
-and, where it is not obvious, why. Put detail in the commit messages. Keep
-stdout machine-readable, diagnostics on stderr, credentials redacted and
-retries bounded.
+subject.
 
-Contributors are responsible for every submitted change regardless of the
-tools used to produce it. Do not include customer media, private source or
-credentials in external tools, commits, tests or issues.
+Do not include customer media, private source or credentials in external
+tools, commits, tests or issues.

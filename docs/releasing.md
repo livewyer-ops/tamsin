@@ -7,10 +7,10 @@ for example `8.2.0-in1`. Append `-rcM` for a release candidate, for example
 without `-rc` is a stable release and moves the minor, major and `latest`
 image tags; a candidate is published as a GitHub prerelease and moves none.
 
-Releases are published from the public repository, so the tag is pushed to
-the `public` remote by explicit refspec. `origin` is not the release remote.
-Never push with `--tags` or `--mirror`; either would publish private history
-and archive tags.
+The commands below assume a clone of `https://github.com/livewyer-ops/tamsin`
+with that repository as `origin`. Confirm its push URL with
+`git remote get-url --push origin` before tagging. Push only the intended tag
+using an explicit refspec; do not use `--tags` or `--mirror`.
 
 See [Contributing](../CONTRIBUTING.md) for prerequisites. Before tagging:
 
@@ -20,18 +20,17 @@ See [Contributing](../CONTRIBUTING.md) for prerequisites. Before tagging:
    the release notes from it and fails without it;
 3. run `make verify` from a fresh clone of the release commit, then
    `make image-smoke` and the live `make e2e` matrix;
-4. delete stray local tags so that only the release tag can be pushed;
-5. confirm the `ghcr.io/livewyer-ops/tamsin-ffmpeg-runtime` package is public
+4. confirm the `ghcr.io/livewyer-ops/tamsin-ffmpeg-runtime` package is public
    and that the runtime tag and digest in `Dockerfile` resolve.
 
 Create and push the tag:
 
 ```sh
-git fetch public
+git fetch origin
 git switch main
-git merge --ff-only public/main
+git merge --ff-only origin/main
 git tag -a 8.2.0-in1 -m 'Release 8.2.0-in1'
-git push public 8.2.0-in1
+git push origin refs/tags/8.2.0-in1:refs/tags/8.2.0-in1
 ```
 
 The release workflow repeats verification and both TAMOSS compatibility tests,
