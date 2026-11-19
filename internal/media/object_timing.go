@@ -52,6 +52,9 @@ func measureObjectPackets(reader io.Reader, probe *Probe) error {
 		samples, keyFrames        int
 	}
 	bounds := make(map[int]span)
+	transport := probe.Format.Name == "mpegts"
+	var previousPTS int64
+	havePTS := false
 	streams := make(map[int]Stream)
 	for _, stream := range contentStreams(probe.Streams) {
 		streams[stream.Index] = stream
@@ -94,6 +97,14 @@ func measureObjectPackets(reader io.Reader, probe *Probe) error {
 			}
 			if ptsErr != nil || durationErr != nil || duration < 0 || !tickOK || tick.Sign() <= 0 {
 				return fmt.Errorf("stream %d has incomplete object presentation timing", stream.Index)
+			}
+			if transport && stream.TimeBase == "1/90000" {
+				// FFprobe may unwrap one PES group but leave the next group
+				// (or a different PID) on the other side of the 33-bit wrap.
+				if havePTS {
+					pts = unwrapTransportPTS(pts, previousPTS)
+				}
+				previousPTS, havePTS = pts, true
 			}
 			first := new(big.Rat).Mul(new(big.Rat).SetInt64(pts), tick)
 			end := new(big.Rat).Add(first, new(big.Rat).Mul(new(big.Rat).SetInt64(duration), tick))
@@ -156,6 +167,13 @@ func measureObjectPackets(reader io.Reader, probe *Probe) error {
 		}
 		stream.StartTime = bound.first.RatString()
 		stream.Duration = new(big.Rat).Sub(bound.end, bound.first).RatString()
+		if stream.CodecType == "audio" {
+			rate, err := strconv.ParseInt(stream.SampleRate, 10, 64)
+			if err != nil || rate <= 0 {
+				return fmt.Errorf("stream %d has no valid audio sample rate", stream.Index)
+			}
+			bound.last = new(big.Rat).Sub(bound.end, new(big.Rat).SetFrac64(1, rate))
+		}
 		stream.LastSampleTime = bound.last.RatString()
 		stream.FirstDecodedTime = bound.decoded.RatString()
 		stream.SampleCount = bound.samples

@@ -110,22 +110,22 @@ func (c *countingClient) AllocateStorage(ctx context.Context, flowID string, req
 }
 
 func (c *countingClient) Source(ctx context.Context, id string) (tams.Source, error) {
-	c.count("Source")
+	defer c.record("Source")()
 	return c.inner.Source(ctx, id)
 }
 
 func (c *countingClient) PutSourceLabel(ctx context.Context, id, label string) error {
-	c.count("PutSourceLabel")
+	defer c.record("PutSourceLabel")()
 	return c.inner.PutSourceLabel(ctx, id, label)
 }
 
 func (c *countingClient) PutSourceDescription(ctx context.Context, id, description string) error {
-	c.count("PutSourceDescription")
+	defer c.record("PutSourceDescription")()
 	return c.inner.PutSourceDescription(ctx, id, description)
 }
 
 func (c *countingClient) PutSourceTag(ctx context.Context, id, name string, value any) error {
-	c.count("PutSourceTag")
+	defer c.record("PutSourceTag")()
 	return c.inner.PutSourceTag(ctx, id, name, value)
 }
 
@@ -255,7 +255,7 @@ func BenchmarkRemoteInput(b *testing.B) {
 						case <-done:
 							return
 						case <-ticker.C:
-							if size, err := directoryBytes(root); err == nil {
+							if size, err := media.StagingDirectoryBytes(root); err == nil {
 								recordPeak(&peak, size)
 							}
 						}
@@ -298,29 +298,15 @@ func TestRoundTripsPerObject(t *testing.T) {
 		t.Fatalf("unexpected batch: %#v", batch)
 	}
 
-	perObject := map[string]int64{
-		"Segments":         client.count("Segments"),
-		"AllocateStorage":  client.count("AllocateStorage"),
-		"UploadFile":       client.count("UploadFile"),
-		"RegisterSegments": client.count("RegisterSegments"),
-		"Object":           client.count("Object"),
-		"DownloadDigest":   client.count("DownloadDigest"),
-	}
-	var total int64
-	for _, count := range perObject {
-		total += count
-	}
-
-	// Per Media Object with one transfer worker: allocate its fresh PUT URL,
-	// upload, register before another allocation starts, fetch an exact fresh
-	// GET URL after the verification worker is ready, then download. The one
-	// additional lean listing that decides resume identity is per Flow and falls
-	// out of integer per-Object accounting here. The metadata cost is deliberate:
-	// issuing URLs for queued Objects would violate their advertised lifetime.
-	const want = 5
-	if got := total / objects; got != want {
-		t.Fatalf("round trips per object = %d, want %d\nbreakdown for %d objects: %v",
-			got, want, objects, perObject)
+	// One listing finds existing Segments. Each new Object needs its own
+	// allocation, upload, registration, fresh readback URL and download.
+	for method, want := range map[string]int64{
+		"Segments": objects + 1, "AllocateStorage": objects, "UploadFile": objects,
+		"RegisterSegments": objects, "DownloadDigest": objects,
+	} {
+		if got := client.count(method); got != want {
+			t.Errorf("%s calls = %d, want %d", method, got, want)
+		}
 	}
 }
 

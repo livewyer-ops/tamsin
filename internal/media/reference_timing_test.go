@@ -80,7 +80,7 @@ func TestReferenceTimingLeavesAudioAndUnmeasuredProbesAlone(t *testing.T) {
 	}
 	// Two AAC frames: 1024/48000 s each, rounded to the nanosecond.
 	if timing.Regular || timing.Period != 0 || !timing.Measured || timing.KeyFrames != 2 || timing.Samples != 2 ||
-		timing.LastSample != 21333333 || timing.Span != 42666667 {
+		timing.LastSample != 42645833 || timing.Span != 42666667 {
 		t.Fatalf("audio timing = %#v", timing)
 	}
 

@@ -297,8 +297,8 @@ func TestRendererEpochAndByteProfilesDeriveStableFlowIDs(t *testing.T) {
 			t.Fatalf("%s derived the same Flow ID %s", label, id)
 		}
 	}
-	if rendererIdentityEpoch != "4" {
-		t.Fatalf("renderer identity epoch = %q, want 4", rendererIdentityEpoch)
+	if rendererIdentityEpoch != "5" {
+		t.Fatalf("renderer identity epoch = %q, want 5", rendererIdentityEpoch)
 	}
 }
 

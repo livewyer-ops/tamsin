@@ -88,14 +88,17 @@ type SegmentContainer struct {
 // one entry; a renderer may accept several independent essences so a
 // high-track-count source is opened only once.
 type SegmentRequest struct {
-	Input           string
-	Duration        time.Duration
-	Format          SegmentFormat
-	SourceContainer SegmentContainer
-	StreamIndices   []int
-	Directory       string
-	AdditionalArgs  []string
-	BitExact        bool
+	Input             string
+	FlowStart         int64
+	Muxed             bool
+	ProgrammeDuration int64
+	Duration          time.Duration
+	Format            SegmentFormat
+	SourceContainer   SegmentContainer
+	StreamIndices     []int
+	Directory         string
+	AdditionalArgs    []string
+	BitExact          bool
 	// StagingWindow applies process-level backpressure while a streaming sink
 	// commits and removes completed outputs. It is optional because callers
 	// which retain every output cannot safely acknowledge reclaimed space.
@@ -126,11 +129,15 @@ func (w SegmentStagingWindow) validate() error {
 // exact nanosecond values parsed from the segment muxer's CSV manifest. Timed
 // is false for an unsegmented whole-essence extraction.
 type SegmentRecord struct {
-	StreamIndex int
-	Path        string
-	Start       int64
-	End         int64
-	Timed       bool
+	StreamIndex       int
+	Path              string
+	Start             int64
+	End               int64
+	Timed             bool
+	Final             bool
+	MPEGTS            bool
+	FlowStart         int64
+	ProgrammeDuration int64
 	// FlushStaging asks a streaming sink to reclaim all completed outputs
 	// before returning. It is set when the staging high watermark pauses
 	// FFmpeg at a closed-output boundary.
@@ -225,7 +232,12 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			arguments = append(arguments, "-fflags", "+bitexact")
 		}
 		arguments = append(arguments, request.AdditionalArgs...)
+		arguments = append(arguments, "-avoid_negative_ts", "disabled")
+		phase := strconv.FormatInt((mpegTSPhase(request.FlowStart)+500)/1000, 10) + "us"
 		if request.Duration <= 0 {
+			if muxer == "mpegts" {
+				arguments = append(arguments, "-mpegts_copyts", "1", "-max_delay", "0", "-output_ts_offset", phase)
+			}
 			path := filepath.Join(request.Directory, prefix+extension)
 			arguments = append(arguments, "-f", muxer, path)
 			outputs = append(outputs, segmentOutput{streamIndex: streamIndex, path: path})
@@ -237,11 +249,16 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			return fmt.Errorf("create segment manifest pipe: %w", err)
 		}
 		pattern := filepath.Join(request.Directory, prefix+"-%08d"+extension)
+		if muxer == "mpegts" {
+			// Emit audio PES promptly so preroll precedes the first presented video PTS at a clock rollover.
+			arguments = append(arguments, "-reset_timestamps", "0", "-segment_format_options", "mpegts_copyts=1:avoid_negative_ts=disabled:max_delay=0", "-initial_offset", phase)
+		} else {
+			arguments = append(arguments, "-reset_timestamps", "1", "-segment_format_options", "movie_timescale=1000000")
+		}
 		arguments = append(arguments,
 			"-f", "segment",
 			"-segment_format", muxer,
 			"-segment_time", strconv.FormatFloat(request.Duration.Seconds(), 'f', 9, 64),
-			"-reset_timestamps", "1",
 			"-segment_list", "pipe:"+strconv.Itoa(3+outputIndex),
 			"-segment_list_type", "csv",
 			"-segment_list_flags", "+live",
@@ -256,7 +273,7 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			return fmt.Errorf("extract essences from %q: %w: %s", request.Input, err, strings.TrimSpace(string(stderr)))
 		}
 		for _, output := range outputs {
-			if err := sink(SegmentRecord{StreamIndex: output.streamIndex, Path: output.path}); err != nil {
+			if err := sink(SegmentRecord{StreamIndex: output.streamIndex, Path: output.path, MPEGTS: outputContainer.Muxer == "mpegts", Final: true}); err != nil {
 				return err
 			}
 		}
@@ -311,9 +328,31 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			previousStart := int64(-1)
 			decoder := csv.NewReader(output.reader)
 			decoder.FieldsPerRecord = 3
+			var pending *SegmentRecord
+			emit := func(record SegmentRecord) bool {
+				if backpressure != nil {
+					flush, controlErr := backpressure.beforeSink()
+					if controlErr != nil {
+						recordError(controlErr)
+						return false
+					}
+					record.FlushStaging = flush
+				}
+				select {
+				case records <- record:
+				case <-workCtx.Done():
+					return false
+				}
+				counts[index]++
+				return true
+			}
 			for {
 				fields, err := decoder.Read()
 				if errors.Is(err, io.EOF) {
+					if pending != nil {
+						pending.Final = true
+						emit(*pending)
+					}
 					return
 				}
 				if err != nil {
@@ -335,21 +374,16 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 					recordError(err)
 					return
 				}
-				record := SegmentRecord{StreamIndex: output.streamIndex, Path: path, Start: start, End: end, Timed: true}
-				if backpressure != nil {
-					flush, controlErr := backpressure.beforeSink()
-					if controlErr != nil {
-						recordError(controlErr)
+				record := SegmentRecord{StreamIndex: output.streamIndex, Path: path, Start: start, End: end, Timed: true, FlowStart: request.FlowStart, ProgrammeDuration: request.ProgrammeDuration, MPEGTS: outputContainer.Muxer == "mpegts"}
+				if request.Muxed && output.streamIndex == AllStreams {
+					if pending != nil && !emit(*pending) {
 						return
 					}
-					record.FlushStaging = flush
-				}
-				select {
-				case records <- record:
-				case <-workCtx.Done():
+					pending = &record
+				} else if !emit(record) {
 					return
 				}
-				counts[index]++
+
 				previousStart = start
 			}
 		}()

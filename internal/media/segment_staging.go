@@ -3,6 +3,7 @@ package media
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -40,7 +41,7 @@ func (b *segmentBackpressure) beforeSink() (bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.pending++
-	bytes, err := segmentDirectoryBytes(b.directory)
+	bytes, err := StagingDirectoryBytes(b.directory)
 	if err != nil {
 		b.pending--
 		return false, fmt.Errorf("measure rolling segment staging: %w", err)
@@ -62,7 +63,7 @@ func (b *segmentBackpressure) afterSink() error {
 	if !b.paused {
 		return nil
 	}
-	bytes, err := segmentDirectoryBytes(b.directory)
+	bytes, err := StagingDirectoryBytes(b.directory)
 	if err != nil {
 		_ = b.resume()
 		return fmt.Errorf("measure rolling segment staging: %w", err)
@@ -98,7 +99,8 @@ func (b *segmentBackpressure) resume() error {
 	return nil
 }
 
-func segmentDirectoryBytes(root string) (int64, error) {
+// StagingDirectoryBytes sums regular files that still exist under root.
+func StagingDirectoryBytes(root string) (int64, error) {
 	var total int64
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		return addSegmentDirectoryEntry(root, path, entry, walkErr, &total)
@@ -126,7 +128,7 @@ func addSegmentDirectoryEntry(root, path string, entry os.DirEntry, walkErr erro
 		}
 		return err
 	}
-	if info.Size() > 0 && *total > int64(^uint64(0)>>1)-info.Size() {
+	if info.Size() < 0 || *total > math.MaxInt64-info.Size() {
 		return errors.New("segment staging size exceeds the supported byte range")
 	}
 	*total += info.Size()

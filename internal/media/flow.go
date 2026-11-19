@@ -27,6 +27,7 @@ type Identity struct {
 	IngestProfileVersion string
 	FFmpegVersion        string
 	MediaToolchain       string
+	RendererEpoch        string
 }
 
 type FlowInfo struct {
@@ -183,6 +184,9 @@ func provenanceTags(identity Identity) map[string]any {
 	// FFmpeg appears only when it actually wrote the stored representation.
 	// Whole-file muxed ingest therefore keeps the same identity and provenance
 	// regardless of which unused FFmpeg happens to be installed on the host.
+	if identity.RendererEpoch != "" {
+		tags[TagPrefix+"renderer_epoch"] = identity.RendererEpoch
+	}
 	if identity.FFmpegVersion != "" {
 		tags[TagPrefix+"ffmpeg_version"] = identity.FFmpegVersion
 	}

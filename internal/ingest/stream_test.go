@@ -541,6 +541,19 @@ func TestGeneratedLabelUsesTheSameDigestFormForEveryInputKind(t *testing.T) {
 	}
 }
 
+func TestStreamedMP4RetainsFixedCadence(t *testing.T) {
+	filename := streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=7", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=7", "-c:v", "libx264", "-g", "50", "-bf", "0", "-c:a", "aac")
+	item, _ := serveStreamFixture(t, filename, 0)
+	pipeline, err := New(Config{InputMode: InputStream, SegmentDuration: 2 * time.Second, EssenceStorage: media.EssenceStorageMuxed, TempDirectory: t.TempDir()}, newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := pipeline.Run(t.Context(), []source.Item{item})
+	if err != nil || batch.Succeeded != 1 {
+		t.Fatalf("MP4 cadence: %v, %+v", err, batch.Results)
+	}
+}
+
 func TestStreamedCollectedAudioOverrideMustMatchRenderedChannels(t *testing.T) {
 	path := streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=3", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=3", "-c:v", "libx264", "-g", "25", "-c:a", "aac")
 	item, _ := serveStreamFixture(t, path, 0)

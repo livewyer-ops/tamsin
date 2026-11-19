@@ -23,7 +23,6 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/source"
 	"github.com/livewyer-ops/tamsin/internal/tams"
 	"github.com/livewyer-ops/tamsin/internal/version"
-	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -37,7 +36,7 @@ const multiOutputEssenceThreshold = 4
 // rendererIdentityEpoch changes only when TAMSin deliberately changes the
 // semantics of media it writes. Package rebuilds and FFmpeg patch releases are
 // provenance, not a new ingest policy, and must not manufacture a new Flow.
-const rendererIdentityEpoch = "4"
+const rendererIdentityEpoch = "5"
 
 func New(config Config, client TAMSClient, prober media.Prober, segmenter media.Segmenter, logger *slog.Logger, reporter progress.Reporter) (*Pipeline, error) {
 	if config.InputMode == "" {
@@ -521,6 +520,9 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 		IngestProfile: p.config.Profile, IngestProfileVersion: p.config.ProfileVersion,
 		FFmpegVersion: ffmpegVersion, MediaToolchain: toolchainFingerprint,
 	}
+	if writesOutput {
+		identity.RendererEpoch = rendererIdentityEpoch
+	}
 	flow, flowInfo, err := media.BuildFlow(probe, identity, contentType, p.config.EssenceStorage)
 	if err != nil {
 		return Result{}, withFailure(FailureCodeMediaAnalysisFailed, FailureMessageMediaInvalidFlow, true, err)
@@ -805,9 +807,12 @@ type objectMeasurement struct {
 	regular      bool
 	// keyFrames and lastSample are set when the Object's packets were
 	// measured; measured says so.
-	keyFrames  int
-	lastSample int64
-	measured   bool
+	keyFrames        int
+	lastSample       int64
+	lastObjectSample int64
+	audioOnly        bool
+	audioPeriod      int64
+	measured         bool
 	// lead is how far before the frame it was cut on the Object presents:
 	// the leading pictures of an open GOP.
 	lead int64
@@ -974,18 +979,22 @@ func (p *Pipeline) finishCollector(graph *flowGraph, collector tams.Flow, collec
 // Independent essence ingest calls this only after every elemental Flow has
 // been prepared, so a consumer can safely derive a percentage as soon as
 // TotalsFinal becomes true.
-func (p *Pipeline) expectTransfers(ctx context.Context, objects []preparedObject) {
+func (p *Pipeline) expectTransfers(ctx context.Context, targets []flowRegistrationTarget) {
 	tracker := progress.FromContext(ctx)
 	if tracker == nil {
 		return
 	}
+	var count int
 	var bytes int64
-	for _, object := range objects {
-		bytes += object.size
+	for _, target := range targets {
+		count += len(target.objects)
+		for _, object := range target.objects {
+			bytes += object.size
+		}
 	}
-	p.setProgressTotals(tracker, progress.PhaseStore, len(objects), bytes)
+	p.setProgressTotals(tracker, progress.PhaseStore, count, bytes)
 	if p.config.VerificationMode != VerificationNone {
-		p.setProgressTotals(tracker, progress.PhaseVerify, len(objects), bytes)
+		p.setProgressTotals(tracker, progress.PhaseVerify, count, bytes)
 	}
 }
 
@@ -1133,10 +1142,15 @@ func (p *Pipeline) renderSegmentsTo(ctx context.Context, staged stagedFile, flow
 	monitorDone := make(chan struct{})
 	monitorResult := make(chan error, 1)
 	go monitorStagingDirectory(segmentCtx, cancelSegment, staged.lease, directory, monitorDone, monitorResult)
+	var programmeDuration int64
+	if flowInfo.SegmentContainer.Muxer == "mp4" && len(additionalArgs) == 0 {
+		programmeDuration = flowInfo.Duration
+	}
 	renderErr := p.segmenter.Segment(segmentCtx, media.SegmentRequest{
 		Input: staged.path, Duration: p.config.SegmentDuration, Format: p.config.SegmentFormat,
 		SourceContainer: flowInfo.SegmentContainer, StreamIndices: streamIndices,
 		Directory: directory, AdditionalArgs: additionalArgs, StagingWindow: window,
+		FlowStart: p.config.Start, ProgrammeDuration: programmeDuration, Muxed: len(flowInfo.Collected) > 0,
 		// Every render is bit-exact so an identical re-run produces identical
 		// bytes, and with them identical Object identifiers.
 		BitExact: true,
@@ -1152,7 +1166,7 @@ func (p *Pipeline) renderSegmentsTo(ctx context.Context, staged stagedFile, flow
 	monitorErr := <-monitorResult
 	cancelSegment()
 	if monitorErr == nil {
-		size, sizeErr := directoryBytes(directory)
+		size, sizeErr := media.StagingDirectoryBytes(directory)
 		if sizeErr != nil {
 			monitorErr = fmt.Errorf("measure segment staging directory: %w", sizeErr)
 		} else if capacityErr := staged.lease.setArtifact(directory, size); capacityErr != nil {
@@ -1206,82 +1220,6 @@ func (p *Pipeline) prepareObjectsForStream(ctx context.Context, flowID string, s
 	if len(records) == 0 {
 		return nil, nil, errors.New("media renderer produced no objects")
 	}
-	paths := make([]string, len(records))
-	for index, record := range records {
-		paths[index] = record.Path
-	}
-
-	// Measuring each Segment means a digest and, when segmenting, an ffprobe
-	// subprocess. Spawning those serially dominates local cost: twelve probes
-	// cost about a second, which is more than the segmentation that produced
-	// them. They are independent, so they run concurrently.
-	//
-	// Only the measurement parallelises. Assigning positions on the Flow
-	// timeline stays sequential below, because each Segment begins where the
-	// previous one ended.
-	measurements := make([]objectMeasurement, len(paths))
-	probeSegments := len(paths) > 1 || streamIndex != media.AllStreams || records[0].Timed
-	// Without segmentation the single Media Object is the staged file itself,
-	// which staging has already read end to end to hash. Reading it a second
-	// time only re-derives a digest that cannot have changed -- but only when
-	// the file is ours. A local input is not, so it keeps the later digest,
-	// which at least describes the file closer to when it is uploaded.
-	reuseStagedDigest := staged.owned && len(paths) == 1 && paths[0] == staged.path
-
-	group, groupCtx := errgroup.WithContext(ctx)
-	// A day of ten-second Segments is over eight thousand measurements. Each
-	// one needs a slot from the Pipeline-wide budget before it can do anything,
-	// so creating them all up front only parks them on the same semaphore.
-	group.SetLimit(max(p.config.ProbeConcurrency, 1))
-	for index, path := range paths {
-		group.Go(func() error {
-			if reuseStagedDigest {
-				measurements[index] = objectMeasurement{
-					size: staged.size, checksum: staged.sha256,
-					objectStart: flowInfo.Start, duration: flowInfo.Duration,
-					referenceStart: flowInfo.Start, referenceSpan: flowInfo.Duration, measuredSpan: flowInfo.Duration,
-				}
-				return nil
-			}
-			// The budget is Pipeline-wide, so concurrent Flows contend for the
-			// same measurement slots rather than each getting a full allowance.
-			release, err := p.acquireProbe(groupCtx)
-			if err != nil {
-				return err
-			}
-			defer release()
-
-			size, checksum, err := digestFile(groupCtx, path)
-			if err != nil {
-				return err
-			}
-			entry := objectMeasurement{
-				size: size, checksum: checksum, objectStart: flowInfo.Start, duration: flowInfo.Duration,
-				referenceStart: flowInfo.Start, referenceSpan: flowInfo.Duration, measuredSpan: flowInfo.Duration,
-			}
-			if probeSegments {
-				probe, probeErr := p.probeObject(groupCtx, path)
-				if probeErr != nil {
-					return probeErr
-				}
-				if entry, err = measureObject(probe, size, checksum); err != nil {
-					return err
-				}
-			}
-			measurements[index] = entry
-			return nil
-		})
-	}
-	if err := group.Wait(); err != nil {
-		return nil, nil, err
-	}
-	if !staged.owned && len(paths) == 1 && paths[0] == staged.path {
-		if err := staged.matches(measurements[0].size, measurements[0].checksum); err != nil {
-			return nil, nil, err
-		}
-	}
-
-	objects := make([]preparedObject, 0, len(paths))
 	firstTimedStart := start
 	if streamIndex == media.AllStreams {
 		firstTimedStart, err = media.TimestampShift(start, flowInfo.ReferenceOffset)
@@ -1290,18 +1228,50 @@ func (p *Pipeline) prepareObjectsForStream(ctx context.Context, flowID string, s
 		}
 	}
 	cursor := newTimelineCursor(start, firstTimedStart, p.logger)
-	for index, path := range paths {
-		position, err := cursor.place(records[index], measurements[index])
-		if err != nil {
-			return nil, nil, err
+	sourceObject := len(records) == 1 && records[0].Path == staged.path
+	probeObject := len(records) > 1 || streamIndex != media.AllStreams || records[0].Timed
+	objects := make([]preparedObject, 0, len(records))
+	for _, record := range records {
+		measurement := objectMeasurement{
+			size: staged.size, checksum: staged.sha256, objectStart: flowInfo.Start, duration: flowInfo.Duration,
+			referenceStart: flowInfo.Start, referenceSpan: flowInfo.Duration, measuredSpan: flowInfo.Duration,
 		}
-		object, err := placeObject(flowID, path, measurements[index], position)
+		// Only an owned whole input can reuse the digest computed during staging.
+		if !sourceObject || !staged.owned {
+			measurement, err = p.measurePreparedFile(ctx, record.Path, measurement, probeObject)
+			if err != nil {
+				return nil, nil, err
+			}
+			if sourceObject {
+				if err := staged.matches(measurement.size, measurement.checksum); err != nil {
+					return nil, nil, err
+				}
+			}
+		}
+		object, err := cursor.object(flowID, record.Path, record, measurement)
 		if err != nil {
 			return nil, nil, err
 		}
 		objects = append(objects, object)
 	}
 	return objects, cleanup, nil
+}
+
+func (p *Pipeline) measurePreparedFile(ctx context.Context, path string, measurement objectMeasurement, probe bool) (objectMeasurement, error) {
+	release, err := p.acquireProbe(ctx)
+	if err != nil {
+		return objectMeasurement{}, err
+	}
+	defer release()
+	measurement.size, measurement.checksum, err = digestFile(ctx, path)
+	if err != nil || !probe {
+		return measurement, err
+	}
+	info, err := p.probeObject(ctx, path)
+	if err != nil {
+		return objectMeasurement{}, err
+	}
+	return measureObject(info, measurement.size, measurement.checksum)
 }
 
 // measureObject reads the timing a probed Segment establishes: the span of
@@ -1320,6 +1290,24 @@ func measureObject(probe media.Probe, size int64, checksum string) (objectMeasur
 	entry.referenceStart, entry.referenceSpan, entry.measuredSpan = reference.Start, reference.Span, reference.MeasuredSpan
 	entry.period, entry.regular = reference.Period, reference.Regular
 	entry.keyFrames, entry.lastSample, entry.measured = reference.KeyFrames, reference.LastSample, reference.Measured
+	entry.lastObjectSample = entry.lastSample
+	for _, stream := range probe.Streams {
+		if stream.Empty || stream.Disposition.AttachedPicture != 0 || stream.LastSampleTime == "" {
+			continue
+		}
+		last, err := media.ParseSeconds(stream.LastSampleTime)
+		if err != nil {
+			return objectMeasurement{}, err
+		}
+		if stream.CodecType == "audio" && last >= entry.lastObjectSample {
+			entry.audioOnly = len(probe.Streams) == 1
+			rate, err := strconv.ParseInt(stream.SampleRate, 10, 64)
+			if err == nil && rate > 0 {
+				entry.audioPeriod = (int64(time.Second) + rate/2) / rate
+			}
+		}
+		entry.lastObjectSample = max(entry.lastObjectSample, last)
+	}
 	entry.lead = reference.Lead
 	// A regularised reference stream presents its last sample for a whole
 	// period, which can reach past the rounded timestamps every stream
@@ -1382,7 +1370,7 @@ const stagingDirectoryPollInterval = 250 * time.Millisecond
 func monitorStagingDirectory(ctx context.Context, cancel context.CancelFunc, lease *stagingLease,
 	directory string, done <-chan struct{}, result chan<- error) {
 	syncDirectory := func() error {
-		size, err := directoryBytes(directory)
+		size, err := media.StagingDirectoryBytes(directory)
 		if err != nil {
 			return fmt.Errorf("measure segment staging directory: %w", err)
 		}

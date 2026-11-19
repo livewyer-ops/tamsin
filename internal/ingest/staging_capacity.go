@@ -530,34 +530,6 @@ func checkedAdd(left, right int64) (int64, error) {
 	return left + right, nil
 }
 
-func directoryBytes(root string) (int64, error) {
-	var total int64
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			// A rolling sink removes committed Segment files while the capacity
-			// monitor walks the directory. Disappearing entries no longer consume
-			// staging and are therefore safe to omit from this sample.
-			if errors.Is(walkErr, os.ErrNotExist) && path != root {
-				return nil
-			}
-			return walkErr
-		}
-		if !entry.Type().IsRegular() {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
-		total, err = checkedAdd(total, info.Size())
-		return err
-	})
-	return total, err
-}
-
 func formatBytes(bytes int64) string {
 	const unit = int64(1024)
 	if bytes < unit {

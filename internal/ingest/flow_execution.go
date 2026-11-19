@@ -26,7 +26,7 @@ func (p *Pipeline) executeFlowPlan(ctx context.Context, inputURI string, graph f
 	if p.config.DryRunMode != DryRunOff {
 		return nil
 	}
-	p.expectTransfers(ctx, collectPlannedFlowObjects(targets))
+	p.expectTransfers(ctx, targets)
 	if err := p.writeFlowGraph(ctx, planned, results, graph.changes); err != nil {
 		return err
 	}
@@ -77,16 +77,4 @@ func plannedContainer(planned []plannedFlowWrite, flowID string) string {
 		}
 	}
 	return ""
-}
-
-func collectPlannedFlowObjects(targets []flowRegistrationTarget) []preparedObject {
-	total := 0
-	for index := range targets {
-		total += len(targets[index].objects)
-	}
-	objects := make([]preparedObject, 0, total)
-	for _, target := range targets {
-		objects = append(objects, target.objects...)
-	}
-	return objects
 }

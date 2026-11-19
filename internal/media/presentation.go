@@ -89,7 +89,7 @@ func cadenceStates(probe *Probe) map[int]*cadenceState {
 			continue
 		}
 		stream.Cadence = CadenceUnknown
-		states[stream.Index] = &cadenceState{stream: stream}
+		states[stream.Index] = &cadenceState{stream: stream, transport: probe.Format.Name == "mpegts" && stream.TimeBase == "1/90000"}
 	}
 	return states
 }
@@ -142,6 +142,7 @@ func (p FFprobe) probePresentationMode(ctx context.Context, filename string, pro
 }
 
 type cadenceState struct {
+	transport    bool
 	stream       *Stream
 	first        int64
 	previous     int64
@@ -159,6 +160,9 @@ func (s *cadenceState) observe(timestamp string) {
 		return
 	}
 	if s.frames > 0 {
+		if s.transport {
+			value = unwrapTransportPTS(value, s.previous)
+		}
 		step, offsetErr := TimestampOffset(value, s.previous)
 		if offsetErr != nil || step <= 0 {
 			s.invalid = true

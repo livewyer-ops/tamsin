@@ -102,6 +102,83 @@ func (c *timelineCursor) place(record media.SegmentRecord, measured objectMeasur
 	return position, nil
 }
 
+// object places interior cuts on the reference stream. At the programme
+// boundaries the other tracks can begin earlier or finish later.
+func (c *timelineCursor) object(flowID, path string, record media.SegmentRecord, m objectMeasurement) (preparedObject, error) {
+	first := !c.placed
+	previousEnd := c.position
+	position, err := c.place(record, m)
+	if err != nil {
+		return preparedObject{}, err
+	}
+	if record.MPEGTS {
+		position, err = media.TransportPosition(position, m.referenceStart)
+		if err != nil {
+			return preparedObject{}, err
+		}
+		// The TS clock resolves to one tick. Exclude decoder preroll and
+		// any sub-tick rounding overlap at the previous boundary.
+		if position < previousEnd {
+			trim := previousEnd - position
+			if trim >= m.referenceSpan {
+				return preparedObject{}, fmt.Errorf("transport Object ends before its Flow interval")
+			}
+			m.referenceStart += trim
+			m.referenceSpan -= trim
+			position = previousEnd
+		}
+	}
+	if record.Timed && record.StreamIndex == media.AllStreams {
+		if first {
+			lead := min(m.referenceStart-m.objectStart, position-c.untimedStart)
+			if lead > 0 {
+				position -= lead
+				m.referenceStart -= lead
+				m.referenceSpan += lead
+			}
+		}
+		if record.Final {
+			if tail := m.objectStart + m.duration - m.referenceStart - m.referenceSpan; tail > 0 {
+				m.referenceSpan += tail
+				m.lastSample = m.lastObjectSample
+			}
+		}
+	}
+	// TS cannot carry the MP4 edit that shortened the final AAC packet.
+	// The manifest retains the input packet duration for audio-only cuts.
+	if record.MPEGTS && record.Timed && record.ProgrammeDuration > 0 && m.audioPeriod > 0 {
+		endRelative := record.ProgrammeDuration
+		if m.audioOnly {
+			endRelative = min(endRelative, record.End)
+		}
+		end, err := media.TimestampShift(record.FlowStart, endRelative)
+		if err != nil {
+			return preparedObject{}, err
+		}
+		tail := position + m.referenceSpan - end
+		if tail > manifestTolerance && tail < m.referenceSpan {
+			m.referenceSpan -= tail
+			m.lastSample = m.referenceStart + m.referenceSpan - m.audioPeriod
+		}
+	}
+	if record.MPEGTS {
+		epoch, err := media.TransportEpoch(position)
+		if err != nil {
+			return preparedObject{}, err
+		}
+		reference := position - epoch
+		shift := reference - m.referenceStart
+		m.referenceStart = reference
+		m.objectStart += shift
+		m.lastSample += shift
+	}
+	c.position, err = media.TimestampShift(position, m.referenceSpan)
+	if err != nil {
+		return preparedObject{}, err
+	}
+	return placeObject(flowID, path, m, position)
+}
+
 func absInt64(value int64) int64 {
 	if value < 0 {
 		return -value

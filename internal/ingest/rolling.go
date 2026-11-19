@@ -68,16 +68,12 @@ func (p *rollingObjectPreparer) prepare(ctx context.Context, record media.Segmen
 	if err != nil {
 		return preparedObject{}, err
 	}
-	position, err := p.cursor.place(record, measurement)
-	if err != nil {
-		return preparedObject{}, err
-	}
-	object, err := placeObject(p.flowID, record.Path, measurement, position)
+	object, err := p.cursor.object(p.flowID, record.Path, record, measurement)
 	if err != nil {
 		return preparedObject{}, err
 	}
 	p.flowPosition = p.cursor.position
-	p.rates.Add(media.SegmentMeasurement{Bytes: size, Duration: measurement.referenceSpan})
+	p.rates.Add(media.SegmentMeasurement{Bytes: size, Duration: object.duration})
 	return object, nil
 }
 

@@ -82,3 +82,20 @@ func TestMovTextClearingSampleHasNoPresentationDuration(t *testing.T) {
 		}
 	}
 }
+
+func TestTransportStreamTracksShareOnePresentationClock(t *testing.T) {
+	probe := Probe{Format: Format{Name: "mpegts"}, Streams: []Stream{
+		{Index: 0, CodecType: "video", TimeBase: "1/90000"},
+		{Index: 1, CodecType: "audio", TimeBase: "1/90000", SampleRate: "48000"},
+	}}
+	// The first audio PTS is one AAC frame before zero. FFprobe may return
+	// both wrapped and unwrapped counts even within a single PES group.
+	const packets = `{"packets":[{"stream_index":0,"pts":0,"duration":3750},{"stream_index":1,"pts":8589932672,"duration":1920},{"stream_index":1,"pts":8589934592,"duration":1920},{"stream_index":1,"pts":1920,"duration":1920}]}`
+	if err := measureObjectPackets(strings.NewReader(packets), &probe); err != nil {
+		t.Fatal(err)
+	}
+	start, duration, err := ProbeTiming(probe)
+	if err != nil || start != -21333333 || duration != 64000000 {
+		t.Fatalf("mixed-epoch bounds: start=%d duration=%d error=%v", start, duration, err)
+	}
+}

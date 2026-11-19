@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"math"
 	"os/exec"
@@ -38,9 +39,10 @@ func TestEmittedObjectPresentationTiming(t *testing.T) {
 				name = string(format) + "/muxed"
 			}
 			t.Run(name, func(t *testing.T) {
+				const start = int64(5 * time.Second)
 				var records []media.SegmentRecord
 				if err := (media.FFmpeg{}).Segment(ctx, media.SegmentRequest{
-					Input: input, Duration: 3 * time.Second, Format: format,
+					Input: input, FlowStart: start, Duration: 3 * time.Second, Format: format,
 					SourceContainer: media.SegmentContainer{Muxer: "mp4", Extension: ".mp4"},
 					StreamIndices:   []int{stream}, Directory: t.TempDir(),
 				}, func(record media.SegmentRecord) error {
@@ -49,7 +51,6 @@ func TestEmittedObjectPresentationTiming(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-				const start = int64(5 * time.Second)
 				pipeline, err := New(Config{Concurrency: 1, SegmentDuration: 3 * time.Second, Start: start},
 					newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
 				if err != nil {
@@ -102,7 +103,7 @@ func TestEmittedObjectPresentationTiming(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					if referenceStart+offset != object.start {
+					if referenceStart+offset != object.start && !(format == media.SegmentFormatMPEGTS && stream == 1 && referenceStart+offset < object.start && object.start-(referenceStart+offset) <= int64(22*time.Millisecond)) {
 						t.Fatalf("object %d does not map to its Flow timeline", index)
 					}
 					if objectStart > referenceStart {
@@ -118,12 +119,9 @@ func TestEmittedObjectPresentationTiming(t *testing.T) {
 					}
 					previous = &object
 				}
-				// The Flow spans exactly the source: 24 s of video, or 24 s of
-				// audio plus the one AAC frame the encoder appends.
+				// The declared programme excludes the AAC encoder preroll.
 				want := 24.0
-				if stream == 1 {
-					want += 1024.0 / 48000
-				}
+
 				if got := float64(rolling.flowPosition-start) / 1e9; math.Abs(got-want) > 0.000002 {
 					t.Fatalf("duration = %.9f, want %.9f", got, want)
 				}
@@ -243,7 +241,7 @@ func TestOpenGOPSegmentsAbut(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var records []media.SegmentRecord
 			if err := (media.FFmpeg{}).Segment(ctx, media.SegmentRequest{
-				Input: input, Duration: 2 * time.Second, Format: media.SegmentFormatSource, BitExact: true,
+				Input: input, FlowStart: int64(time.Minute), Duration: 2 * time.Second, Format: media.SegmentFormatSource, BitExact: true,
 				SourceContainer: media.SegmentContainer{Muxer: "mpegts", Extension: ".ts"},
 				StreamIndices:   []int{stream}, Directory: t.TempDir(),
 			}, func(record media.SegmentRecord) error {
@@ -295,7 +293,11 @@ func TestOpenGOPSegmentsAbut(t *testing.T) {
 				previous = &object
 			}
 			last := objects[len(objects)-1]
-			if span := last.start + last.duration - objects[0].start; span != int64(8*time.Second) {
+			videoStart := objects[0].start
+			if stream == media.AllStreams {
+				videoStart = start + flowInfo.ReferenceOffset
+			}
+			if span := last.start + last.duration - videoStart; absInt64(span-int64(8*time.Second)) > manifestTolerance {
 				t.Fatalf("flow spans %s, want 8 s", media.Timestamp(span))
 			}
 		})
@@ -360,7 +362,7 @@ func TestMidGOPCaptureIsAnchoredOnItsFirstKeyFrame(t *testing.T) {
 	}
 	var records []media.SegmentRecord
 	if err := (media.FFmpeg{}).Segment(ctx, media.SegmentRequest{
-		Input: input, Duration: 2 * time.Second, Format: media.SegmentFormatSource, BitExact: true,
+		Input: input, FlowStart: start, Duration: 2 * time.Second, Format: media.SegmentFormatSource, BitExact: true,
 		SourceContainer: media.SegmentContainer{Muxer: "mpegts", Extension: ".ts"},
 		StreamIndices:   []int{media.AllStreams}, Directory: t.TempDir(),
 	}, func(record media.SegmentRecord) error {
@@ -374,7 +376,115 @@ func TestMidGOPCaptureIsAnchoredOnItsFirstKeyFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if objects[0].start != start+flowInfo.ReferenceOffset {
-		t.Fatalf("first segment at %s, want the key frame at %s", media.Timestamp(objects[0].start), media.Timestamp(start+flowInfo.ReferenceOffset))
+	if objects[0].start != start {
+		t.Fatalf("muxed programme starts at %d, want leading audio at %d", objects[0].start, start)
+	}
+	firstObject, err := pipeline.probeObject(ctx, records[0].Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err := media.ProbeReference(firstObject)
+	if err != nil || absInt64(reference.Start-start-flowInfo.ReferenceOffset) > manifestTolerance {
+		t.Fatalf("video begins at %d, want first key frame at %d: %v", reference.Start, start+flowInfo.ReferenceOffset, err)
+	}
+}
+
+func TestMuxedPresentationIncludesAudioTailAndPreservesPriming(t *testing.T) {
+	path := streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=1", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=3", "-c:v", "libx264", "-g", "25", "-bf", "0", "-c:a", "aac")
+	var records []media.SegmentRecord
+	err := (media.FFmpeg{}).Segment(t.Context(), media.SegmentRequest{Input: path, Duration: 2 * time.Second, SourceContainer: media.SegmentContainer{Muxer: "mp4", Extension: ".mp4"}, StreamIndices: []int{media.AllStreams}, Muxed: true, Directory: t.TempDir()}, func(r media.SegmentRecord) error { records = append(records, r); return nil })
+	if err != nil || len(records) != 1 || !records[0].Final {
+		t.Fatalf("render: %v %+v", err, records)
+	}
+	decoded := func(path string) []byte {
+		cmd := exec.Command("ffmpeg", "-v", "error", "-i", path, "-map", "0:a:0", "-f", "s16le", "-")
+		data, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	if !bytes.Equal(decoded(path), decoded(records[0].Path)) {
+		t.Fatal("decoded audio changed during stream copy")
+	}
+	probe, err := (media.FFprobe{}).ProbeObject(t.Context(), records[0].Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := measureObject(probe, 1, "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := newTimelineCursor(0, 0, nil).object("flow", records[0].Path, records[0], m)
+	if err != nil || o.timerange != "[0:0_3:0)" || o.lastDuration != "0:20833" {
+		t.Fatalf("audio tail: %+v %v", o, err)
+	}
+}
+
+func TestTransportClockAcrossRollover(t *testing.T) {
+	path := streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=4", "-c:v", "libx264", "-g", "25", "-bf", "0")
+	epoch, err := media.ParseSeconds("8589934592/90000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := epoch - int64(1500*time.Millisecond)
+	cursor := newTimelineCursor(start, start, nil)
+	count := 0
+	err = (media.FFmpeg{}).Segment(t.Context(), media.SegmentRequest{Input: path, Format: media.SegmentFormatMPEGTS, FlowStart: start, Duration: time.Second, StreamIndices: []int{media.AllStreams}, Directory: t.TempDir()}, func(r media.SegmentRecord) error {
+		probe, err := (media.FFprobe{}).ProbeObject(t.Context(), r.Path)
+		if err != nil {
+			return err
+		}
+		m, err := measureObject(probe, 1, "hash")
+		if err != nil {
+			return err
+		}
+		o, err := cursor.object("flow", r.Path, r, m)
+		if err != nil {
+			return err
+		}
+		wantStart := start + int64(count)*int64(time.Second)
+		wantOffset := ""
+		if count >= 2 {
+			wantOffset = media.Timestamp(epoch)
+		}
+		if absInt64(o.start-wantStart) > 11112 || o.tsOffset != wantOffset || o.duration != int64(time.Second) {
+			t.Fatalf("segment %d clock: %+v, want start %d and offset %s", count, o, wantStart, wantOffset)
+		}
+		count++
+		return nil
+	})
+	if err != nil || count != 4 {
+		t.Fatalf("rollover render produced %d Objects: %v", count, err)
+	}
+}
+
+func TestTransportAudioPrerollPrecedesFirstPicture(t *testing.T) {
+	path := streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=1",
+		"-f", "lavfi", "-i", "sine=sample_rate=48000:duration=1",
+		"-c:v", "libx264", "-bf", "0", "-c:a", "aac")
+	var records []media.SegmentRecord
+	err := (media.FFmpeg{}).Segment(t.Context(), media.SegmentRequest{
+		Input: path, Format: media.SegmentFormatMPEGTS, Duration: 2 * time.Second,
+		StreamIndices: []int{media.AllStreams}, Muxed: true, Directory: t.TempDir(),
+	}, func(r media.SegmentRecord) error {
+		records = append(records, r)
+		return nil
+	})
+	if err != nil || len(records) != 1 {
+		t.Fatalf("rendered %d Objects: %v", len(records), err)
+	}
+	// Check a reader's original timestamps before TAMSin unwraps the PES clock.
+	// Delayed AAC interleaving can make preroll appear one clock rollover late.
+	probe, err := (media.FFprobe{}).Probe(t.Context(), records[0].Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(probe.Streams) != 2 {
+		t.Fatalf("got %d streams, want video and audio", len(probe.Streams))
+	}
+	video, audio := probe.Streams[0].StartTime, probe.Streams[1].StartTime
+	if video != "0.000000" || audio != "-0.021333" {
+		t.Fatalf("video starts at %s and audio at %s, want zero and 1024 samples of AAC preroll at 48 kHz", video, audio)
 	}
 }
