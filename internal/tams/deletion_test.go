@@ -1,10 +1,12 @@
 package tams
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -215,6 +217,71 @@ func TestDeleteSegmentsMonitorsAcceptedRequest(t *testing.T) {
 	}
 }
 
+// TestDeleteSegmentsConfirmsByAbsenceWhenTheRequestCannotBeFollowed covers a
+// 202 whose deletion request TAMSin will not follow: no Location, or one that
+// points off the configured API. Credentials go nowhere new, and the Segment's
+// absence decides the outcome. A request that ends in error is likewise
+// accepted once the Segment has gone.
+func TestDeleteSegmentsConfirmsByAbsenceWhenTheRequestCannotBeFollowed(t *testing.T) {
+	t.Parallel()
+	const (
+		flowID    = "00000000-0000-4000-8000-000000000001"
+		objectID  = "00000000-0000-4000-8000-000000000002"
+		timerange = "[0:0_1:0)"
+	)
+	for _, testCase := range []struct {
+		name     string
+		location string
+		body     string
+		warning  string
+	}{
+		{name: "missing location", body: `{}`, warning: "without a Location header"},
+		{name: "malformed location", location: "https://%zz", body: `{}`, warning: "cannot be followed"},
+		{name: "cross-origin location", location: "https://attacker.example/request", body: `{}`, warning: "cannot be followed"},
+		{name: "outside API path", location: "/outside/request", body: `{}`, warning: "cannot be followed"},
+		{name: "error status with the segment gone", location: "/v8.1/flow-delete-requests/request", body: `{"id":"request","flow_id":"` + flowID + `","timerange_to_delete":"[0:0_1:0)","delete_flow":false,"status":"error","error":{"summary":"storage failed"}}`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			var followed atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				switch {
+				case request.Method == http.MethodDelete:
+					if testCase.location != "" {
+						writer.Header().Set("Location", testCase.location)
+					}
+					writer.WriteHeader(http.StatusAccepted)
+					_, _ = io.WriteString(writer, testCase.body)
+				case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/segments"):
+					_, _ = io.WriteString(writer, `[]`)
+				default:
+					followed.Add(1)
+					http.Error(writer, "unexpected request", http.StatusBadRequest)
+				}
+			}))
+			defer server.Close()
+			var logged bytes.Buffer
+			client, err := New(Config{Endpoint: server.URL + "/v8.1", Timeout: time.Second,
+				Logger: slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))})
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.deletePollInterval = time.Millisecond
+			if err := client.DeleteSegments(context.Background(), flowID, SegmentDeleteOptions{
+				Timerange: timerange, ObjectID: objectID,
+			}); err != nil {
+				t.Fatalf("DeleteSegments() = %v, want success through absence", err)
+			}
+			if followed.Load() != 0 {
+				t.Fatal("an unusable Location was followed")
+			}
+			if testCase.warning != "" && !strings.Contains(logged.String(), testCase.warning) {
+				t.Fatalf("warning %q lacks %q", logged.String(), testCase.warning)
+			}
+		})
+	}
+}
+
 func TestDeleteSegmentsRejectsUntrustworthyAcceptedRequests(t *testing.T) {
 	t.Parallel()
 	const (
@@ -228,20 +295,21 @@ func TestDeleteSegmentsRejectsUntrustworthyAcceptedRequests(t *testing.T) {
 		body     string
 		want     string
 	}{
-		{name: "missing location", body: `{}`, want: "without a Location"},
-		{name: "malformed location", location: "https://%zz", body: `{}`, want: "not a valid URL"},
-		{name: "cross-origin location", location: "https://attacker.example/request", body: `{}`, want: "not the configured endpoint"},
-		{name: "outside API path", location: "/outside/request", body: `{}`, want: "outside the configured API path"},
 		{name: "missing request ID", location: "/v8.1/flow-delete-requests/request", body: `{"flow_id":"` + flowID + `","timerange_to_delete":"[0:0_1:0)","delete_flow":false,"status":"done"}`, want: "has no ID"},
 		{name: "wrong flow", location: "/v8.1/flow-delete-requests/request", body: `{"id":"request","flow_id":"wrong","timerange_to_delete":"[0:0_1:0)","delete_flow":false,"status":"done"}`, want: "targets an unexpected flow"},
 		{name: "wrong timerange", location: "/v8.1/flow-delete-requests/request", body: `{"id":"request","flow_id":"` + flowID + `","timerange_to_delete":"[1:0_2:0)","delete_flow":false,"status":"done"}`, want: "targets an unexpected timerange"},
 		{name: "deletes flow", location: "/v8.1/flow-delete-requests/request", body: `{"id":"request","flow_id":"` + flowID + `","timerange_to_delete":"[0:0_1:0)","delete_flow":true,"status":"done"}`, want: "unexpectedly deletes"},
-		{name: "error status", location: "/v8.1/flow-delete-requests/request", body: `{"id":"request","flow_id":"` + flowID + `","timerange_to_delete":"[0:0_1:0)","delete_flow":false,"status":"error","error":{"summary":"storage failed"}}`, want: "request failed"},
+		{name: "error status while the segment remains", location: "/v8.1/flow-delete-requests/request", body: `{"id":"request","flow_id":"` + flowID + `","timerange_to_delete":"[0:0_1:0)","delete_flow":false,"status":"error","error":{"summary":"storage failed"}}`, want: "request failed"},
 		{name: "unknown status", location: "/v8.1/flow-delete-requests/request", body: `{"id":"request","flow_id":"` + flowID + `","timerange_to_delete":"[0:0_1:0)","delete_flow":false,"status":"mystery"}`, want: "unknown status"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/segments") {
+					// The Segment is still there, so absence cannot excuse the request.
+					_ = json.NewEncoder(writer).Encode([]Segment{{ObjectID: objectID, Timerange: timerange}})
+					return
+				}
 				if request.Method != http.MethodDelete {
 					t.Errorf("unexpected request followed deletion Location: %s", request.URL)
 					http.Error(writer, "unexpected request", http.StatusBadRequest)
@@ -386,15 +454,24 @@ func TestDeleteSegmentsTimesOutWhileSegmentRemains(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL, Timeout: 30 * time.Millisecond})
+	// The deletion deadline, not the per-request metadata timeout, bounds
+	// the wait for absence.
+	client, err := New(Config{Endpoint: server.URL, Timeout: time.Second, DeletionTimeout: 30 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
 	client.deletePollInterval = time.Millisecond
+	started := time.Now()
 	err = client.DeleteSegments(context.Background(), flowID, SegmentDeleteOptions{
 		Timerange: timerange, ObjectID: objectID,
 	})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("DeleteSegments() error = %v, want deadline exceeded", err)
+	}
+	if time.Since(started) > 500*time.Millisecond {
+		t.Fatal("the deletion deadline was not applied")
+	}
+	if client.DeletionTimeout() != 30*time.Millisecond {
+		t.Fatalf("DeletionTimeout() = %v", client.DeletionTimeout())
 	}
 }

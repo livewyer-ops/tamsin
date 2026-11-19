@@ -2,6 +2,7 @@ package tams
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"math/rand/v2"
 	"net/http"
@@ -22,6 +24,7 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/auth"
 	"github.com/livewyer-ops/tamsin/internal/netio"
 	"github.com/livewyer-ops/tamsin/internal/observability"
+	"github.com/livewyer-ops/tamsin/internal/tamstime"
 )
 
 const (
@@ -51,7 +54,19 @@ type Config struct {
 	Retries             int
 	UserAgent           string
 	Observability       *observability.Run
+	// DeletionTimeout bounds one Segment deletion end to end: the DELETE, the
+	// service's deletion request when it answers 202, and confirmation that
+	// the Segment is gone. Zero means DefaultDeletionTimeout.
+	DeletionTimeout time.Duration
+	// Logger receives operational warnings, such as a deletion request that
+	// cannot be monitored. Nil discards them.
+	Logger *slog.Logger
 }
+
+// DefaultDeletionTimeout is how long a Segment deletion may take when the
+// caller sets no DeletionTimeout. Deletion is asynchronous on the service side
+// and confirmed by polling, so it needs far longer than a metadata request.
+const DefaultDeletionTimeout = 5 * time.Minute
 
 // RequestTimeoutError reports a request-level deadline without confusing it
 // with cancellation of the caller's operation. The URL is redacted when the
@@ -72,6 +87,8 @@ type Client struct {
 	timeout             time.Duration
 	transferTimeout     time.Duration
 	transferIdleTimeout time.Duration
+	deletionTimeout     time.Duration
+	logger              *slog.Logger
 	base                *url.URL
 	http                *http.Client
 	external            *http.Client
@@ -116,6 +133,8 @@ func New(config Config) (*Client, error) {
 		timeout:             config.Timeout,
 		transferTimeout:     config.TransferTimeout,
 		transferIdleTimeout: config.TransferIdleTimeout,
+		deletionTimeout:     cmp.Or(config.DeletionTimeout, DefaultDeletionTimeout),
+		logger:              cmp.Or(config.Logger, slog.New(slog.DiscardHandler)),
 		base:                base,
 		http: &http.Client{
 			Transport: config.Transport, CheckRedirect: auth.RejectRedirect,
@@ -171,6 +190,31 @@ func (c *Client) PutFlow(ctx context.Context, flowID string, flow Flow) (Flow, e
 	return result, nil
 }
 
+func (c *Client) Source(ctx context.Context, sourceID string) (Source, error) {
+	var result Source
+	if err := c.doJSON(ctx, http.MethodGet, "sources/"+escapeSegment(sourceID), nil, &result, http.StatusOK); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// PutSourceLabel, PutSourceDescription and PutSourceTag write the Source
+// properties the API exposes as sub-resources. Each body is a JSON string and
+// success is 204.
+func (c *Client) PutSourceLabel(ctx context.Context, sourceID, label string) error {
+	return c.doJSON(ctx, http.MethodPut, "sources/"+escapeSegment(sourceID)+"/label", label, nil, http.StatusNoContent)
+}
+
+func (c *Client) PutSourceDescription(ctx context.Context, sourceID, description string) error {
+	return c.doJSON(ctx, http.MethodPut, "sources/"+escapeSegment(sourceID)+"/description", description, nil, http.StatusNoContent)
+}
+
+// PutSourceTag writes one Source tag. A tag value is a string or a list of
+// strings, so it is sent as the JSON value it is.
+func (c *Client) PutSourceTag(ctx context.Context, sourceID, name string, value any) error {
+	return c.doJSON(ctx, http.MethodPut, "sources/"+escapeSegment(sourceID)+"/tags/"+escapeSegment(name), value, nil, http.StatusNoContent)
+}
+
 func (c *Client) AllocateStorage(ctx context.Context, flowID string, request StorageRequest) (StorageResponse, error) {
 	var result StorageResponse
 	if err := c.doJSON(ctx, http.MethodPost, "flows/"+escapeSegment(flowID)+"/storage", request, &result, http.StatusCreated); err != nil {
@@ -192,32 +236,43 @@ func (c *Client) RegisterSegments(ctx context.Context, flowID string, requests [
 	}
 	var failure BulkSegmentFailure
 	path := "flows/" + escapeSegment(flowID) + "/segments"
-	if err := c.doJSON(ctx, http.MethodPost, path, requests, &failure, http.StatusCreated, http.StatusOK); err != nil {
+	response, err := c.doJSONResponse(ctx, http.MethodPost, path, requests, &failure, http.StatusCreated, http.StatusOK)
+	if err != nil {
 		return err
 	}
-	if len(failure.FailedSegments) > 0 {
-		registered := make([]SegmentRequest, 0, max(len(requests)-len(failure.FailedSegments), 0))
-		for _, request := range requests {
-			if !failedRegistration(failure.FailedSegments, request) {
-				registered = append(registered, request)
+	if response.StatusCode == http.StatusCreated {
+		return nil
+	}
+	if len(failure.FailedSegments) == 0 {
+		return errors.New("partial Segment registration response omitted failed Segments")
+	}
+	rejected := make([]bool, len(requests))
+	for _, failed := range failure.FailedSegments {
+		matched := false
+		for i, request := range requests {
+			if failed.ObjectID == "" || failed.ObjectID != request.ObjectID ||
+				(failed.Timerange != "" && !tamstime.EqualTimeRanges(failed.Timerange, request.Timerange)) {
+				continue
 			}
+			if matched {
+				return errors.New("partial Segment registration did not identify a unique requested Segment")
+			}
+			if rejected[i] {
+				return errors.New("partial Segment registration repeated a failed Segment")
+			}
+			matched, rejected[i] = true, true
 		}
-		return &PartialSegmentRegistrationError{
-			FailedSegments:     append([]FailedSegment(nil), failure.FailedSegments...),
-			RegisteredSegments: registered,
-			Total:              len(requests),
-		}
-	}
-	return nil
-}
-
-func failedRegistration(failures []FailedSegment, request SegmentRequest) bool {
-	for _, failed := range failures {
-		if failed.ObjectID == request.ObjectID && (failed.Timerange == "" || failed.Timerange == request.Timerange) {
-			return true
+		if !matched {
+			return errors.New("partial Segment registration named an unrequested Segment")
 		}
 	}
-	return false
+	var registered []SegmentRequest
+	for i, request := range requests {
+		if !rejected[i] {
+			registered = append(registered, request)
+		}
+	}
+	return &PartialSegmentRegistrationError{FailedSegments: failure.FailedSegments, RegisteredSegments: registered, Total: len(requests)}
 }
 
 // transferContext applies the optional transfer deadline. Without one the
@@ -234,6 +289,9 @@ func (c *Client) UploadFile(ctx context.Context, destination PresignedURL, filen
 	var receipt UploadReceipt
 	err := c.presignedTransfer(ctx, destination, "upload", observability.OperationObjectUpload,
 		func(ctx context.Context, client *http.Client, attempt int) (*transferRetry, error) {
+			if destination.Body != nil {
+				return nil, errors.New("upload instruction carries a request body, which cannot stand in for Media Object bytes")
+			}
 			file, err := os.Open(filename)
 			if err != nil {
 				return nil, fmt.Errorf("open upload file: %w", err)
@@ -254,11 +312,14 @@ func (c *Client) UploadFile(ctx context.Context, destination PresignedURL, filen
 			}
 			request.ContentLength = info.Size()
 			request.Header.Set("User-Agent", c.userAgent)
+			// No Content-Type is invented here: the caller supplies the Flow's
+			// container when the service gave no instruction, and a registered
+			// Object's type must match that container.
 			for name, value := range destination.Headers {
 				request.Header.Set(name, value)
 			}
-			if request.Header.Get("Content-Type") == "" {
-				request.Header.Set("Content-Type", "application/octet-stream")
+			if digest := requestContentDigest(destination); digest != "" {
+				request.Header.Set("Content-Digest", digest)
 			}
 			if err := c.ensureURLAttemptCanStart(destination, "upload"); err != nil {
 				watch.Stop()
@@ -302,18 +363,45 @@ func (c *Client) UploadFile(ctx context.Context, destination PresignedURL, filen
 	return receipt, err
 }
 
+// requestContentDigest is the RFC 9530 Content-Digest sent with an upload
+// whose bytes the caller has already hashed. Only an unsigned URL gets one: a
+// presigned URL's signature may cover the request headers, and a provider
+// that did not sign for a digest will not verify one. A digest header the
+// service itself instructed is left as it is.
+func requestContentDigest(destination PresignedURL) string {
+	if destination.Presigned || destination.ContentSHA256 == "" {
+		return ""
+	}
+	for name := range destination.Headers {
+		switch strings.ToLower(name) {
+		case "content-digest", "repr-digest", "digest", "x-amz-checksum-sha256":
+			return ""
+		}
+	}
+	raw, err := hex.DecodeString(destination.ContentSHA256)
+	if err != nil || len(raw) != sha256.Size {
+		return ""
+	}
+	return "sha-256=:" + base64.StdEncoding.EncodeToString(raw) + ":"
+}
+
 // uploadStorageSHA256 extracts only checksums whose semantics are SHA-256 over
-// the uploaded representation. Only response headers are evidence that
-// storage computed or accepted a checksum; a header TAMSin sent in the request
-// cannot prove that a backend understood it. ETag is deliberately excluded:
-// it is not reliably a content digest.
+// the uploaded representation: S3's checksum header and RFC 9530's
+// Repr-Digest, which describes the representation the request selected, plus
+// the older Digest header with the same meaning. Content-Digest is not
+// evidence: RFC 9530 defines it over the content of the message that carries
+// it, so on a response it describes the response body, and a gateway that
+// adds one would produce false integrity failures. Only response headers are
+// evidence that storage computed or accepted a checksum; a header TAMSin sent
+// in the request cannot prove that a backend understood it. ETag is
+// deliberately excluded: it is not reliably a content digest.
 func uploadStorageSHA256(response http.Header) (string, error) {
 	for _, candidate := range []struct {
 		name       string
 		structured bool
 	}{
 		{name: "X-Amz-Checksum-Sha256"},
-		{name: "Content-Digest", structured: true},
+		{name: "Repr-Digest", structured: true},
 		{name: "Digest", structured: true},
 	} {
 		for _, value := range response.Values(candidate.name) {
@@ -427,6 +515,10 @@ func (c *Client) DownloadDigest(ctx context.Context, source PresignedURL, expect
 				}
 				return &transferRetry{retryAfter: response.Header.Get("Retry-After"), statusCode: response.StatusCode}, nil
 			}
+			if response.StatusCode != http.StatusOK || response.Header.Get("Content-Range") != "" {
+				_ = body.Close()
+				return nil, fmt.Errorf("storage did not return a complete Object representation (HTTP %d)", response.StatusCode)
+			}
 			if response.ContentLength > expectedBytes {
 				_ = body.Close()
 				return nil, &ObjectSizeError{
@@ -473,8 +565,12 @@ func (c *Client) presignedTransfer(ctx context.Context, presigned PresignedURL, 
 	if err != nil {
 		return fmt.Errorf("TAMS %s URL is not valid", operation)
 	}
+	// API credentials belong only on unsigned URLs served from the API origin,
+	// the same-origin rule the specification points at. A presigned URL carries
+	// its own authorisation, and a bearer header or access_token query added to
+	// it can invalidate the signature it was issued with.
 	client := c.external
-	if auth.Origin(parsed) == c.baseOrigin {
+	if !presigned.Presigned && auth.Origin(parsed) == c.baseOrigin {
 		client = c.http
 	}
 	for number := range c.retries + 1 {
@@ -498,8 +594,13 @@ func (c *Client) ensureURLAttemptCanStart(presigned PresignedURL, operation stri
 	if presigned.StartBefore.IsZero() || c.now().Before(presigned.StartBefore) {
 		return nil
 	}
-	return fmt.Errorf("presigned %s URL expired before another request attempt could start", operation)
+	return fmt.Errorf("%w: presigned %s URL expired before another request attempt could start", ErrPresignedURLExpired, operation)
 }
+
+// ErrPresignedURLExpired marks a transfer that could not be retried because
+// the URL's start window had closed; a caller holding the Segment can list it
+// again for a fresh URL.
+var ErrPresignedURLExpired = errors.New("presigned URL expired")
 
 // sleepPresignedBackoff declines a retry immediately when its required wait
 // would consume the rest of the URL's start window. Waiting only to discover
@@ -512,7 +613,7 @@ func (c *Client) sleepPresignedBackoff(ctx context.Context, attempt, maxAttempts
 	}
 	delay := backoffDelay(attempt, retryAfter)
 	if !presigned.StartBefore.IsZero() && !c.now().Add(delay).Before(presigned.StartBefore) {
-		return fmt.Errorf("presigned %s URL expired before another request attempt could start", operation)
+		return fmt.Errorf("%w: presigned %s URL expired before another request attempt could start", ErrPresignedURLExpired, operation)
 	}
 	c.observability.Retry(observedOperation, attempt+2, maxAttempts, statusCode, cause, delay)
 	return sleepDuration(ctx, delay)
@@ -534,11 +635,6 @@ type jsonResponse struct {
 // decoded body, while asynchronous operations also need the exact status and
 // Location response header.
 func (c *Client) doJSONResponse(ctx context.Context, method, requestPath string, input, output any, expected ...int) (jsonResponse, error) {
-	if c.timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.timeout)
-		defer cancel()
-	}
 	var body []byte
 	var err error
 	if input != nil {
@@ -560,7 +656,15 @@ func (c *Client) doJSONResponse(ctx context.Context, method, requestPath string,
 		attempts += c.retries
 	}
 	for attempt := range attempts {
-		request, requestErr := http.NewRequestWithContext(ctx, method, requestURL.String(), bytes.NewReader(body))
+		// The timeout bounds one attempt, not the whole loop: a slow first
+		// response must not consume the time a retry would have had.
+		attemptCtx := ctx
+		if c.timeout > 0 {
+			var cancel context.CancelFunc
+			attemptCtx, cancel = context.WithTimeout(ctx, c.timeout)
+			defer cancel()
+		}
+		request, requestErr := http.NewRequestWithContext(attemptCtx, method, requestURL.String(), bytes.NewReader(body))
 		if requestErr != nil {
 			return jsonResponse{}, fmt.Errorf("create %s request for %s", method, auth.RedactURL(requestURL.String()))
 		}
@@ -573,7 +677,7 @@ func (c *Client) doJSONResponse(ctx context.Context, method, requestPath string,
 		if requestErr != nil {
 			result := jsonResponse{AmbiguousMutation: method == http.MethodDelete}
 			if attempt+1 == attempts {
-				return result, requestError(ctx, method, requestURL.String(), requestErr)
+				return result, requestError(attemptCtx, method, requestURL.String(), requestErr)
 			}
 			if err := ctx.Err(); err != nil {
 				return result, err

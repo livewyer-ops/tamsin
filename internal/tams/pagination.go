@@ -25,6 +25,10 @@ type SegmentListOptions struct {
 	// it off: deciding what to resume needs an Object identifier and a
 	// timerange, nothing more.
 	IncludeDownloadURLs bool
+	// IncludeObjectTimerange asks for each Segment's object_timerange, which
+	// TAMS 8.2 omits unless requested. Resume adoption compares it against the
+	// timing Tamsin would have registered.
+	IncludeObjectTimerange bool
 }
 
 // ListSegments lists a Flow's Segments, following the paging cursor to
@@ -42,6 +46,9 @@ func (c *Client) ListSegments(ctx context.Context, flowID string, options Segmen
 	}
 	if options.Timerange != "" {
 		query.Set("timerange", options.Timerange)
+	}
+	if options.IncludeObjectTimerange {
+		query.Set("include_object_timerange", "true")
 	}
 	if options.IncludeDownloadURLs {
 		// Omit the filter: a service may only offer non-presigned URLs.

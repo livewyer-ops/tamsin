@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Flow is intentionally open because TAMS Flow metadata is type-dependent and
@@ -61,9 +63,19 @@ type UploadReceipt struct {
 // PresignedURL accepts both the upstream v8.1 "content-type" member and the
 // newer TAMOSS headers object without losing provider-required headers.
 type PresignedURL struct {
-	URL       string            `json:"url"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	Presigned bool              `json:"presigned,omitempty"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers,omitempty"`
+	// Body is an explicit request body instruction. TAMS allows one on any
+	// HTTP request it describes, but a Media Object upload cannot honour it:
+	// the body has to be the media. UploadFile refuses such an instruction
+	// rather than silently sending either the media or the text.
+	Body      *string `json:"body,omitempty"`
+	Presigned bool    `json:"presigned,omitempty"`
+	// ContentSHA256 is the hex SHA-256 the caller has already computed over
+	// the body it is about to upload. An unsigned upload sends it as an RFC
+	// 9530 Content-Digest so storage that verifies digests can refuse a
+	// corrupted transfer. It is not part of TAMS JSON.
+	ContentSHA256 string `json:"-"`
 	// StartBefore is the latest time another HTTP attempt may begin. It is
 	// populated by the ingest scheduler from min_presigned_url_timeout after a
 	// URL-producing response arrives and is deliberately not part of TAMS JSON.
@@ -77,20 +89,28 @@ func (p *PresignedURL) UnmarshalJSON(data []byte) error {
 		URL         string            `json:"url"`
 		Headers     map[string]string `json:"headers"`
 		ContentType string            `json:"content-type"`
+		Body        *string           `json:"body"`
 		Presigned   bool              `json:"presigned"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	p.URL = raw.URL
+	p.Body = raw.Body
 	p.Presigned = raw.Presigned
+	p.ContentSHA256 = ""
 	p.StartBefore = time.Time{}
 	var err error
 	p.Headers, err = normalizePresignedHeaders(raw.Headers)
 	if err != nil {
 		return err
 	}
-	if _, exists := p.Headers["Content-Type"]; raw.ContentType != "" && !exists {
+	// The two spellings describe one header. Agreeing values are fine; a
+	// disagreement is an instruction the client cannot follow either way.
+	if raw.ContentType != "" {
+		if existing, exists := p.Headers["Content-Type"]; exists && existing != raw.ContentType {
+			return errors.New("presigned URL carries conflicting content-type instructions")
+		}
 		p.Headers["Content-Type"] = raw.ContentType
 	}
 	return nil
@@ -145,6 +165,29 @@ type FailedSegment struct {
 	Error     json.RawMessage `json:"error,omitempty"`
 }
 
+// UnmarshalJSON distinguishes an omitted timerange from an explicit null,
+// which cannot identify a Segment.
+func (s *FailedSegment) UnmarshalJSON(data []byte) error {
+	type entry FailedSegment
+	var parsed struct {
+		entry
+		Timerange json.RawMessage `json:"timerange"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	if parsed.Timerange != nil {
+		if err := json.Unmarshal(parsed.Timerange, &parsed.entry.Timerange); err != nil {
+			return err
+		}
+		if parsed.entry.Timerange == "" {
+			return errors.New("partial registration returned an empty timerange")
+		}
+	}
+	*s = FailedSegment(parsed.entry)
+	return nil
+}
+
 type BulkSegmentFailure struct {
 	FailedSegments []FailedSegment `json:"failed_segments"`
 }
@@ -177,9 +220,16 @@ type Segment struct {
 	Timerange       string         `json:"timerange"`
 	ObjectTimerange string         `json:"object_timerange,omitempty"`
 	TSOffset        string         `json:"ts_offset,omitempty"`
+	LastDuration    string         `json:"last_duration,omitempty"`
+	KeyFrameCount   *int           `json:"key_frame_count,omitempty"`
 	GetURLs         []PresignedURL `json:"get_urls,omitempty"`
 	InitObject      *ObjectCore    `json:"init_object,omitempty"`
 }
+
+// Source is a TAMS Source as the service derives it from its Flows. Its
+// label, description and tags are written through sub-resources, so it is
+// read whole and written by parts.
+type Source map[string]any
 
 // ObjectCore is the object metadata nested under an 8.2 Segment for an
 // initialisation object. Extra storage metadata is retained without forcing
@@ -215,4 +265,20 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string {
 	return fmt.Sprintf("%s %s: %s", e.Method, e.URL, e.Status)
+}
+
+// CanonicalUUID accepts the spellings the uuid package understands (upper
+// case, braces, a urn:uuid: prefix, or no hyphens) and returns the lowercase
+// hyphenated form the TAMS schema requires. It also enforces the schema's
+// version and variant constraints, so an identifier is rejected here rather
+// than by the service after other resources were written.
+func CanonicalUUID(value string) (string, error) {
+	id, err := uuid.Parse(strings.TrimSpace(value))
+	if err != nil {
+		return "", err
+	}
+	if version := id.Version(); version < 1 || version > 5 || id.Variant() != uuid.RFC4122 {
+		return "", fmt.Errorf("%q is not a version 1-5 RFC 4122 UUID", value)
+	}
+	return id.String(), nil
 }
