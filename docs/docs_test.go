@@ -5,21 +5,25 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
 
 const repoRoot = ".."
 
-func markdownFiles(t *testing.T) []string {
+func markdownFiles(t *testing.T, root string) []string {
 	t.Helper()
 	var files []string
-	err := filepath.Walk(repoRoot, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() && (info.Name() == ".git" || info.Name() == ".cache" || info.Name() == ".tmp" || info.Name() == "dist" || info.Name() == "bin" || info.Name() == "testdata") {
+		if info.IsDir() && (info.Name() == ".git" || info.Name() == ".local" || info.Name() == ".cache" || info.Name() == ".tmp" || info.Name() == "dist" || info.Name() == "bin" || info.Name() == "testdata") {
 			return filepath.SkipDir
+		}
+		if filepath.Dir(path) == filepath.Clean(root) && (info.Name() == "AGENTS.md" || info.Name() == "CLAUDE.md") {
+			return nil
 		}
 		if !info.IsDir() && strings.HasSuffix(path, ".md") {
 			files = append(files, path)
@@ -30,6 +34,31 @@ func markdownFiles(t *testing.T) []string {
 		t.Fatal(err)
 	}
 	return files
+}
+
+func TestMarkdownFilesExcludePrivateGuidance(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	for _, name := range []string{
+		".github/PULL_REQUEST_TEMPLATE.md", "README.md", "docs/guide.md",
+		"AGENTS.md", "CLAUDE.md", ".local/notes.md", ".local/nested/README.md",
+	} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []string{
+		filepath.Join(root, ".github/PULL_REQUEST_TEMPLATE.md"),
+		filepath.Join(root, "README.md"),
+		filepath.Join(root, "docs/guide.md"),
+	}
+	if got := markdownFiles(t, root); !slices.Equal(got, want) {
+		t.Fatalf("documentation files = %v, want %v", got, want)
+	}
 }
 
 func repositoryFile(t *testing.T, name string) string {
@@ -60,7 +89,7 @@ func headingSlugs(body string) map[string]bool {
 func TestDocumentationLinksResolve(t *testing.T) {
 	t.Parallel()
 	links := regexp.MustCompile(`\[[^\]]*\]\(([^)]+)\)`)
-	for _, file := range markdownFiles(t) {
+	for _, file := range markdownFiles(t, repoRoot) {
 		body, err := os.ReadFile(file)
 		if err != nil {
 			t.Fatal(err)
@@ -116,7 +145,7 @@ func TestDocumentedTAMSinFlagsExist(t *testing.T) {
 		"--update": true, "--cover": true, "--coverpkg": true,
 	}
 	flags := regexp.MustCompile(`--[a-z][a-z0-9-]+`)
-	for _, file := range markdownFiles(t) {
+	for _, file := range markdownFiles(t, repoRoot) {
 		body, err := os.ReadFile(file)
 		if err != nil {
 			t.Fatal(err)
@@ -166,13 +195,30 @@ func TestCompatibilityPageNamesPinnedTAMSRevisions(t *testing.T) {
 			pins["scripts/e2e-kind.sh"] = append(pins["scripts/e2e-kind.sh"], revision.FindAllString(line, -1)...)
 		}
 	}
+	pinned := make(map[string]bool)
 	for file, revisions := range pins {
 		if len(revisions) == 0 {
 			t.Fatalf("%s pins no TAMS revision", file)
 		}
-		for _, pinned := range revisions {
-			if !strings.Contains(page, pinned) {
-				t.Errorf("docs/compatibility.md does not name the TAMS revision %s pinned in %s", pinned, file)
+		for _, revision := range revisions {
+			pinned[revision] = true
+			if !strings.Contains(page, revision) {
+				t.Errorf("docs/compatibility.md does not name the TAMS revision %s pinned in %s", revision, file)
+			}
+		}
+	}
+	// A document may link to the upstream repository at a specific revision,
+	// as the operations guide does for an ADR. Such a link must name one of
+	// the pinned revisions, so that a pin change is not left half applied.
+	upstream := regexp.MustCompile(`bbc/tams/(?:blob/|tree/|raw/)?([0-9a-f]{40})`)
+	for _, file := range markdownFiles(t, repoRoot) {
+		body, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, match := range upstream.FindAllStringSubmatch(string(body), -1) {
+			if !pinned[match[1]] {
+				t.Errorf("%s links bbc/tams at %s, which is not a pinned TAMS revision", file, match[1])
 			}
 		}
 	}

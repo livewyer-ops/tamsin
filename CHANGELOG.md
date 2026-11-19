@@ -9,20 +9,95 @@ that API version, so `8.2.0-in1` is the first TAMSin release targeting TAMS
 8.2. A trailing `-rcM` marks the Mth release candidate for that version, for
 example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
 
-## Unreleased
+## [8.2.0-in3] - 2026-11-19
 
-- Build release images on FFmpeg runtime `5.1.9-bookworm-r3`, which refreshes
-  the Debian bookworm base. FFmpeg stays at 5.1.9.
-- Update Go module dependencies, including the AWS SDK for Go v2 1.47 with its
-  S3 GetObject deadlock fix.
-- Stop showing defaults for `--segment-duration`, `--segment-format` and
-  `--essence-storage` in help and the references: the required profile
-  supplies them, and an explicit value overrides it. Describe
-  `--progress plain` as the same as `auto`.
-- List only the values TAMSin emits in the events reference. The diagnostic
-  severities `debug`, `info` and `warning`, the cancellation reasons
-  `output_closed` and `internal`, the `uploaded` Object disposition and the
-  `media.failed` failure code were documented but never emitted.
+### Upgrading from 8.2.0-in2
+
+TAMSin now accepts MP4 and MPEG-TS as input and output. Convert other
+containers before ingest. The five named profiles retain their `@1` versions,
+durations and storage defaults. Catalogue policy is now `2`.
+
+Renderer epoch 5 renews generated Flow IDs for every profile. Generated Source
+IDs remain stable. Repeating an ingest can create new Flows and upload the
+media again. Finish interrupted jobs with the previous binary and settings
+if they must resume their original Flows. Use a fresh explicit Flow ID for a
+new render. Check the identities with an exact dry run before upgrading workers.
+
+### Media packaging and playback
+
+- Identify MP4 and MPEG-TS from their contents and MP4 brands across local,
+  HTTP, S3 and stdin inputs. Container overrides and custom FFmpeg arguments
+  must match the actual output.
+- Whole-file preservation retains ancillary tracks in the original bytes.
+  Rendering supports sparse MP4 `mov_text` subtitles and refuses tracks it
+  cannot carry. MPEG-TS codec checks also apply when the source-family
+  profile selects TS. See [supported codecs and containers](docs/profiles.md).
+- Measure Segment placement on the source timeline. Interior muxed cuts follow
+  the reference stream, including leading pictures in open GOPs. A mid-GOP
+  capture starts its video Flow at the first copied key frame. Source gaps
+  remain visible. Fixed-rate video rounded by a container is regularised to
+  its nominal period.
+- MP4 preserves AAC priming. Rendered MPEG-TS uses the Flow's 90 kHz clock
+  across Objects and 33-bit rollover. A muxed programme includes audio before
+  its first picture and after its last. Measured Segments carry
+  `key_frame_count` and `last_duration`.
+
+### Flow metadata and Sources
+
+- Supply per-track overrides with `--collected-flow-metadata` or
+  `ingest.collected_flow_metadata`. Staged and streamed ingests validate
+  overrides against the corresponding collection role.
+- TAMS 8.2 Flow Profiles may supply essence parameters the probe cannot
+  determine. Measured values must agree. Profiles requiring separate
+  initialisation Objects fail during planning.
+- Whole-file collection mappings carry the original MP4 track ID or MPEG-TS
+  PID. Rendered collections use positional mappings. Codec metadata covers
+  additional broadcast essences, distinguishes still and moving JPEG 2000,
+  and reports PCM and pixel depth from the available evidence.
+- Derived Sources receive missing labels, descriptions and TAMSin provenance.
+  Operator edits and additional fields returned by newer-minor stores survive
+  ingest. `--start` requires a canonical TAMS timestamp and accepted UUID
+  spellings are sent in canonical form.
+
+### Storage, verification and resume
+
+- Refuse overlapping Segments before upload. Adopt a Segment under another
+  Object ID only when its bytes and timing match. A conflicting Segment
+  reports `tams.segment_conflict`. A staged retry checks the input hash
+  before writes and every retry checks Segment timing.
+- Retry orphaned allocations with service-assigned IDs. Limit resume listing
+  to the affected span. Compare timeranges by value and track each Segment
+  separately when multiple Segments share one Object. Reconcile ambiguous
+  bulk registration against the store.
+- Follow storage-provided HTTP instructions and send presigned URLs as issued.
+  Unsigned uploads send `Content-Digest`. Verification accepts storage
+  checksum evidence about the representation and tries alternate download
+  URLs when necessary.
+- An expired URL can be refreshed. An unreadable Object or partial HTTP
+  response leaves an existing Segment in place. A confirmed byte mismatch
+  retracts the affected Segment. Failure recovery restores only Flows the
+  current input created or opened, even when two inputs share a Flow.
+  Recovery preserves active replication and concurrent metadata edits.
+- Segmented retries with `--verify none` emit one `object.result` for every
+  resumed Object, including when a retry also uploads missing Objects.
+- `--timeout` bounds each metadata request attempt. `--deletion-timeout`
+  bounds deletion and detached cleanup, with a five-minute default. Ambiguous
+  deletion is checked against the store. When a service advertises a longer
+  presigned URL lifetime than Object lifetime, scheduling uses the shorter
+  Object lifetime and doctor reports the discrepancy.
+
+### CLI and release tooling
+
+- A closed event or log pipe cancels the run and allows cleanup to finish.
+  OAuth credentials can refresh during cleanup after an interrupt.
+- The first-ingest tutorial, command help and events reference describe
+  profile-supplied defaults, progress modes and the values TAMSin emits. The
+  settings reference lists flags, YAML keys, environment variables and defaults together.
+- Build with Go 1.27.4, updated Go analysis tools and AWS SDK for Go v2 1.47.
+  The release image pins the refreshed Debian FFmpeg 5.1.9 runtime
+  `5.1.9-bookworm-r3`. QEMU and Buildx setup actions are updated.
+- Release tags must name a commit on `main`. Candidate and stable tags use
+  the dated release notes for their base version.
 
 ## [8.2.0-in2] - 2026-09-08
 

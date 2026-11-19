@@ -10,6 +10,14 @@ inputs; and documented mutation, verification, rollback and redaction
 boundaries. A release targeting a new TAMS API version may change them; the
 [changelog](../CHANGELOG.md) lists every break.
 
+A deliberate renderer-epoch renewal is an exception to generated-identity
+stability within that line. It allows a corrected media interpretation and its
+associated metadata changes to create new Flows without rewriting existing
+ones. Each renewal and its upgrade consequences must be stated in the
+changelog. Repeating an earlier ingest after an affected upgrade can create
+new Flows rather than resume the old ones. An explicit old Flow ID must not be
+used to force incompatible media back into the earlier timeline.
+
 Compatible releases may add optional JSON fields, event types, settings or
 profiles. Consumers must ignore unknown fields and event types within a
 supported protocol major. Changing the meaning of an existing value requires
@@ -18,11 +26,27 @@ Human receipts, help, diagnostic prose and progress frequency are not parser
 interfaces. The executable and documented wire formats are the product
 interfaces.
 
+## Media policy exception
+
+Catalogue policy `2` narrows accepted inputs and generated outputs to MP4 and
+MPEG-TS. This is an explicit compatibility exception within the current TAMS
+release line: existing profile names remain at `@1`, with their durations and
+storage settings unchanged. Excluded formats require conversion before ingest.
+Renders that previously dropped subtitle or data tracks now fail; use
+`preserve` for accepted containers when their original bytes must be retained.
+
+Renderer epoch 5 creates new generated Flow IDs for every profile. Generated
+Source IDs remain stable. An explicitly named Flow carrying earlier TAMSin
+render provenance needs a fresh ID for the corrected timeline. BBC pins, the TAMS
+8.1 floor and public report/event schemas are unchanged. The expanded MP4/TS
+live matrix on the pinned runtime must pass against both TAMS versions before
+release; synthetic checks do not qualify off-air subtitle or data carriage.
+
 ## Runtime
 
 | Component | Supported |
 | --- | --- |
-| Go toolchain for source builds | 1.26.8, as pinned in `go.mod` |
+| Go toolchain for source builds | 1.27.4, as pinned in `go.mod` |
 | FFprobe and FFmpeg | 5.1 or newer, from the same maintained build |
 | Release binaries | linux/amd64, linux/arm64, darwin/amd64 and darwin/arm64, without CGO |
 | Container image | linux/amd64 and linux/arm64 on `tamsin-ffmpeg-runtime:5.1.9-bookworm-r3`, a Debian bookworm base with FFmpeg 5.1.9 |
@@ -42,14 +66,17 @@ The [embedded BBC schemas](../internal/tamsschema/schemas) validate generated
 Flows. The [live test script](../scripts/e2e-kind.sh) pins both BBC TAMS and
 TAMOSS revisions and provisions each through TAMOSS `local-kind`. Both versions
 must pass before release. It tests local, directory, manifest, HTTP, S3 and
-stdin ingest, resume, storage verification, TLS and authentication. TAMS 8.2
+stdin ingest, MP4 and MPEG-TS rendering, resume, storage verification, TLS and authentication. TAMS 8.2
 also exercises Profile assignment. Verification-failure retraction and 202
 deletion-request monitoring are covered by HTTP-level tests, not induced
 against the live store.
 
 TAMSin uses service/storage discovery, Flow reads and writes, Segment listing,
-registration and retraction, Object allocation/readback, and assigned Profile
-reads. Changes to the upstream pins require reviewing the affected BBC
+registration and retraction, Object allocation/readback, assigned Profile
+reads, and Source reads with label, description and tag writes (AppNote 0007:
+a Source Tamsin's Flow derives receives the Flow's label and description when
+it has none, and Tamsin's `_tamsin_` provenance tags; operator edits are
+kept). Changes to the upstream pins require reviewing the affected BBC
 specification, application notes and ADRs, updating focused tests and passing
 both live jobs.
 
@@ -64,10 +91,16 @@ valid committed prefix. Staged input receives whole-input media preflight.
 A TAMS 8.2 Profile must match the generated technical metadata by strict JSON
 structure and exact numeric value. Integers larger than 2^53 retain precision;
 strings never equal numbers, array order matters, and object key order does
-not. Missing, null and empty fields remain distinct. Omitted optional fields
-stay omitted: a Profile can fail if it omits a field TAMSin generates, even
-when a schema default would give it the same meaning. TAMSin does not rewrite
-metadata to force a match.
+not. Missing, null and empty fields remain distinct. `format`, `codec`,
+`container`, `segment_duration` and `container_mapping` must agree in both
+directions. Inside `essence_parameters` the Profile is the fuller description:
+a parameter the Profile declares and the probe could not establish (component
+type, chroma subsampling, codec profile and level) is adopted from the Profile,
+while every parameter TAMSin did establish must be declared by the Profile
+with the same value. TAMSin does not rewrite generated metadata to force a
+match. A Profile with `essence_parameters.init_segments: true` requires separate
+initialisation Objects. TAMSin rejects that assignment during planning because
+its media Objects are self-contained.
 
 Profile-backed Flows are written in compact `profile_id` form. `avg_bit_rate`
 is the Profile's encoding target, not measured output; `max_bit_rate` remains
@@ -88,15 +121,36 @@ identity instead, while the remote revision must still be pinned.
 
 Switching between streaming and staging changes generated IDs. Explicit Flow
 reuse with a different input revision or incompatible technical metadata fails
-before mutation. Input revision and checksum tags cannot be overridden.
+before mutation, for staged and streamed input alike: a Flow that already
+declares `format`, `codec`, `container`, `essence_parameters` or
+`segment_duration` is never rewritten to describe other media. Input revision
+and checksum tags cannot be overridden.
 Segment timeranges do not overlap. TAMS 8.2 initial Object identity is
-supported, but TAMSin does not manufacture fragmented-MP4 initialisation media.
+supported, but TAMSin does not manufacture fragmented-MP4 initialisation media. A Profile requiring initialisation Objects fails preflight.
 
 TAMSin does not infer editorial purpose or source lineage generation.
-`--flow-metadata` supplies workflow-owned metadata but cannot change identity,
-format or collection ownership. Resume preserves operator labels, descriptions
-and non-`_tamsin_` tags. See [profiles](profiles.md) for media limits and
+`--flow-metadata` supplies workflow-owned metadata but cannot directly set
+identity fields, format or collection ownership. Technical overrides do
+participate in generated identities for streamed inputs; see
+[generated identity and resume](concepts.md#generated-identity-and-resume).
+Resume preserves operator labels and descriptions unless explicitly overridden,
+along with non-`_tamsin_` tags and additional stored essence parameters.
+See [profiles](profiles.md) for media limits and
 [operations](operations.md) for verification and recovery.
+
+## Known deviations
+
+- **Time-shifted re-ingest keeps the Source ID.** AppNote 0017 says two Flows
+  that are technically identical but time-shifted are different Flows of
+  different Sources. TAMSin derives a generated Source ID from the input's
+  content identity alone, so `--start` changes the Flow ID but not the Source
+  ID. Changing that changes every generated Source ID, which this policy
+  reserves for the next TAMS API version; until then supply `--source-id` when
+  a time-shifted copy must be its own Source.
+- **Redirects on media URLs are refused.** A storage URL that answers with a
+  redirect is not followed, because the redirect target was not what the
+  store issued and a signed URL's credentials must not travel; the store
+  should issue the final URL.
 
 Before updating production, read the [changelog](../CHANGELOG.md), pin the
 binary or image digest, run `tamsin doctor --format json --online`, and test an

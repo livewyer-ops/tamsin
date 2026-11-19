@@ -29,8 +29,8 @@ before ingest because one override cannot describe each output essence
 truthfully.
 
 ```sh
-tamsin --profile preserve -i master.mxf -o https://tams.example.com
-tamsin --profile essence-segments --segment-duration 5s -i edit.mov -o https://tams.example.com
+tamsin --profile preserve -i master.mp4 -o https://tams.example.com
+tamsin --profile essence-segments --segment-duration 5s -i edit.mp4 -o https://tams.example.com
 ```
 
 `-o` is the short form of `--endpoint`. The first command reports
@@ -38,9 +38,9 @@ tamsin --profile essence-segments --segment-duration 5s -i edit.mov -o https://t
 a profile's own value does not make it custom. Profile and version appear in
 both JSON terminal events and human receipts, including dry runs and failures.
 
-Named profiles and the catalogue policy have separate versions. `custom@1`
-versions the identity recipe for overrides, not an equivalence between arbitrary
-FFmpeg treatments.
+Named profiles and the catalogue policy have [separate versions](compatibility.md#media-policy-exception).
+`custom@1` versions the identity recipe for overrides, not an equivalence
+between arbitrary FFmpeg treatments.
 
 ## TAMS Flow Profiles
 
@@ -85,15 +85,38 @@ from which to prove that demultiplexing is unnecessary.
 
 ## Supported media and packaging
 
-TAMSin supports these combinations:
+TAMSin accepts **MP4 and MPEG-TS only**, including audio-only MP4. It identifies
+containers from content and ISO BMFF brands, not filenames. Renaming a MOV,
+MXF, Matroska, WebM, WAV, raw stream or image does not make it supported.
+QuickTime, 3GP/3G2 and image brands are refused even though FFmpeg shares their
+demuxer with MP4. Playlists, manifests and nested resources remain refused.
+Metadata overrides and custom FFmpeg arguments cannot bypass this boundary.
 
 | Output policy | Containers | Codecs | Storage | Segments |
 | --- | --- | --- | --- | --- |
-| source bytes (`preserve@1`) | any self-contained container on the FFmpeg demuxer allowlist (`internal/media/allowlist.go`) whose streams TAMSin can describe; known containers receive a registered media type and other listed containers use `application/octet-stream` with a warning; playlists, manifests, concatenations and image sequences are refused | no mux compatibility restriction because bytes are not rewritten | muxed | one Object containing the whole input |
-| whole source-family essence (`demux@1`) | MP4/QuickTime/3GP/3G2, WebM/Matroska, MPEG-TS/PS, MXF, AVI, ASF, WAV, AIFF, FLAC, MP3, AAC/ADTS, AC-3/E-AC-3, Ogg, JPEG/JPEG 2000/PNG/GIF/WebP | stream copy; the source muxer must accept the source codec, otherwise FFmpeg fails before TAMS is mutated | independent | one complete Object per essence |
-| source-family multiplex (`muxed-segments@1`) | same source-family set as `demux@1` | stream copy with source-muxer compatibility | muxed | keyframe-aligned, nominally 10 seconds |
-| source-family essence (`essence-segments@1`) | same source-family set as `demux@1` | stream copy with source-muxer compatibility | independent | keyframe-aligned, nominally 10 seconds |
-| MPEG-TS (`mpegts-segments@1`) | MPEG-TS written by TAMSin regardless of input container | video: H.264, HEVC, MPEG-2; audio: AAC, MPEG Layer II/III, AC-3, E-AC-3; attached pictures are ignored; other stream types/codecs are rejected before FFmpeg or TAMS mutation | independent | keyframe-aligned, nominally 2 seconds |
+| source bytes (`preserve@1`) | original MP4 or MPEG-TS | existing describable codecs; no remux compatibility restriction | muxed | one Object containing the whole input |
+| whole source-family essence (`demux@1`) | MP4 or MPEG-TS, matching the input | stream copy with the render rules below | independent | one complete Object per essence |
+| source-family multiplex (`muxed-segments@1`) | MP4 or MPEG-TS, matching the input | stream copy with the render rules below | muxed | keyframe-aligned, nominally 10 seconds |
+| source-family essence (`essence-segments@1`) | MP4 or MPEG-TS, matching the input | stream copy with the render rules below | independent | keyframe-aligned, nominally 10 seconds |
+| MPEG-TS (`mpegts-segments@1`) | MPEG-TS from either accepted input container | stream copy with the render rules below | independent | keyframe-aligned, nominally 2 seconds |
+
+MP4 retains the existing codec mappings below; this is not an H.264/AAC-only
+policy. The output muxer must be able to carry each codec. MPEG-TS stream copy
+accepts H.264, HEVC and MPEG-2 video, and AAC, MPEG Layer II/III, AC-3, E-AC-3
+and SMPTE 302M audio. This check also applies when `source` resolves to MPEG-TS.
+
+MP4 rendering supports `mov_text` subtitles. Other subtitle carriage and all
+data or attachment tracks are unqualified for rendering and are rejected
+before Flow mutation, including DVB subtitles, teletext and SCTE-35 in TS.
+Use `preserve@1` to keep the original bytes, including ancillary tracks that
+TAMSin cannot describe as Flows. Attached cover pictures remain excluded from
+the essence graph. Sparse subtitle tracks keep their descriptors in Objects
+with no cues; those empty tracks do not contribute invented timing bounds.
+Missing audio or video packet timing still fails.
+
+These are TAMSin product limits. BBC TAMS does not mandate a container, and
+[AppNote 0006](https://github.com/bbc/tams/blob/34fb31b80cb8afb3194f28c8b787301379caacf8/docs/appnotes/0006-containers-and-mappings.md)
+allows a sparse subtitle stream to be absent from some Objects.
 
 Segment duration is a target. Stream copy cannot invent random-access points,
 so a GOP longer than the target produces longer Segments. The MPEG-TS profile
@@ -104,14 +127,34 @@ adaptive-bitrate renditions, encryption, or CDN packaging.
 Browser HLS playback requires compatible media Objects as well as a playlist.
 For H.264/AAC playback through TAMOSS, select `mpegts-segments@1`. Source-family
 MP4 segments are ordinary MP4 files, not fragmented MP4 HLS segments.
+With `--essence-storage muxed`, each TS Object carries both picture and sound.
+When the input MP4 trims the final AAC packet, the published Segment ends at the
+programme boundary. A player that decodes the complete TS Object can include
+AAC padding in its displayed duration.
 
 TAMSin measures each rendered Object's presentation timestamps and sample
 durations to register its Segment range and `ts_offset`; it does not infer
-these from FFmpeg's segment-list decode timestamps or container duration.
-Release `8.2.0-in2` corrects this mapping and negative timestamp formatting.
-Re-ingest affected media into new Flows to obtain corrected metadata; existing
-Flows are not rewritten. The renderer epoch changes to prevent an automatic
-retry from silently reusing an older rendered Flow.
+these from container duration. Each Segment is placed where FFmpeg cut it on
+the source timeline and covers the span of the stream it was cut on (the first
+video stream, otherwise the first stream), so a multiplex keeps the source
+clock: interior cuts follow the video. A muxed programme includes audio that
+starts before the first video key frame or continues after the last picture.
+An independent video Flow starts at its first copied key frame. Rendered
+MPEG-TS timestamps follow the Flow clock modulo 2^33 at 90 kHz. Its
+`ts_offset` identifies the rollover epoch. An open GOP presents its leading pictures
+before the frame it was cut on; they travel in the same Object and the Segment
+begins with them, so long-GOP MPEG-2 and open-GOP HEVC place without holes.
+Adjacent Segments abut exactly; a gap in the source stays a gap on the Flow; a
+cut whose pictures present before the previous Segment ends is refused. A fixed-rate video reference stream is
+regularised to its nominal period when the container rounds its timestamps
+(for example, a coarse time base may round a ten-second span short), following AppNote 0012; a span that differs from the
+nominal by more than a quarter of a frame, such as a frame missing inside the
+Object, is kept as measured. Each measured Segment also carries
+`key_frame_count` (the reference stream's access points) and `last_duration`
+(how long its last sample presents). A correction to placement changes the
+renderer epoch, so a retry creates new Flows rather than reusing Flows written
+under the earlier rule; existing Flows are never rewritten. The
+[changelog](../CHANGELOG.md) records each such change.
 
 TAMSin owns the output muxer through `--segment-format`. An explicit FFmpeg
 `-f`, `-format`, or `-segment_format` is accepted only when it repeats the
@@ -178,7 +221,7 @@ Local/staged workflows can supply complete `essence_parameters` through
 | --- | --- | --- | --- |
 | `frame_width`, `frame_height` | `width`, `height` | Required positive values | Ingest is rejected when either is absent |
 | `frame_rate`, `vfr` | packet `pts` or decoded `best_effort_timestamp`, then the declared rate for the fixed rational | Fixed and genuinely variable cadence | Missing/non-monotonic timestamps are not guessed |
-| `interlace_mode` | stream `field_order` plus container family | non-MXF `progressive`, `tt` → `interlaced_tff`, `bb` → `interlaced_bff` | MXF `progressive`, `tb`/`bt`, and PsF are omitted because FFmpeg cannot distinguish them reliably |
+| `interlace_mode` | stream `field_order` | `progressive`, `tt` → `interlaced_tff`, `bb` → `interlaced_bff` | `tb`/`bt` and PsF are omitted because FFmpeg cannot distinguish them reliably |
 | `pixel_aspect_ratio` | `sample_aspect_ratio` | Positive colon-separated ratios | Missing, `0:1`, and malformed values are omitted |
 | `aspect_ratio` | `display_aspect_ratio` | Positive colon-separated ratios | Missing or malformed values are omitted |
 | `colorspace` | `color_primaries`, with matrix coefficients only as a fallback | BT.601, BT.709, BT.2020; BT.2100 when BT.2020 primaries carry HLG/PQ | Unknown names are omitted |
@@ -198,33 +241,77 @@ FFprobe does not reliably establish PsF, so TAMSin never synthesises
 | PCM audio | `unc_parameters.unc_type` | Interleaved by default; planar for FFmpeg's `pcm_*_planar` family and `pcm_lxf` |
 | Still image | `frame_width`, `frame_height` | Required positive values; a zero-duration single image stream is not described as moving video |
 | Data | `essence_parameters` | Empty unless supplied by an operator; TAMSin does not invent a `data_type` URN |
+| Data without a codec | none | A data or attachment track whose codec has no media type below (such as `tmcd` timecode) is not described as a Flow. Preserve keeps the track and warns that no Flow describes it; rendering is refused. Video, audio and subtitle streams with unknown codecs still stop the ingest |
 
 ### Codec media types
 
 The table is keyed by FFprobe's `codec_name`, not a filename extension. These
-are the automatic mappings currently promised:
+are the automatic mappings for codecs found inside accepted containers; a
+mapping does not qualify a codec for rendering:
 
 | Essence | FFprobe names | TAMS `codec` |
 | --- | --- | --- |
 | Video | `h264`, `hevc`, `av1`, `ffv1` | `video/h264`, `video/h265`, `video/AV1`, `video/FFV1` |
-| Video | `mpeg2video`, `mpeg4`, `vp8`, `vp9` | `video/mpeg`, `video/mp4v-es`, `video/VP8`, `video/VP9` |
-| Video | `prores` | `video/quicktime` (the established compatibility mapping; IANA has no ProRes coding subtype) |
-| Image coding | `mjpeg`, `jpeg2000`, `png`, `gif`, `webp` | `image/jpeg`, `image/jp2`, `image/png`, `image/gif`, `image/webp` |
+| Video | `mpeg1video`, `mpeg2video`, `mpeg4`, `vp8`, `vp9` | `video/mpeg` (MPEG-1/2), `video/mp4v-es`, `video/VP8`, `video/VP9` |
+| Video | `prores` | `video/quicktime` (the established compatibility mapping; IANA has no ProRes coding subtype). `video/mpeg` for MPEG-1 and MPEG-2 video is likewise also the MPEG programme stream container type; on an elemental Flow it names the coding |
+| Video | `dvvideo`, `dnxhd` | `video/DV`, `video/x-dnxhd` |
+| Video | `jpeg2000` on a moving-picture stream | `video/jp2`, as the BBC reference Flows use |
+| Image coding | `mjpeg`, `jpeg2000` (still image), `png`, `gif`, `webp` | `image/jpeg`, `image/jp2`, `image/png`, `image/gif`, `image/webp` |
 | Audio | `aac`, `ac3`, `eac3`, `flac`, `mp2`, `mp3`, `opus`, `vorbis` | `audio/aac`, `audio/ac3`, `audio/eac3`, `audio/flac`, `audio/mpeg` (MP2/MP3), `audio/opus`, `audio/vorbis` |
-| PCM audio | any `pcm_*` | `audio/x-raw-int` or `audio/x-raw-float`, the explicit vocabulary used by the pinned TAMS audio schema |
-| Timed text/data | `webvtt`, `ttml`, `subrip`, `ass` | `text/vtt`, `application/ttml+xml`, `application/x-subrip`, `text/x-ssa` |
+| Audio | `dts`, `truehd`, `s302m` | `audio/vnd.dts`, `audio/vnd.dolby.mlp`, `audio/x-smpte302m` |
+| Audio | `pcm_alaw`, `pcm_mulaw` | `audio/PCMA`, `audio/PCMU` (companded G.711 is a codec, so no `unc_parameters`) |
+| PCM audio | other `pcm_*` | `audio/x-raw-int` or `audio/x-raw-float`, the explicit vocabulary used by the pinned TAMS audio schema; 16- and 24-bit float, which the schema cannot describe, are unmapped |
+| Timed text/data | `webvtt`, `ttml`, `subrip`, `ass`, `mov_text` | `text/vtt`, `application/ttml+xml`, `application/x-subrip`, `text/x-ssa`, `text/x-quicktime-text` |
+| Broadcast data | `dvb_subtitle`, `dvb_teletext`, `scte_35`, `eia_608` (QuickTime `c608` captions) | `application/x-dvb-subtitle`, `application/x-dvb-teletext`, `application/x-scte35`, `application/x-cea-608` |
 
-An FFmpeg codec outside this table produces no generated `codec`. TAMSin logs
-the codec name, stream type and stream index; it never constructs
-`video/x-<name>`, `audio/x-<name>`, or `application/x-<name>`. This is stricter
-than container fallback because the pinned elemental Flow schemas require
-`codec`: without a valid explicit override, final schema preflight rejects the
-Flow before TAMS mutation.
+Where IANA registers a coding media type it is used. The `x-` names above are
+the only ones TAMSin writes: they are fixed values for codecs with no
+registration, chosen once so that every TAMSin deployment names them the same
+way, and they are listed here so a consumer can match them. An FFmpeg codec
+outside this table produces no generated `codec`. TAMSin logs the codec name,
+stream type and stream index; it never constructs a name from the FFmpeg codec
+string. The pinned elemental Flow schemas require `codec`: without a valid explicit override, final schema
+preflight rejects the Flow before TAMS mutation.
+
+## Supply Flow metadata
+
+For a label or other workflow-owned fields, write a JSON object and preview
+the ingest before uploading:
+
+```sh
+printf '%s\n' '{"label":"Studio programme","description":"Ingested master"}' > flow.json
+tamsin ingest --profile preserve --flow-metadata flow.json \
+  --dry-run=exact --input ./programme.ts
+tamsin ingest --profile preserve --flow-metadata flow.json --input ./programme.ts
+```
 
 `--flow-metadata` is most useful for a single-essence input whose workflow owns
-a more specific registry mapping. A multi-essence file may contain different
-unknown codecs, so one top-level override cannot safely describe every track;
-use a supported ingest profile rather than applying one codec value to all of
-them.
+a more specific registry mapping. In a multi-essence file each track may need a
+different value, so `--collected-flow-metadata` takes a JSON object keyed by
+collection role (`video`, `audio 1`, `data`) whose values are merged into that
+one essence Flow; a role the input does not produce is an error rather than a
+silently unused override. For example, if planning reports roles `video` and
+`audio`, label each one with:
+
+```json
+{
+  "video": {"label": "Programme video"},
+  "audio": {"label": "Programme audio"}
+}
+```
+
+Save that object as `collected.json` and add
+`--collected-flow-metadata collected.json` to both the exact dry run and the
+real command. Use the exact roles from your input's `flow.planned`
+events, including numbered roles such as `audio 1` for multiple audio tracks.
+Supply technical fields only when you know the output's properties; complete
+`essence_parameters` replace that object rather than patching individual fields.
+
+Overrides cannot directly set IDs. Technical overrides can change generated
+IDs for streamed inputs; see [identity and resume](concepts.md#generated-identity-and-resume).
+Resume keeps existing operator labels and descriptions unless explicitly
+overridden for that Flow. In muxed storage, `--flow-metadata` targets the root
+and `--collected-flow-metadata` targets the named roles. Independent essences
+inherit `--flow-metadata`, with per-role overrides taking precedence.
 
 See [operations](operations.md) for staging, verification and recovery.
