@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"mime"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,7 +37,7 @@ const multiOutputEssenceThreshold = 4
 // rendererIdentityEpoch changes only when TAMSin deliberately changes the
 // semantics of media it writes. Package rebuilds and FFmpeg patch releases are
 // provenance, not a new ingest policy, and must not manufacture a new Flow.
-const rendererIdentityEpoch = "3"
+const rendererIdentityEpoch = "4"
 
 func New(config Config, client TAMSClient, prober media.Prober, segmenter media.Segmenter, logger *slog.Logger, reporter progress.Reporter) (*Pipeline, error) {
 	if config.InputMode == "" {
@@ -107,8 +107,16 @@ func New(config Config, client TAMSClient, prober media.Prober, segmenter media.
 	if err := config.EssenceStorage.Validate(); err != nil {
 		return nil, err
 	}
-	if err := validateFlowMetadataOverrides(config.FlowMetadata); err != nil {
+	if err := validateFlowMetadataOverrides("--flow-metadata", config.FlowMetadata); err != nil {
 		return nil, err
+	}
+	for role, override := range config.CollectedFlowMetadata {
+		if strings.TrimSpace(role) == "" {
+			return nil, errors.New("--collected-flow-metadata roles cannot be empty")
+		}
+		if err := validateFlowMetadataOverrides("--collected-flow-metadata /"+role, override); err != nil {
+			return nil, err
+		}
 	}
 	profileAssignments, normalizedProfiles, err := parseFlowProfileAssignments(config.TAMSFlowProfiles)
 	if err != nil {
@@ -459,7 +467,13 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 	// escape the bound.
 	probe, err := p.probePreparedInput(ctx, staged)
 	if err != nil {
+		if errors.Is(err, media.ErrUnsupportedContainer) {
+			return Result{}, withFailure(FailureCodeMediaUnsupported, FailureMessageMediaUnsupported, true, err)
+		}
 		return Result{}, withFailure(FailureCodeMediaAnalysisFailed, FailureMessageMediaAnalysisFailed, true, err)
+	}
+	if err := media.ValidateContainer(probe.Format, contentType); err != nil {
+		return Result{}, withFailure(FailureCodeMediaUnsupported, FailureMessageMediaUnsupported, true, err)
 	}
 	writesOutput := ffmpegWritesOutput(p.config, probe)
 	if writesOutput {
@@ -470,11 +484,12 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 	segmentContainer := media.SourceSegmentContainer(probe.Format, contentType)
 	if p.config.SegmentFormat == media.SegmentFormatMPEGTS {
 		segmentContainer = media.SegmentContainer{Muxer: "mpegts", Extension: ".ts"}
-		// The named/structured stream-copy policy can be validated from the
-		// input. Explicit FFmpeg arguments make the treatment custom and may
-		// deliberately transcode to a compatible output codec that does not yet
-		// exist to probe, so that workflow owns its output metadata and policy.
-		if len(p.config.FFmpegArgs) == 0 {
+	}
+	if writesOutput {
+		if err := validateRenderedTracks(probe, segmentContainer.Muxer); err != nil {
+			return Result{}, withFailure(FailureCodeMediaUnsupported, FailureMessageMediaUnsupported, true, err)
+		}
+		if segmentContainer.Muxer == "mpegts" && len(p.config.FFmpegArgs) == 0 {
 			if err := validateMPEGTSSegmentCodecs(probe); err != nil {
 				return Result{}, withFailure(FailureCodeMediaUnsupported, FailureMessageMediaUnsupported, true, err)
 			}
@@ -510,6 +525,21 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 	if err != nil {
 		return Result{}, withFailure(FailureCodeMediaAnalysisFailed, FailureMessageMediaInvalidFlow, true, err)
 	}
+	if err := p.validateContainerOverrides(flow, flowInfo); err != nil {
+		return Result{}, withFailure(FailureCodeMediaOptionsInvalid, FailureMessageMediaOptionsInvalid, true, err)
+	}
+	if writesOutput {
+		// FFmpeg assigns new container identifiers; retain positional mappings.
+		media.ApplyRenderedTrackMapping(&flowInfo)
+		// Stream copy begins at the first key frame, which is where the
+		// rendered Flow must be anchored.
+		if err := p.anchorOnKeyFrames(ctx, staged.path, probe, &flowInfo); err != nil {
+			return Result{}, withFailure(FailureCodeMediaAnalysisFailed, FailureMessageMediaAnalysisFailed, true, err)
+		}
+	}
+	if err := validateCollectedOverrideRoles(p.config.CollectedFlowMetadata, flowInfo.Collected); err != nil {
+		return Result{}, withFailure(FailureCodeMediaOptionsInvalid, FailureMessageCollectedMetadataInvalid, true, err)
+	}
 	if flowID == "" {
 		mediaKey, err := mediaInterpretationFingerprint(flow, flowInfo)
 		if err != nil {
@@ -518,7 +548,7 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 		}
 		flowID = generatedRootFlowID(profileKey, mediaKey)
 		if staged.bridge != nil {
-			flowID, err = streamedFlowID(profileKey, flow, flowInfo, p.config.FlowMetadata)
+			flowID, err = streamedFlowID(profileKey, flow, flowInfo, p.config.FlowMetadata, p.config.CollectedFlowMetadata)
 			if err != nil {
 				return Result{}, err
 			}
@@ -532,19 +562,12 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 	releaseGraph := p.acquireGraph(flowID)
 	defer releaseGraph()
 	p.warnUnsupportedCodecs(item, flowInfo.UnsupportedCodecs)
+	p.warnUndescribedStreams(item, flowInfo.UndescribedStreams)
 	// Independent storage demultiplexes, so each essence owns its Media Objects
 	// and is ingested as a Flow in its own right. AppNote 0006's
 	// container_mapping describes essence inside a shared multiplex, which no
 	// longer exists here, so the elemental Flows carry none.
 	if p.config.EssenceStorage == media.EssenceStorageIndependent && len(flowInfo.Collected) > 0 {
-		if !hasValidContainerOverride(p.config.FlowMetadata) && p.config.SegmentFormat.ContainerMIME() == "" {
-			for _, essence := range flowInfo.Collected {
-				if !essence.ContainerSupported {
-					p.warnUnsupportedContainer(item, probe, essence.Role)
-					break
-				}
-			}
-		}
 		result, ingestErr := p.ingestIndependently(ctx, item, staged, flow, flowInfo, flowID, storageID)
 		result.FFmpegVersion = ffmpegVersion
 		result.MediaToolchain = toolchainFingerprint
@@ -566,6 +589,7 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 		position := strconv.Itoa(index)
 		collectedID := generatedChildFlowID(flowID, "collected", position)
 		collectedSourceID := sourceIdentity(staged.identityKey(), "essence", position)
+		mergeFlow(collected.Flow, p.config.CollectedFlowMetadata[collected.Role])
 		collected.Flow["id"] = collectedID
 		collected.Flow["source_id"] = collectedSourceID
 		result.Flows = append(result.Flows, FlowResult{
@@ -584,9 +608,7 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 	mergeFlow(flow, p.config.FlowMetadata)
 	flow["id"] = flowID
 	flow["source_id"] = sourceID
-	if hasValidContainerOverride(p.config.FlowMetadata) {
-		flowInfo.ContainerSupported = true
-	}
+
 	if len(collectionItems) > 0 {
 		flow["flow_collection"] = collectionItems
 	}
@@ -600,11 +622,8 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 	if container := p.config.SegmentFormat.ContainerMIME(); container != "" && p.config.SegmentDuration > 0 {
 		flow["container"] = container
 		flowInfo.ContentType = container
-		flowInfo.ContainerSupported = true
 	}
-	if !flowInfo.ContainerSupported {
-		p.warnUnsupportedContainer(item, probe, "")
-	}
+
 	rootKind, rootRole, parentRole := FlowKindEssence, flowPlanRole(FlowKindEssence, "single", stringField(flow, "format")), "single"
 	if len(flowInfo.Collected) > 0 {
 		rootKind, rootRole, parentRole = FlowKindMuxed, "", "multi"
@@ -640,29 +659,17 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 	return result, err
 }
 
-// hasValidContainerOverride makes an explicit --flow-metadata container the
-// supported escape hatch for a format outside Tamsin's built-in profile. An
-// invalid value does not suppress the warning that helps diagnose it.
-func hasValidContainerOverride(flow tams.Flow) bool {
-	value, ok := flow["container"].(string)
-	if !ok {
-		return false
-	}
-	mediaType, parameters, err := mime.ParseMediaType(value)
-	return err == nil && mediaType != "" && len(parameters) == 0
-}
-
 // validateFlowMetadataOverrides rejects fields whose meaning depends on the
 // graph Tamsin is constructing. Applying one open-map override to a collector
 // and several elemental Flows cannot safely redefine their identities or
 // ownership relationships; silently overwriting the value later is equally
 // misleading. JSON Pointers make the error actionable against the supplied
 // document and New's caller reports it as a usage error.
-func validateFlowMetadataOverrides(flow tams.Flow) error {
+func validateFlowMetadataOverrides(flag string, flow tams.Flow) error {
 	if tags, ok := flow["tags"].(map[string]any); ok {
-		for _, field := range []string{media.TagPrefix + "input_revision", media.TagPrefix + "sha256"} {
+		for _, field := range []string{media.TagPrefix + "input_revision", media.TagPrefix + "sha256", media.TagPrefix + "renderer_epoch"} {
 			if _, present := tags[field]; present {
-				return fmt.Errorf("--flow-metadata /tags/%s is derived from the input and cannot be overridden", field)
+				return fmt.Errorf("%s /tags/%s is derived from the input and cannot be overridden", flag, field)
 			}
 		}
 	}
@@ -679,7 +686,29 @@ func validateFlowMetadataOverrides(flow tams.Flow) error {
 		{name: "timerange", action: "it is service-managed Segment metadata"},
 	} {
 		if _, present := flow[field.name]; present {
-			return fmt.Errorf("--flow-metadata /%s cannot be overridden: %s", field.name, field.action)
+			return fmt.Errorf("%s /%s cannot be overridden: %s", flag, field.name, field.action)
+		}
+	}
+	return nil
+}
+
+// validateCollectedOverrideRoles refuses an override for a role the input's
+// Flow graph does not have, because an override that silently applies to
+// nothing is how a wrong codec reaches a store unnoticed.
+func validateCollectedOverrideRoles(overrides map[string]tams.Flow, collected []media.CollectedFlow) error {
+	if len(overrides) == 0 {
+		return nil
+	}
+	roles := make([]string, 0, len(collected))
+	for _, essence := range collected {
+		roles = append(roles, essence.Role)
+	}
+	for role := range overrides {
+		if !slices.Contains(roles, role) {
+			if len(roles) == 0 {
+				return fmt.Errorf("--collected-flow-metadata names role %q but the input is a single essence with no collection; use --flow-metadata", role)
+			}
+			return fmt.Errorf("--collected-flow-metadata names role %q; the input's collection roles are %s", role, strings.Join(roles, ", "))
 		}
 	}
 	return nil
@@ -712,19 +741,18 @@ func validateCustomOutputMetadata(probe media.Probe, ffmpegArgs []string, metada
 	return nil
 }
 
-func (p *Pipeline) warnUnsupportedContainer(item source.Item, probe media.Probe, role string) {
-	attributes := []any{
-		"input", safeURI(item.URI),
-		"ffprobe_format", probe.Format.Name,
-		"fallback", "application/octet-stream",
+// warnUndescribedStreams says which tracks the Flow graph leaves undescribed. They
+// stay in the preserved whole-file Object; rendering such tracks is refused.
+func (p *Pipeline) warnUndescribedStreams(item source.Item, undescribed []media.UnsupportedCodec) {
+	for _, stream := range undescribed {
+		message := "data track has no coding media type Tamsin can declare; the track stays in the stored container but no Flow describes it"
+		p.logger.Warn(message,
+			"input", safeURI(item.URI),
+			"ffprobe_codec", stream.Name,
+			"stream_type", stream.StreamType,
+			"stream_index", stream.StreamIndex,
+		)
 	}
-	if brand := strings.TrimSpace(probe.Format.Tags["major_brand"]); brand != "" {
-		attributes = append(attributes, "major_brand", brand)
-	}
-	if role != "" {
-		attributes = append(attributes, "essence", role)
-	}
-	p.logger.Warn("media container is outside Tamsin's supported profile; use --flow-metadata to override metadata, or choose MPEG-TS/whole-file storage", attributes...)
 }
 
 func (p *Pipeline) warnUnsupportedCodecs(item source.Item, codecs []media.UnsupportedCodec) {
@@ -753,14 +781,36 @@ type preparedObject struct {
 	timerange       string
 	objectTimerange string
 	tsOffset        string
+	// keyFrames and lastDuration are the Segment's key_frame_count and
+	// last_duration hints, known only for a Segment whose packets were
+	// measured. Zero and empty mean unknown, and are not sent.
+	keyFrames    int
+	lastDuration string
 }
 
 // objectMeasurement is what reading and probing one Segment establishes.
+// objectStart and duration span every stream in the Object; referenceStart
+// and referenceSpan describe the stream the Segment is cut and placed on.
 type objectMeasurement struct {
-	size        int64
-	checksum    string
-	objectStart int64
-	duration    int64
+	size           int64
+	checksum       string
+	objectStart    int64
+	duration       int64
+	referenceStart int64
+	referenceSpan  int64
+	// measuredSpan is the reference span the timestamps record; referenceSpan
+	// is the regularised value when regular (see media.ReferenceTiming).
+	measuredSpan int64
+	period       int64
+	regular      bool
+	// keyFrames and lastSample are set when the Object's packets were
+	// measured; measured says so.
+	keyFrames  int
+	lastSample int64
+	measured   bool
+	// lead is how far before the frame it was cut on the Object presents:
+	// the leading pictures of an open GOP.
+	lead int64
 }
 
 // ingestIndependently extracts each elementary stream into its own Media
@@ -886,6 +936,7 @@ func (p *Pipeline) essenceFlow(staged stagedFile, collectorID string, index int,
 	sourceID := sourceIdentity(staged.identityKey(), "essence", position)
 	flow := essence.Flow
 	mergeFlow(flow, p.config.FlowMetadata)
+	mergeFlow(flow, p.config.CollectedFlowMetadata[essence.Role])
 	flow["id"] = flowID
 	flow["source_id"] = sourceID
 	if p.config.SegmentDuration > 0 {
@@ -1087,8 +1138,7 @@ func (p *Pipeline) renderSegmentsTo(ctx context.Context, staged stagedFile, flow
 		SourceContainer: flowInfo.SegmentContainer, StreamIndices: streamIndices,
 		Directory: directory, AdditionalArgs: additionalArgs, StagingWindow: window,
 		// Every render is bit-exact so an identical re-run produces identical
-		// bytes, and with them identical Object identifiers: without it the
-		// Matroska muxer writes a random segment UID into every output.
+		// bytes, and with them identical Object identifiers.
 		BitExact: true,
 	}, func(record media.SegmentRecord) error {
 		if err := segmentCtx.Err(); err != nil {
@@ -1189,6 +1239,7 @@ func (p *Pipeline) prepareObjectsForStream(ctx context.Context, flowID string, s
 				measurements[index] = objectMeasurement{
 					size: staged.size, checksum: staged.sha256,
 					objectStart: flowInfo.Start, duration: flowInfo.Duration,
+					referenceStart: flowInfo.Start, referenceSpan: flowInfo.Duration, measuredSpan: flowInfo.Duration,
 				}
 				return nil
 			}
@@ -1204,13 +1255,16 @@ func (p *Pipeline) prepareObjectsForStream(ctx context.Context, flowID string, s
 			if err != nil {
 				return err
 			}
-			entry := objectMeasurement{size: size, checksum: checksum, objectStart: flowInfo.Start, duration: flowInfo.Duration}
+			entry := objectMeasurement{
+				size: size, checksum: checksum, objectStart: flowInfo.Start, duration: flowInfo.Duration,
+				referenceStart: flowInfo.Start, referenceSpan: flowInfo.Duration, measuredSpan: flowInfo.Duration,
+			}
 			if probeSegments {
 				probe, probeErr := p.probeObject(groupCtx, path)
 				if probeErr != nil {
 					return probeErr
 				}
-				if entry.objectStart, entry.duration, err = media.ProbeTiming(probe); err != nil {
+				if entry, err = measureObject(probe, size, checksum); err != nil {
 					return err
 				}
 			}
@@ -1228,46 +1282,90 @@ func (p *Pipeline) prepareObjectsForStream(ctx context.Context, flowID string, s
 	}
 
 	objects := make([]preparedObject, 0, len(paths))
-	flowPosition := start
+	firstTimedStart := start
+	if streamIndex == media.AllStreams {
+		firstTimedStart, err = media.TimestampShift(start, flowInfo.ReferenceOffset)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	cursor := newTimelineCursor(start, firstTimedStart, p.logger)
 	for index, path := range paths {
-		object, next, err := placeObject(flowID, path, measurements[index], flowPosition)
+		position, err := cursor.place(records[index], measurements[index])
+		if err != nil {
+			return nil, nil, err
+		}
+		object, err := placeObject(flowID, path, measurements[index], position)
 		if err != nil {
 			return nil, nil, err
 		}
 		objects = append(objects, object)
-		flowPosition = next
 	}
 	return objects, cleanup, nil
 }
 
-// placeObject puts one measured Segment at flowPosition on the Flow timeline
-// and returns it with the position where the next Segment begins.
-func placeObject(flowID, path string, measured objectMeasurement, flowPosition int64) (preparedObject, int64, error) {
-	timerange, err := media.TimeRange(flowPosition, measured.duration)
+// measureObject reads the timing a probed Segment establishes: the span of
+// every stream for the Object's own range, and the reference stream for the
+// Segment's place on the Flow timeline.
+func measureObject(probe media.Probe, size int64, checksum string) (objectMeasurement, error) {
+	entry := objectMeasurement{size: size, checksum: checksum}
+	var err error
+	if entry.objectStart, entry.duration, err = media.ProbeTiming(probe); err != nil {
+		return objectMeasurement{}, err
+	}
+	reference, err := media.ProbeReference(probe)
 	if err != nil {
-		return preparedObject{}, 0, err
+		return objectMeasurement{}, err
+	}
+	entry.referenceStart, entry.referenceSpan, entry.measuredSpan = reference.Start, reference.Span, reference.MeasuredSpan
+	entry.period, entry.regular = reference.Period, reference.Regular
+	entry.keyFrames, entry.lastSample, entry.measured = reference.KeyFrames, reference.LastSample, reference.Measured
+	entry.lead = reference.Lead
+	// A regularised reference stream presents its last sample for a whole
+	// period, which can reach past the rounded timestamps every stream
+	// recorded. The Object's own range must still contain the Segment.
+	if referenceEnd := entry.referenceStart + entry.referenceSpan; referenceEnd > entry.objectStart+entry.duration {
+		entry.duration = referenceEnd - entry.objectStart
+	}
+	return entry, nil
+}
+
+// placeObject describes one measured Segment at position on the Flow
+// timeline. The Segment's timerange is the reference stream's span from
+// there; the Object's own range is every stream's span, so audio that leads or
+// trails a video cut is inside the Object but outside the Segment, which an
+// explicit object_timerange expresses. ts_offset maps the reference stream's
+// first presentation timestamp onto position exactly.
+func placeObject(flowID, path string, measured objectMeasurement, position int64) (preparedObject, error) {
+	timerange, err := media.TimeRange(position, measured.referenceSpan)
+	if err != nil {
+		return preparedObject{}, err
 	}
 	objectTimerange, err := media.TimeRange(measured.objectStart, measured.duration)
 	if err != nil {
-		return preparedObject{}, 0, err
+		return preparedObject{}, err
 	}
-	offset, err := media.TimestampOffset(flowPosition, measured.objectStart)
+	offset, err := media.TimestampOffset(position, measured.referenceStart)
 	if err != nil {
-		return preparedObject{}, 0, err
+		return preparedObject{}, err
 	}
 	object := preparedObject{
 		id: namedID("object", flowID, measured.checksum, timerange), path: path,
-		size: measured.size, sha256: measured.checksum, start: flowPosition, duration: measured.duration,
+		size: measured.size, sha256: measured.checksum, start: position, duration: measured.referenceSpan,
 		timerange: timerange, objectTimerange: objectTimerange,
 	}
 	if offset != 0 {
 		object.tsOffset = media.Timestamp(offset)
 	}
-	next, err := media.TimestampShift(flowPosition, measured.duration)
-	if err != nil {
-		return preparedObject{}, 0, err
+	if measured.measured {
+		object.keyFrames = measured.keyFrames
+		// last_duration is how long the last sample presents: the exclusive
+		// end of the reference stream less the last sample's timestamp.
+		if last := measured.referenceStart + measured.referenceSpan - measured.lastSample; last > 0 {
+			object.lastDuration = media.Timestamp(last)
+		}
 	}
-	return object, next, nil
+	return object, nil
 }
 
 // Directory scans grow with the Segment count. Four checks per second catches
@@ -1517,7 +1615,7 @@ func ffmpegWritesOutput(config Config, probe media.Probe) bool {
 func essenceCount(probe media.Probe) int {
 	count := 0
 	for _, stream := range probe.Streams {
-		if stream.Disposition.AttachedPicture == 0 {
+		if stream.Disposition.AttachedPicture == 0 && !media.UndescribableDataStream(stream) {
 			count++
 		}
 	}

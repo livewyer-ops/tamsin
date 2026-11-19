@@ -23,7 +23,7 @@ func generatedRootFlowID(profileKey, mediaKey string) string {
 	return framedID("flow/content-profile/v1", profileKey, mediaKey)
 }
 
-func streamedFlowID(profileKey string, flow tams.Flow, info media.FlowInfo, overrides tams.Flow) (string, error) {
+func streamedFlowID(profileKey string, flow tams.Flow, info media.FlowInfo, overrides tams.Flow, collectedOverrides map[string]tams.Flow) (string, error) {
 	// Initial rate estimates and whole-input duration are not identity evidence.
 	// The same source revision must keep its IDs as segments establish cadence.
 	initial := func(flow tams.Flow) tams.Flow {
@@ -51,7 +51,18 @@ func streamedFlowID(profileKey string, flow tams.Flow, info media.FlowInfo, over
 	if err != nil {
 		return "", err
 	}
-	return framedID("flow/input-revision/v1", profileKey, mediaKey, string(encoded)), nil
+	if len(collectedOverrides) == 0 {
+		return framedID("flow/input-revision/v1", profileKey, mediaKey, string(encoded)), nil
+	}
+	perRole := make(map[string]tams.Flow, len(collectedOverrides))
+	for role, override := range collectedOverrides {
+		perRole[role] = flowIdentityFields(override)
+	}
+	encodedCollected, err := json.Marshal(perRole)
+	if err != nil {
+		return "", err
+	}
+	return framedID("flow/input-revision/v1", profileKey, mediaKey, string(encoded), string(encodedCollected)), nil
 }
 
 // generatedChildFlowID anchors every derived member to the root Flow. Besides
@@ -99,10 +110,17 @@ type mediaInterpretationIdentity struct {
 	Start              int64                         `json:"start"`
 	Duration           int64                         `json:"duration"`
 	ContentType        string                        `json:"content_type"`
-	SegmentContainer   media.SegmentContainer        `json:"segment_container"`
+	SegmentContainer   identitySegmentContainer      `json:"segment_container"`
 	ContainerSupported bool                          `json:"container_supported"`
 	UnsupportedCodecs  []media.UnsupportedCodec      `json:"unsupported_codecs,omitempty"`
+	UndescribedStreams []media.UnsupportedCodec      `json:"dropped_streams,omitempty"`
 	Collected          []collectedFlowInterpretation `json:"collected,omitempty"`
+}
+
+// Preserve the original fingerprint encoding after removing MXF rendering.
+// AudioMuxer remains empty for every supported input.
+type identitySegmentContainer struct {
+	Muxer, Extension, AudioMuxer string
 }
 
 type collectedFlowInterpretation struct {
@@ -114,26 +132,24 @@ type collectedFlowInterpretation struct {
 	Offset             int64          `json:"offset"`
 }
 
-// mediaInterpretationFingerprint captures only the normalized facts that
-// BuildFlow and segmentation use. It excludes identifiers, labels, descriptions
-// and provenance, so a filename can affect identity only when probing that name
-// actually changes the media graph. This matters for raw formats and stdin:
-// FFmpeg may legitimately interpret identical bytes differently from a naming
-// hint, and those graphs must not claim one Flow ID.
+// mediaInterpretationFingerprint hashes the effective media interpretation,
+// excluding identifiers, labels, descriptions and provenance. Legacy fields
+// retain their encoded values so model cleanup does not change resume identity.
 func mediaInterpretationFingerprint(flow tams.Flow, info media.FlowInfo) (string, error) {
 	identity := mediaInterpretationIdentity{
 		Root: flowIdentityFields(flow), Format: info.Format, Codec: info.Codec,
 		Container: info.Container, Start: info.Start, Duration: info.Duration,
-		ContentType: info.ContentType, SegmentContainer: info.SegmentContainer,
-		ContainerSupported: info.ContainerSupported,
+		ContentType: info.ContentType, SegmentContainer: identitySegmentContainer{Muxer: info.SegmentContainer.Muxer, Extension: info.SegmentContainer.Extension},
+		ContainerSupported: true,
 		UnsupportedCodecs:  info.UnsupportedCodecs,
+		UndescribedStreams: info.UndescribedStreams,
 		Collected:          make([]collectedFlowInterpretation, len(info.Collected)),
 	}
 	for index, collected := range info.Collected {
 		identity.Collected[index] = collectedFlowInterpretation{
 			Role: collected.Role, Flow: flowIdentityFields(collected.Flow),
 			ContainerMapping:   collected.ContainerMapping,
-			ContainerSupported: collected.ContainerSupported,
+			ContainerSupported: true,
 			StreamIndex:        collected.StreamIndex,
 			Offset:             collected.Offset,
 		}

@@ -176,10 +176,10 @@ func TestGeneratedFlowsMatchPinnedSchema(t *testing.T) {
 		{
 			name: "data",
 			probe: media.Probe{
-				Streams: nil,
-				Format:  media.Format{Name: "json", Duration: "0"},
+				Streams: []media.Stream{{Index: 0, CodecName: "scte_35", CodecType: "data"}},
+				Format:  media.Format{Name: "mpegts", Duration: "0"},
 			},
-			contentType: "application/json",
+			contentType: "video/mp2t",
 		},
 		{
 			name: "still image",
@@ -187,9 +187,9 @@ func TestGeneratedFlowsMatchPinnedSchema(t *testing.T) {
 				Streams: []media.Stream{{
 					Index: 0, CodecName: "png", CodecType: "video", Width: 320, Height: 180,
 				}},
-				Format: media.Format{Name: "png_pipe", Duration: "0"},
+				Format: media.Format{Name: "mov,mp4", Duration: "0", Tags: map[string]string{"major_brand": "isom"}},
 			},
-			contentType: "image/png",
+			contentType: "video/mp4",
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

@@ -224,6 +224,10 @@ func TestMPEGTSSegmentsRejectUnsupportedCodecs(t *testing.T) {
 	if err := validateMPEGTSSegmentCodecs(unsupported); err == nil || !strings.Contains(err.Error(), "audio/flac") {
 		t.Fatalf("unsupported codec error = %v", err)
 	}
+	compatible.Streams = append(compatible.Streams, media.Stream{Index: 2, CodecType: "audio", CodecName: "s302m"})
+	if err := validateMPEGTSSegmentCodecs(compatible); err != nil {
+		t.Fatalf("SMPTE 302M rejected: %v", err)
+	}
 }
 
 func TestMuxerChangingArgumentsMustMatchContainerPolicy(t *testing.T) {
@@ -242,28 +246,33 @@ func TestMuxerChangingArgumentsMustMatchContainerPolicy(t *testing.T) {
 
 func TestMPEGTSSegmentPolicyFailsBeforeInvokingFFmpeg(t *testing.T) {
 	directory := t.TempDir()
-	filename := directory + "/audio.flac"
+	filename := directory + "/audio.mp4"
 	if err := os.WriteFile(filename, []byte("flac source"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	prober := profilePolicyProber{probe: media.Probe{
-		Format:  media.Format{Name: "flac", Duration: "1"},
-		Streams: []media.Stream{{Index: 0, CodecType: "audio", CodecName: "flac", SampleRate: "48000", Channels: 2}},
-	}}
-	pipeline, err := New(Config{
-		Profile: ProfileMPEGTSSegments, ProfileVersion: "1",
-		Concurrency: 1, DryRunMode: DryRunExact, SegmentDuration: 2 * time.Second,
-		SegmentFormat: media.SegmentFormatMPEGTS, EssenceStorage: media.EssenceStorageIndependent,
-	}, nil, prober, versionedCountingSegmenter{err: errors.New("FFmpeg must not run")}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if batch.Failed != 1 || len(batch.Results) != 1 || !strings.Contains(batch.Results[0].Error, "audio/flac") {
-		t.Fatalf("result = %#v, want an unsupported MPEG-TS codec failure", batch)
+	for _, format := range []media.SegmentFormat{media.SegmentFormatSource, media.SegmentFormatMPEGTS} {
+		prober := profilePolicyProber{probe: media.Probe{
+			Format:  media.Format{Name: "mov,mp4", Duration: "1", Tags: map[string]string{"major_brand": "isom"}},
+			Streams: []media.Stream{{Index: 0, CodecType: "audio", CodecName: "flac", SampleRate: "48000", Channels: 2}},
+		}}
+		if format == media.SegmentFormatSource {
+			prober.probe.Format.Name = "mpegts"
+		}
+		pipeline, err := New(Config{
+			Profile: ProfileCustom, ProfileVersion: "1",
+			Concurrency: 1, DryRunMode: DryRunExact, SegmentDuration: 2 * time.Second,
+			SegmentFormat: format, EssenceStorage: media.EssenceStorageIndependent,
+		}, nil, prober, versionedCountingSegmenter{err: errors.New("FFmpeg must not run")}, discardLogger(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if batch.Failed != 1 || len(batch.Results) != 1 || !strings.Contains(batch.Results[0].Error, "audio/flac") {
+			t.Fatalf("result = %#v, want an unsupported MPEG-TS codec failure", batch)
+		}
 	}
 }
 
@@ -288,8 +297,8 @@ func TestRendererEpochAndByteProfilesDeriveStableFlowIDs(t *testing.T) {
 			t.Fatalf("%s derived the same Flow ID %s", label, id)
 		}
 	}
-	if rendererIdentityEpoch != "3" {
-		t.Fatalf("renderer identity epoch = %q, want 3", rendererIdentityEpoch)
+	if rendererIdentityEpoch != "4" {
+		t.Fatalf("renderer identity epoch = %q, want 4", rendererIdentityEpoch)
 	}
 }
 
@@ -343,5 +352,25 @@ func TestMachineResultReportsTheToolchainThatWroteMedia(t *testing.T) {
 	wantFingerprint := mediaToolchainFingerprint(ProfileEssenceSegments, "1", report)
 	if result.MediaToolchain != wantFingerprint {
 		t.Fatalf("MediaToolchain = %q, want %q", result.MediaToolchain, wantFingerprint)
+	}
+}
+
+func TestRenderedTrackPolicy(t *testing.T) {
+	for _, muxer := range []string{"mp4", "mpegts"} {
+		for _, track := range []media.Stream{
+			{CodecType: "subtitle", CodecName: "mov_text"},
+			{CodecType: "subtitle", CodecName: "eia_608"},
+			{CodecType: "subtitle", CodecName: "dvb_subtitle"},
+			{CodecType: "subtitle", CodecName: "dvb_teletext"},
+			{CodecType: "data", CodecName: "scte_35"},
+			{CodecType: "data", CodecName: "tmcd"},
+			{CodecType: "attachment", CodecName: "ttf"},
+		} {
+			err := validateRenderedTracks(media.Probe{Streams: []media.Stream{track}}, muxer)
+			allowed := muxer == "mp4" && track.CodecName == "mov_text"
+			if (err == nil) != allowed {
+				t.Errorf("%s %s/%s: %v", muxer, track.CodecType, track.CodecName, err)
+			}
+		}
 	}
 }

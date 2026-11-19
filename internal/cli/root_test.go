@@ -371,8 +371,8 @@ func TestCLIStreamedNumericProfileAndEventOrdering(t *testing.T) {
 			t.Skip("requires ffmpeg and ffprobe")
 		}
 	}
-	filename := filepath.Join(t.TempDir(), "media.wav")
-	if output, err := exec.CommandContext(t.Context(), "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=3", "-c:a", "pcm_s16le", filename).CombinedOutput(); err != nil {
+	filename := filepath.Join(t.TempDir(), "media.mp4")
+	if output, err := exec.CommandContext(t.Context(), "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=3", "-c:a", "aac", filename).CombinedOutput(); err != nil {
 		t.Fatalf("fixture: %v: %s", err, output)
 	}
 	probe, err := (media.FFprobe{}).Probe(t.Context(), filename)
@@ -401,7 +401,7 @@ func TestCLIStreamedNumericProfileAndEventOrdering(t *testing.T) {
 			return
 		}
 		switch r.URL.Path {
-		case "/input.wav":
+		case "/input.mp4":
 			w.Header().Set("ETag", `"fixture"`)
 			http.ServeFile(w, r, filename)
 		case "/service":
@@ -419,7 +419,7 @@ func TestCLIStreamedNumericProfileAndEventOrdering(t *testing.T) {
 	}))
 	defer server.Close()
 	args := []string{"--profile", "muxed-segments", "--segment-duration=1s", "--input-mode=stream", "--format=json", "--progress=none",
-		"--auth=none", "--endpoint", server.URL, "--tams-flow-profile", profileID, "--input", server.URL + "/input.wav?signature=private-marker"}
+		"--auth=none", "--endpoint", server.URL, "--tams-flow-profile", profileID, "--input", server.URL + "/input.mp4?signature=private-marker"}
 	var stdout, stderr bytes.Buffer
 	if code := Execute(t.Context(), append(append([]string{}, args...), "--dry-run=exact"), strings.NewReader(""), &stdout, &stderr); code != ExitOK {
 		t.Fatalf("matching streamed Profile: exit=%d stdout=%s stderr=%s", code, &stdout, &stderr)
@@ -915,7 +915,7 @@ for arg in "$@"; do
   fi
 done
 cat <<'EOF'
-{"streams":[{"index":0,"codec_name":"h264","codec_type":"video","width":64,"height":64,"avg_frame_rate":"25/1","start_time":"0.0","duration":"1.0","disposition":{"attached_pic":0}}],"format":{"format_name":"mov,mp4","start_time":"0.0","duration":"1.0","size":"7","bit_rate":"56000"}}
+{"streams":[{"index":0,"codec_name":"h264","codec_type":"video","width":64,"height":64,"avg_frame_rate":"25/1","start_time":"0.0","duration":"1.0","disposition":{"attached_pic":0}}],"format":{"tags":{"major_brand":"isom"},"format_name":"mov,mp4","start_time":"0.0","duration":"1.0","size":"7","bit_rate":"56000"}}
 EOF
 `
 	if err := os.WriteFile(filename, []byte(script), 0o700); err != nil {

@@ -633,54 +633,28 @@ func TestInvalidFinalFlowMetadataCausesZeroMutation(t *testing.T) {
 	}
 }
 
-// TestUnsupportedContainerIsHonestAndActionable covers the product boundary:
-// opening a file is FFmpeg's job, but Tamsin only promises MIME mappings for a
-// supported profile. An unknown format must not inherit a lying suffix or be
-// guessed into a neighbouring family, and the operator must be told how to
-// supply domain knowledge that Tamsin does not have.
-func TestUnsupportedContainerIsHonestAndActionable(t *testing.T) {
+func TestUnsupportedContainerCannotBeOverridden(t *testing.T) {
 	t.Parallel()
-	for _, testCase := range []struct {
-		name          string
-		metadata      tams.Flow
-		wantContainer string
-		wantWarning   bool
-	}{
-		{name: "fallback warns", wantContainer: "application/octet-stream", wantWarning: true},
-		{name: "operator override", metadata: tams.Flow{"container": "application/vnd.example.media"}, wantContainer: "application/vnd.example.media"},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
+	for _, metadata := range []tams.Flow{nil, {"container": "video/mp4"}} {
+		for _, arguments := range [][]string{nil, {"-f", "matroska"}} {
 			filename := filepath.Join(t.TempDir(), "misleading.mp4")
 			if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			client := newFakeClient()
-			var logged bytes.Buffer
-			logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
-			pipeline, err := New(Config{
-				Concurrency: 1, EssenceStorage: media.EssenceStorageMuxed,
-				FlowMetadata: testCase.metadata,
-			}, client, unknownContainerProber{}, nil, logger, nil)
+			pipeline, err := New(Config{Concurrency: 1, EssenceStorage: media.EssenceStorageMuxed, FlowMetadata: metadata, FFmpegArgs: arguments, SegmentDuration: time.Second},
+				client, unknownContainerProber{}, &recordingSegmenter{}, discardLogger(), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
-			if err != nil {
-				t.Fatal(err)
+			batch, err := pipeline.Run(t.Context(), []source.Item{localSource(filename)})
+			if err != nil || batch.Failed != 1 || batch.Results[0].Failure.Code != FailureCodeMediaUnsupported {
+				t.Fatalf("run: %v, results: %+v", err, batch.Results)
 			}
-			flow := client.flows[batch.Results[0].RootFlowID]
-			if flow["container"] != testCase.wantContainer {
-				t.Fatalf("container = %v, want %s", flow["container"], testCase.wantContainer)
+			if len(client.flows) != 0 || client.allocations != 0 || client.uploads != 0 {
+				t.Fatal("unsupported container mutated TAMS")
 			}
-			warned := strings.Contains(logged.String(), "outside Tamsin's supported profile")
-			if warned != testCase.wantWarning {
-				t.Fatalf("warning present = %t, want %t; log: %s", warned, testCase.wantWarning, logged.String())
-			}
-			if testCase.wantWarning && !strings.Contains(logged.String(), "--flow-metadata") {
-				t.Fatalf("warning gives no override action: %s", logged.String())
-			}
-		})
+		}
 	}
 }
 

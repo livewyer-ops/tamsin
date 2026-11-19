@@ -338,6 +338,26 @@ docker run --rm --entrypoint ffmpeg -v "$fixtures:/fixtures" -u "$(id -u):$(id -
   "$IMAGE" -hide_banner -loglevel error -y \
   -i /fixtures/single/demo.ts -f lavfi -i "sine=frequency=440:sample_rate=48000" \
   -map 0:v -map 1:a -c:v copy -c:a aac -shortest /fixtures/muxed/muxed.ts
+# MP4 and sparse mov_text carriage use the same pinned runtime as ingest.
+mkdir -p "$fixtures/mp4"
+cat > "$fixtures/mp4/sparse.srt" <<'SUBTITLES'
+1
+00:00:00,100 --> 00:00:00,700
+First cue
+
+2
+00:00:05,100 --> 00:00:05,700
+Last cue
+SUBTITLES
+docker run --rm --entrypoint ffmpeg -v "$fixtures:/fixtures" -u "$(id -u):$(id -g)" \
+  "$IMAGE" -hide_banner -loglevel error -y \
+  -f lavfi -i "testsrc2=size=128x96:rate=25:duration=7" \
+  -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=7" \
+  -i /fixtures/mp4/sparse.srt -map 0:v -map 1:a -map 2:s \
+  -c:v libx264 -g 50 -bf 2 -c:a aac -c:s mov_text /fixtures/mp4/sparse.mp4
+docker run --rm --entrypoint ffmpeg -v "$fixtures:/fixtures" -u "$(id -u):$(id -g)" \
+  "$IMAGE" -hide_banner -loglevel error -y -i /fixtures/mp4/sparse.mp4 \
+  -map 0:a -c copy /fixtures/mp4/audio.mp4
 docker run --rm --entrypoint ffprobe -v "$fixtures:/fixtures:ro" -u "$(id -u):$(id -g)" \
   "$IMAGE" -v error -show_entries stream=codec_type -of csv=p=0 /fixtures/muxed/muxed.ts \
   | sort -u | tr '\n' ' ' | grep -q 'audio video' || {
@@ -562,6 +582,18 @@ for flow_id in $(result_flow_ids "$fixtures/local-file.events.jsonl"); do
   assert_flow_conformance local-file "$flow_id"
 done
 
+run_ingest mp4-audio 1 --profile preserve -i /fixtures/mp4/audio.mp4
+run_ingest mp4-muxed 1 --profile muxed-segments -d 2s -i /fixtures/mp4/sparse.mp4
+run_ingest mp4-muxed-resume 1 --profile muxed-segments -d 2s -i /fixtures/mp4/sparse.mp4
+run_ingest mp4-independent 1 --profile essence-segments -d 2s -i /fixtures/mp4/sparse.mp4
+jq -s -e 'all(.[] | select(.type == "input.finished") | .payload;
+  .status == "resumed" and .verification == "verified")' "$fixtures/mp4-muxed-resume.events.jsonl" >/dev/null
+for name in mp4-audio mp4-muxed mp4-independent; do
+  for flow_id in $(result_flow_ids "$fixtures/$name.events.jsonl"); do
+    assert_flow_conformance "$name" "$flow_id"
+  done
+done
+
 if [ "$TAMS_VERSION" = "8.2" ]; then
   profile_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
   source_flow_id="$(jq -ser '.[] | select(.type == "input.finished") | .payload.root_flow_id' "$fixtures/local-file.events.jsonl")"
@@ -738,5 +770,5 @@ TAMSIN_AUTH_MODE=oauth-client docker run --rm --network host "${docker_host_args
   -e TAMSIN_HTTP_INSECURE_SKIP_VERIFY -e TAMSIN_FORMAT \
   "$IMAGE" doctor --online >/dev/null
 
-printf 'TAMS %s end-to-end matrix passed with profile %s: local, deterministic resume, directory, manifest, HTTP, stdin, S3, whole-file, MPEG-TS segments, bearer, URL token, and OAuth client credentials.\nFlows read back from the live service satisfied AppNote 0003 tag naming, AppNote 0006 container and collection rules, and operator-owned generation handling.\n' \
+printf 'TAMS %s end-to-end matrix passed with profile %s: local, deterministic resume, directory, manifest, HTTP, stdin, S3, whole-file, MP4 audio and sparse subtitles, MPEG-TS segments, bearer, URL token, and OAuth client credentials.\nFlows read back from the live service satisfied AppNote 0003 tag naming, AppNote 0006 container and collection rules, and operator-owned generation handling.\n' \
   "$TAMS_VERSION" "$PROFILE"

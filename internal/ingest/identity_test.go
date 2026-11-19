@@ -299,7 +299,7 @@ func TestStreamFlowIdentityExcludesLaterMeasurementsButIncludesOverrides(t *test
 		"essence_parameters": map[string]any{"frame_width": 1920, "frame_rate": map[string]any{"numerator": 25, "denominator": 1}}}
 	id := func(key string, flow tams.Flow, info media.FlowInfo, overrides tams.Flow) string {
 		t.Helper()
-		value, err := streamedFlowID(key, flow, info, overrides)
+		value, err := streamedFlowID(key, flow, info, overrides, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -519,7 +519,7 @@ func storedFlowIDs(client *fakeClient) []string {
 type filenameSensitiveProber struct{}
 
 func (filenameSensitiveProber) Probe(_ context.Context, filename string) (media.Probe, error) {
-	probe := media.Probe{Format: media.Format{Name: "raw", Duration: "1.0", StartTime: "0.0"}}
+	probe := media.Probe{Format: media.Format{Name: "mpegts", Duration: "1.0", StartTime: "0.0"}}
 	if strings.HasSuffix(filename, ".audio") {
 		probe.Streams = []media.Stream{{
 			CodecName: "pcm_s16le", CodecType: "audio", SampleRate: "48000", Channels: 2,

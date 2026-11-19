@@ -89,7 +89,7 @@ func (e *rollingExecution) validateSegment(record media.SegmentRecord, state *ro
 	if err != nil {
 		return nil, false, err
 	}
-	members := []graphFlow{{id: state.flowID, flow: state.flow, ownsMedia: true}}
+	members := []graphFlow{{id: state.flowID, role: state.role, flow: state.flow, ownsMedia: true}}
 	candidates := []tams.Flow{observed}
 	if record.StreamIndex == media.AllStreams {
 		members = e.graph.flows
@@ -106,8 +106,9 @@ func (e *rollingExecution) validateSegment(record media.SegmentRecord, state *ro
 	}
 	for index, member := range members {
 		candidate := candidates[index]
+		overrides := e.pipeline.overridesFor(e.graph, member)
 		if !e.stream.seen[member.id] {
-			if _, overridden := e.pipeline.config.FlowMetadata["essence_parameters"]; !overridden {
+			if _, overridden := overrides["essence_parameters"]; !overridden {
 				if parameters, present := candidate["essence_parameters"]; present {
 					member.flow["essence_parameters"] = parameters
 				}
@@ -116,7 +117,7 @@ func (e *rollingExecution) validateSegment(record media.SegmentRecord, state *ro
 		expected, _ := member.flow["essence_parameters"].(map[string]any)
 		parameters, _ := candidate["essence_parameters"].(map[string]any)
 		if !e.stream.ready[member.id] && cadenceReady {
-			if _, overridden := e.pipeline.config.FlowMetadata["essence_parameters"]; !overridden && stringField(candidate, "format") == "urn:x-nmos:format:video" {
+			if _, overridden := overrides["essence_parameters"]; !overridden && stringField(candidate, "format") == "urn:x-nmos:format:video" {
 				expected = maps.Clone(expected)
 				delete(expected, "frame_rate")
 				delete(expected, "vfr")
@@ -153,7 +154,7 @@ func (e *rollingExecution) validateSegment(record media.SegmentRecord, state *ro
 		for _, field := range []string{"format", "codec", "container", "essence_parameters"} {
 			actual, actualPresent := candidate[field]
 			declared, declaredPresent := declaredFlow[field]
-			if _, overridden := e.pipeline.config.FlowMetadata[field]; overridden && !actualPresent {
+			if _, overridden := overrides[field]; overridden && !actualPresent {
 				// The override supplies a value the media tools cannot derive;
 				// a segment that shows a different value still contradicts it.
 				continue

@@ -178,15 +178,14 @@ func TestInstalledFFmpegPublishesLiveSegmentManifest(t *testing.T) {
 
 // TestInstalledFFmpegRendersAreByteStable pins the property resume depends on:
 // an identical re-render produces identical bytes, hence identical Object
-// identifiers. Matroska is the sensitive case, since its muxer writes a random
-// segment UID unless the render is bit-exact.
+// identifiers.
 func TestInstalledFFmpegRendersAreByteStable(t *testing.T) {
 	executable, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		t.Skip("ffmpeg is not installed")
 	}
 	directory := t.TempDir()
-	input := filepath.Join(directory, "input.mkv")
+	input := filepath.Join(directory, "input.mp4")
 	command := exec.Command(executable,
 		"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=25",
 		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "2", "-c:v", "libx264", "-g", "25", "-c:a", "aac", "-shortest", input)
@@ -197,7 +196,7 @@ func TestInstalledFFmpegRendersAreByteStable(t *testing.T) {
 		digests := make(map[string]string)
 		err := (FFmpeg{Executable: executable}).Segment(context.Background(), SegmentRequest{
 			Input: input, Duration: time.Second, Format: SegmentFormatSource,
-			SourceContainer: SegmentContainer{Muxer: "matroska", Extension: ".mkv"},
+			SourceContainer: SegmentContainer{Muxer: "mp4", Extension: ".mp4"},
 			StreamIndices:   []int{AllStreams}, Directory: filepath.Join(directory, run), BitExact: true,
 		}, func(record SegmentRecord) error {
 			data, err := os.ReadFile(record.Path)
@@ -248,7 +247,7 @@ func TestFFmpegSegmentRejectsUnsupportedSourceContainer(t *testing.T) {
 		Input: "input.bin", Duration: time.Second, Format: SegmentFormatSource,
 		SourceContainer: SegmentContainer{}, StreamIndices: []int{AllStreams}, Directory: t.TempDir(),
 	}, func(SegmentRecord) error { return nil })
-	if err == nil || !strings.Contains(err.Error(), "outside Tamsin's segmentation profile") {
+	if err == nil || !strings.Contains(err.Error(), "output container must be MP4 or MPEG-TS") {
 		t.Fatalf("Segment() error = %v, want unsupported source-container guidance", err)
 	}
 }

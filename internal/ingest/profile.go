@@ -7,13 +7,14 @@ import (
 	"time"
 
 	"github.com/livewyer-ops/tamsin/internal/media"
+	"github.com/livewyer-ops/tamsin/internal/tams"
 )
 
 // ProfilePolicyVersion versions the built-in profile catalogue exposed by the
 // CLI and machine-event handshake. Individual profile versions live alongside
 // their definitions and change independently when that profile's bytes or Flow
 // semantics change.
-const ProfilePolicyVersion = "1"
+const ProfilePolicyVersion = "2"
 
 // CustomProfileVersion versions the identity recipe for treatments produced by
 // explicit operator overrides rather than a named built-in profile.
@@ -275,11 +276,30 @@ func validateResolvedProfile(config Config) error {
 // FFmpeg muxer accepts more combinations than broadcast and streaming readers
 // reliably consume, so compatibility is an explicit allow-list rather than an
 // assumption that a successful mux is interoperable.
-func validateMPEGTSSegmentCodecs(probe media.Probe) error {
-	compatible := map[string]map[string]bool{
-		"video": {"h264": true, "hevc": true, "mpeg2video": true},
-		"audio": {"aac": true, "mp2": true, "mp3": true, "ac3": true, "eac3": true},
+var mpegtsCompatible = map[string]map[string]bool{
+	"video": {"h264": true, "hevc": true, "mpeg2video": true},
+	"audio": {"aac": true, "mp2": true, "mp3": true, "ac3": true, "eac3": true, "s302m": true},
+}
+
+// validateRenderedTracks refuses unqualified carriage before Flow mutation.
+// Preserve stores the original bytes and never reaches this render policy.
+func validateRenderedTracks(probe media.Probe, muxer string) error {
+	for _, stream := range probe.Streams {
+		switch stream.CodecType {
+		case "subtitle":
+			if muxer == "mp4" && stream.CodecName == "mov_text" {
+				continue
+			}
+		case "data", "attachment":
+		default:
+			continue
+		}
+		return fmt.Errorf("stream %d (%s/%s) cannot be preserved by the %s render policy; use --profile preserve to retain the original bytes", stream.Index, stream.CodecType, stream.CodecName, muxer)
 	}
+	return nil
+}
+
+func validateMPEGTSSegmentCodecs(probe media.Probe) error {
 	essences := 0
 	for _, stream := range probe.Streams {
 		if stream.Disposition.AttachedPicture != 0 {
@@ -288,8 +308,8 @@ func validateMPEGTSSegmentCodecs(probe media.Probe) error {
 		essences++
 		codecType := strings.ToLower(stream.CodecType)
 		codec := strings.ToLower(stream.CodecName)
-		if !compatible[codecType][codec] {
-			return fmt.Errorf("stream %d codec %s/%s is outside the MPEG-TS segment compatibility policy; supported video codecs are h264, hevc and mpeg2video, and supported audio codecs are aac, mp2, mp3, ac3 and eac3", stream.Index, codecType, codec)
+		if !mpegtsCompatible[codecType][codec] {
+			return fmt.Errorf("stream %d codec %s/%s is outside the MPEG-TS segment compatibility policy; supported video codecs are h264, hevc and mpeg2video, and supported audio codecs are aac, mp2, mp3, ac3, eac3 and s302m", stream.Index, codecType, codec)
 		}
 	}
 	if essences == 0 {
@@ -328,6 +348,48 @@ func validateMuxerArguments(arguments []string, segmented bool, containerMuxer s
 		}
 		if expected == "" || !strings.EqualFold(value, expected) {
 			return fmt.Errorf("FFmpeg argument %s=%s conflicts with the resolved container policy (expected %s); use --segment-format or a named profile", name, value, expected)
+		}
+	}
+	return nil
+}
+
+// Container metadata must describe the bytes selected by the treatment.
+// Root overrides inherit into independent essences before role overrides.
+func (p *Pipeline) validateContainerOverrides(flow tams.Flow, info media.FlowInfo) error {
+	check := func(overrides tams.Flow, expected, role string) error {
+		value, present := overrides["container"]
+		if !present {
+			return nil
+		}
+		if value != expected || expected == "" {
+			return fmt.Errorf("container override for %s conflicts with the resolved media container %q", role, expected)
+		}
+		return nil
+	}
+	container := func(flow tams.Flow) string {
+		if target := p.config.SegmentFormat.ContainerMIME(); target != "" {
+			return target
+		}
+		value, _ := flow["container"].(string)
+		return value
+	}
+	independent := p.config.EssenceStorage == media.EssenceStorageIndependent && len(info.Collected) > 0
+	if !independent {
+		if err := check(p.config.FlowMetadata, container(flow), "input"); err != nil {
+			return err
+		}
+	}
+	for _, essence := range info.Collected {
+		overrides := p.config.CollectedFlowMetadata[essence.Role]
+		expected := ""
+		if independent {
+			if _, present := overrides["container"]; !present {
+				overrides = p.config.FlowMetadata
+			}
+			expected = container(essence.Flow)
+		}
+		if err := check(overrides, expected, essence.Role); err != nil {
+			return err
 		}
 	}
 	return nil

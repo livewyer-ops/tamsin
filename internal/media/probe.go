@@ -42,17 +42,23 @@ var mediaToolEnvironmentNames = map[string]struct{}{
 }
 
 type Stream struct {
-	Index         int    `json:"index"`
-	CodecName     string `json:"codec_name"`
-	CodecLongName string `json:"codec_long_name"`
-	CodecType     string `json:"codec_type"`
-	HasBFrames    int    `json:"has_b_frames"`
-	Profile       string `json:"profile"`
-	Width         int    `json:"width"`
-	Height        int    `json:"height"`
-	PixelFormat   string `json:"pix_fmt"`
-	FieldOrder    string `json:"field_order"`
-	ColorSpace    string `json:"color_space"`
+	Index int `json:"index"`
+	// ID is the container's own identifier for the track, as FFprobe reports
+	// it: the MPEG-TS PID or the ISO BMFF track ID, hexadecimal with 0x.
+	ID        string `json:"id"`
+	CodecName string `json:"codec_name"`
+	// CodecTagString is the container's four-character tag, the only name
+	// FFprobe gives a track FFmpeg cannot decode, such as QuickTime timecode.
+	CodecTagString string `json:"codec_tag_string"`
+	CodecLongName  string `json:"codec_long_name"`
+	CodecType      string `json:"codec_type"`
+	HasBFrames     int    `json:"has_b_frames"`
+	Profile        string `json:"profile"`
+	Width          int    `json:"width"`
+	Height         int    `json:"height"`
+	PixelFormat    string `json:"pix_fmt"`
+	FieldOrder     string `json:"field_order"`
+	ColorSpace     string `json:"color_space"`
 	// ColorPrimaries names the colour system. ColorSpace is the matrix
 	// coefficients, which usually agree with it and are not the same question.
 	ColorPrimaries string `json:"color_primaries"`
@@ -73,10 +79,23 @@ type Stream struct {
 	// summaries above.
 	Cadence      CadenceEvidence  `json:"-"`
 	Presentation PresentationSpan `json:"-"`
-	StartTime    string           `json:"start_time"`
-	Duration     string           `json:"duration"`
-	BitRate      string           `json:"bit_rate"`
-	Disposition  struct {
+	// SampleCount, KeyFrames and LastSampleTime are filled by the packet
+	// measurement of a rendered Object: how many samples the stream holds, how
+	// many are stream access points, and the presentation time (rational
+	// seconds) of the last sample. They are not FFprobe JSON fields.
+	// Empty is set only after measuring a sparse track with no packets in an Object.
+	Empty          bool   `json:"-"`
+	SampleCount    int    `json:"-"`
+	KeyFrames      int    `json:"-"`
+	LastSampleTime string `json:"-"`
+	// FirstDecodedTime is the presentation time of the stream's first packet
+	// in decode order: the frame a Segment was cut on. Frames presented before
+	// it (the leading pictures of an open GOP) belong to the same Object.
+	FirstDecodedTime string `json:"-"`
+	StartTime        string `json:"start_time"`
+	Duration         string `json:"duration"`
+	BitRate          string `json:"bit_rate"`
+	Disposition      struct {
 		AttachedPicture int `json:"attached_pic"`
 	} `json:"disposition"`
 }
@@ -121,6 +140,9 @@ func (p FFprobe) Probe(ctx context.Context, filename string) (Probe, error) {
 	arguments = append(arguments, "-show_streams", "-show_format", "-of", "json", filename)
 	stdout, stderr, err := runTool(ctx, executable, arguments...)
 	if err != nil {
+		if strings.Contains(string(stderr), "not on whitelist") {
+			return Probe{}, fmt.Errorf("%w: only MP4 and MPEG-TS are supported", ErrUnsupportedContainer)
+		}
 		return Probe{}, fmt.Errorf("probe %q: %w: %s", filename, err, strings.TrimSpace(string(stderr)))
 	}
 	var result Probe

@@ -216,7 +216,7 @@ func benchFixture(tb testing.TB) source.Item {
 func BenchmarkRemoteInput(b *testing.B) {
 	filename := os.Getenv("TAMSIN_BENCH_INPUT")
 	if filename == "" {
-		filename = streamFixture(b, ".wav", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=180", "-c:a", "pcm_s16le")
+		filename = streamFixture(b, ".ts", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=180", "-c:a", "mp2", "-b:a", "384k")
 	}
 	for _, mode := range []InputMode{InputStage, InputStream} {
 		b.Run(string(mode), func(b *testing.B) {

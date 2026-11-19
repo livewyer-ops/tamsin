@@ -200,8 +200,8 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 	if request.Format == SegmentFormatMPEGTS {
 		outputContainer = SegmentContainer{Muxer: "mpegts", Extension: ".ts"}
 	}
-	if outputContainer.Muxer == "" || outputContainer.Extension == "" {
-		return errors.New("source container is outside Tamsin's segmentation profile; use --segment-format mpegts or store it whole")
+	if (outputContainer.Muxer != "mp4" && outputContainer.Muxer != "mpegts") || outputContainer.Extension == "" {
+		return errors.New("output container must be MP4 or MPEG-TS")
 	}
 	extension := strings.ToLower(outputContainer.Extension)
 	if !strings.HasPrefix(extension, ".") {
@@ -212,20 +212,22 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 	arguments = append(arguments, "-i", request.Input)
 	outputs := make([]segmentOutput, 0, len(request.StreamIndices))
 	for outputIndex, streamIndex := range request.StreamIndices {
+		muxer := outputContainer.Muxer
 		mapSpec := "0"
 		prefix := "segment"
 		if streamIndex != AllStreams {
 			mapSpec = "0:" + strconv.Itoa(streamIndex)
 			prefix = "essence-" + strconv.Itoa(streamIndex)
 		}
-		arguments = append(arguments, "-map", mapSpec, "-c", "copy")
+		arguments = append(arguments, "-map", mapSpec)
+		arguments = append(arguments, "-c", "copy")
 		if request.BitExact {
 			arguments = append(arguments, "-fflags", "+bitexact")
 		}
 		arguments = append(arguments, request.AdditionalArgs...)
 		if request.Duration <= 0 {
 			path := filepath.Join(request.Directory, prefix+extension)
-			arguments = append(arguments, "-f", outputContainer.Muxer, path)
+			arguments = append(arguments, "-f", muxer, path)
 			outputs = append(outputs, segmentOutput{streamIndex: streamIndex, path: path})
 			continue
 		}
@@ -237,7 +239,7 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 		pattern := filepath.Join(request.Directory, prefix+"-%08d"+extension)
 		arguments = append(arguments,
 			"-f", "segment",
-			"-segment_format", outputContainer.Muxer,
+			"-segment_format", muxer,
 			"-segment_time", strconv.FormatFloat(request.Duration.Seconds(), 'f', 9, 64),
 			"-reset_timestamps", "1",
 			"-segment_list", "pipe:"+strconv.Itoa(3+outputIndex),

@@ -116,22 +116,22 @@ func TestProbePresentationDistinguishesVariableCadence(t *testing.T) {
 	}
 	directory := t.TempDir()
 
-	fixed := filepath.Join(directory, "fixed.mkv")
+	fixed := filepath.Join(directory, "fixed.mp4")
 	buildFixture(t,
 		"-f", "lavfi", "-i", "testsrc=size=128x96:rate=30000/1001:duration=2",
-		"-c:v", "ffv1", fixed,
+		"-c:v", "libx264", "-bf", "0", "-video_track_timescale", "1000", fixed,
 	)
 	reordered := filepath.Join(directory, "reordered.mp4")
 	buildFixture(t,
 		"-f", "lavfi", "-i", "testsrc2=size=128x96:rate=25:duration=2",
 		"-c:v", "libx264", "-bf", "3", "-x264-params", "b-adapt=0", reordered,
 	)
-	variable := filepath.Join(directory, "variable.mkv")
+	variable := filepath.Join(directory, "variable.mp4")
 	buildFixture(t,
 		"-f", "lavfi", "-i", "testsrc=size=128x96:rate=24:duration=1",
 		"-f", "lavfi", "-i", "testsrc=size=128x96:rate=30:duration=1",
 		"-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
-		"-map", "[v]", "-fps_mode", "vfr", "-c:v", "ffv1", variable,
+		"-map", "[v]", "-fps_mode", "vfr", "-c:v", "libx264", "-bf", "0", variable,
 	)
 
 	for _, testCase := range []struct {
@@ -175,7 +175,7 @@ func TestProbePresentationDistinguishesVariableCadence(t *testing.T) {
 					got, testCase.want, packetProbe.Streams[0].AverageFrameRate, packetProbe.Streams[0].RealFrameRate)
 			}
 
-			flow, _, err := BuildFlow(packetProbe, testIdentity(), "video/matroska", EssenceStorageMuxed)
+			flow, _, err := BuildFlow(packetProbe, testIdentity(), "video/mp4", EssenceStorageMuxed)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -211,7 +211,7 @@ func TestProbeReadsDefensibleInterlaceEvidence(t *testing.T) {
 	}
 	for _, fixture := range fixtures {
 		t.Run(fixture.name, func(t *testing.T) {
-			path := filepath.Join(directory, fixture.name+".mpg")
+			path := filepath.Join(directory, fixture.name+".ts")
 			buildFixture(t,
 				"-f", "lavfi", "-i", "testsrc2=size=720x576:rate=50:duration=1",
 				"-vf", fixture.filter, "-c:v", "mpeg2video", "-flags", "+ilme+ildct", "-top", fixture.top, path,
@@ -220,7 +220,7 @@ func TestProbeReadsDefensibleInterlaceEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := interlaceMode(probe.Format, probe.Streams[0].FieldOrder); got != fixture.want {
+			if got := interlaceMode(probe.Streams[0].FieldOrder); got != fixture.want {
 				t.Fatalf("field_order=%q maps to %q, want %q", probe.Streams[0].FieldOrder, got, fixture.want)
 			}
 		})

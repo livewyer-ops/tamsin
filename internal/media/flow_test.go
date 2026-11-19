@@ -61,16 +61,16 @@ func TestBuildFlowRecordsResolvedMediaToolchain(t *testing.T) {
 
 func TestBuildMuxedFlow(t *testing.T) {
 	t.Parallel()
-	probe := Probe{Format: Format{Name: "matroska", Duration: "2"}}
+	probe := Probe{Format: Format{Name: "mpegts", Duration: "2"}}
 	probe.Streams = []Stream{
 		{CodecName: "h264", CodecType: "video", Width: 1280, Height: 720, AverageFrameRate: "25/1"},
 		{CodecName: "aac", CodecType: "audio", SampleRate: "48000", Channels: 2},
 	}
-	flow, _, err := BuildFlow(probe, testIdentity(), "video/x-matroska", EssenceStorageMuxed)
+	flow, _, err := BuildFlow(probe, testIdentity(), "video/mp2t", EssenceStorageMuxed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if flow["format"] != "urn:x-nmos:format:multi" || flow["container"] != "video/matroska" {
+	if flow["format"] != "urn:x-nmos:format:multi" || flow["container"] != "video/mp2t" {
 		t.Fatalf("unexpected muxed Flow: %#v", flow)
 	}
 	if _, exists := flow["codec"]; exists {
@@ -80,9 +80,9 @@ func TestBuildMuxedFlow(t *testing.T) {
 
 func TestBuildAudioFlow(t *testing.T) {
 	t.Parallel()
-	probe := Probe{Format: Format{Name: "wav", Duration: "0.25"}}
+	probe := Probe{Format: Format{Name: "mpegts", Duration: "0.25"}}
 	probe.Streams = []Stream{{CodecName: "pcm_s24le", CodecType: "audio", SampleRate: "48000", Channels: 2, BitsPerRawSample: "24"}}
-	flow, _, err := BuildFlow(probe, testIdentity(), "audio/wav", EssenceStorageMuxed)
+	flow, _, err := BuildFlow(probe, testIdentity(), "video/mp2t", EssenceStorageMuxed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,13 +105,13 @@ func TestPCMLayoutFollowsFFmpegCodecEvidence(t *testing.T) {
 		t.Run(testCase.codec, func(t *testing.T) {
 			t.Parallel()
 			probe := Probe{
-				Format: Format{Name: "wav", Duration: "1"},
+				Format: Format{Name: "mpegts", Duration: "1"},
 				Streams: []Stream{{
 					CodecName: testCase.codec, CodecType: "audio", SampleRate: "48000", Channels: 2,
 					BitsPerRawSample: "24",
 				}},
 			}
-			flow, _, err := BuildFlow(probe, testIdentity(), "audio/wav", EssenceStorageMuxed)
+			flow, _, err := BuildFlow(probe, testIdentity(), "video/mp2t", EssenceStorageMuxed)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -144,23 +144,10 @@ func TestMPEGLayerTwoUsesTheStreamingProfileCodecType(t *testing.T) {
 	}
 }
 
-func TestBuildStillImageFlow(t *testing.T) {
-	t.Parallel()
-	probe := Probe{Format: Format{Name: "png_pipe"}}
-	probe.Streams = []Stream{{CodecName: "png", CodecType: "video", Width: 64, Height: 32}}
-	flow, info, err := BuildFlow(probe, testIdentity(), "image/png", EssenceStorageMuxed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if flow["format"] != "urn:x-tam:format:image" || flow["container"] != "image/png" || info.Duration != 0 {
-		t.Fatalf("unexpected image Flow: %#v, %#v", flow, info)
-	}
-}
-
 func TestProbeTimingIncludesDelayedStreamEnd(t *testing.T) {
 	t.Parallel()
 	probe := Probe{
-		Format: Format{Name: "matroska"},
+		Format: Format{Name: "mpegts"},
 		Streams: []Stream{
 			{
 				Index: 0, CodecType: "video", CodecName: "mjpeg", Width: 8, Height: 8,
@@ -175,7 +162,7 @@ func TestProbeTimingIncludesDelayedStreamEnd(t *testing.T) {
 				StartTime: "12", Duration: "7"},
 		},
 	}
-	_, info, err := BuildFlow(probe, testIdentity(), "video/matroska", EssenceStorageIndependent)
+	_, info, err := BuildFlow(probe, testIdentity(), "video/mp2t", EssenceStorageIndependent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,28 +208,23 @@ func TestProbeTimingRejectsInvalidDurationAndOffset(t *testing.T) {
 	}
 }
 
-func TestBuildDataFlowIncludesStorageContainer(t *testing.T) {
+func TestBuildFlowRejectsUnknownContainer(t *testing.T) {
 	t.Parallel()
-	flow, info, err := BuildFlow(Probe{}, testIdentity(), "application/octet-stream", EssenceStorageMuxed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if flow["format"] != "urn:x-nmos:format:data" || flow["container"] != "application/octet-stream" ||
-		info.ContentType != "application/octet-stream" {
-		t.Fatalf("unexpected data Flow: %#v, %#v", flow, info)
+	if _, _, err := BuildFlow(Probe{}, testIdentity(), "application/octet-stream", EssenceStorageMuxed); err == nil {
+		t.Fatal("unknown container accepted")
 	}
 }
 
 func TestUnsupportedCodecIsNotInvented(t *testing.T) {
 	t.Parallel()
 	probe := Probe{
-		Format: Format{Name: "matroska", Duration: "1"},
+		Format: Format{Name: "mpegts", Duration: "1"},
 		Streams: []Stream{{
 			Index: 4, CodecName: "future_picture_codec", CodecType: "video",
 			Width: 1920, Height: 1080, AverageFrameRate: "25/1",
 		}},
 	}
-	flow, info, err := BuildFlow(probe, testIdentity(), "video/matroska", EssenceStorageMuxed)
+	flow, info, err := BuildFlow(probe, testIdentity(), "video/mp2t", EssenceStorageMuxed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,28 +245,26 @@ func TestUnsupportedCodecIsNotInvented(t *testing.T) {
 func TestInterlaceModeOmitsAmbiguousAndPsFClaims(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {
-		format     Format
 		fieldOrder string
 		want       string
 	}{
 		{fieldOrder: "progressive", want: "progressive"},
-		{format: Format{Name: "mxf"}, fieldOrder: "progressive", want: ""},
 		{fieldOrder: "tt", want: "interlaced_tff"},
 		{fieldOrder: "bb", want: "interlaced_bff"},
 		{fieldOrder: "tb", want: ""},
 		{fieldOrder: "bt", want: ""},
 		{fieldOrder: "unknown", want: ""},
 	} {
-		if got := interlaceMode(testCase.format, testCase.fieldOrder); got != testCase.want {
+		if got := interlaceMode(testCase.fieldOrder); got != testCase.want {
 			t.Errorf("interlaceMode(%q) = %q, want %q", testCase.fieldOrder, got, testCase.want)
 		}
-		if got := interlaceMode(testCase.format, testCase.fieldOrder); got == "interlaced_psf" {
+		if got := interlaceMode(testCase.fieldOrder); got == "interlaced_psf" {
 			t.Errorf("interlaceMode(%q) invented PsF", testCase.fieldOrder)
 		}
 	}
 }
 
-// Unknown containers must stay generic, without guessing from their extension.
+// Unsupported containers must be refused, without guessing from their extension.
 func TestContainerProfilePolicy(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {
@@ -293,33 +273,32 @@ func TestContainerProfilePolicy(t *testing.T) {
 		streamType string
 		detected   string
 		want       string
-		supported  bool
 	}{
-		{name: "mpeg-ts audio remains file-level video", format: Format{Name: "mpegts"}, streamType: "audio", want: "video/mp2t", supported: true},
-		{name: "mxf", format: Format{Name: "mxf"}, streamType: "video", want: "application/mxf", supported: true},
-		{name: "webm content in shared demuxer", format: Format{Name: "matroska,webm"}, detected: "video/webm", streamType: "video", want: "video/webm", supported: true},
-		{name: "audio webm", format: Format{Name: "matroska,webm"}, detected: "video/webm", streamType: "audio", want: "audio/webm", supported: true},
-		{name: "matroska shared demuxer", format: Format{Name: "matroska,webm"}, streamType: "video", want: "video/matroska", supported: true},
-		{name: "registered video matroska", format: Format{Name: "matroska"}, streamType: "video", want: "video/matroska", supported: true},
-		{name: "registered audio matroska", format: Format{Name: "matroska"}, streamType: "audio", want: "audio/matroska", supported: true},
-		{name: "quicktime has no invented audio type", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "qt  "}}, streamType: "audio", want: "video/quicktime", supported: true},
-		{name: "3gpp video", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "3gp6"}}, streamType: "video", want: "video/3gpp", supported: true},
-		{name: "3gpp2 audio", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "3g2a"}}, streamType: "audio", want: "audio/3gpp2", supported: true},
-		{name: "mp4 video", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "isom"}}, streamType: "video", want: "video/mp4", supported: true},
-		{name: "mp4 audio", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "M4A "}}, streamType: "audio", want: "audio/mp4", supported: true},
-		{name: "new mp4 brand uses declared compatibility", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "new1", "compatible_brands": "new1isomiso2mp41"}}, streamType: "video", want: "video/mp4", supported: true},
-		{name: "mp4 without presentation", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "mp42"}}, streamType: "data", want: "application/mp4", supported: true},
-		{name: "unknown iso brand is not mp4", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "avif"}}, streamType: "video", detected: "image/avif", want: "application/octet-stream"},
-		{name: "unknown ffprobe format ignores plausible sniff", format: Format{Name: "mystery"}, streamType: "video", detected: "video/mp4", want: "application/octet-stream"},
-		{name: "mpeg elementary video", format: Format{Name: "mpegvideo"}, streamType: "video", want: "video/mpeg", supported: true},
-		{name: "ogg audio", format: Format{Name: "ogg"}, streamType: "audio", want: "audio/ogg", supported: true},
-		{name: "ogg without essence", format: Format{Name: "ogg"}, streamType: "data", want: "application/octet-stream"},
+		{name: "mpeg-ts audio remains file-level video", format: Format{Name: "mpegts"}, streamType: "audio", want: "video/mp2t"},
+		{name: "mxf", format: Format{Name: "mxf"}, streamType: "video"},
+		{name: "webm content in shared demuxer", format: Format{Name: "matroska,webm"}, detected: "video/webm", streamType: "video"},
+		{name: "audio webm", format: Format{Name: "matroska,webm"}, detected: "video/webm", streamType: "audio"},
+		{name: "matroska shared demuxer", format: Format{Name: "matroska,webm"}, streamType: "video"},
+		{name: "video matroska rejected", format: Format{Name: "matroska"}, streamType: "video"},
+		{name: "audio matroska rejected", format: Format{Name: "matroska"}, streamType: "audio"},
+		{name: "quicktime audio rejected", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "qt  "}}, streamType: "audio"},
+		{name: "3gpp video", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "3gp6"}}, streamType: "video"},
+		{name: "3gpp2 audio", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "3g2a"}}, streamType: "audio"},
+		{name: "mp4 video", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "isom"}}, streamType: "video", want: "video/mp4"},
+		{name: "mp4 audio", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "M4A "}}, streamType: "audio", want: "audio/mp4"},
+		{name: "new mp4 brand uses declared compatibility", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "new1", "compatible_brands": "new1isomiso2mp41"}}, streamType: "video", want: "video/mp4"},
+		{name: "mp4 without presentation", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "mp42"}}, streamType: "data", want: "application/mp4"},
+		{name: "unknown iso brand is not mp4", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "avif"}}, streamType: "video", detected: "image/avif"},
+		{name: "unknown ffprobe format ignores plausible sniff", format: Format{Name: "mystery"}, streamType: "video", detected: "video/mp4"},
+		{name: "mpeg elementary video", format: Format{Name: "mpegvideo"}, streamType: "video"},
+		{name: "ogg audio", format: Format{Name: "ogg"}, streamType: "audio"},
+		{name: "ogg without essence", format: Format{Name: "ogg"}, streamType: "data"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			got := describeContainer(testCase.format, testCase.streamType, testCase.detected)
-			if got.mediaType != testCase.want || got.supported != testCase.supported {
-				t.Fatalf("describeContainer() = %#v, want type %q supported=%t", got, testCase.want, testCase.supported)
+			if got != testCase.want {
+				t.Fatalf("describeContainer() = %q, want %q", got, testCase.want)
 			}
 		})
 	}
@@ -342,8 +321,8 @@ func TestProbeCarriesISOContainerBrand(t *testing.T) {
 		mediaType string
 	}{
 		{extension: "mp4", brand: "isom", mediaType: "video/mp4"},
-		{extension: "mov", brand: "qt", mediaType: "video/quicktime"},
-		{extension: "3gp", brand: "3gp", mediaType: "video/3gpp"},
+		{extension: "mov", brand: "qt", mediaType: ""},
+		{extension: "3gp", brand: "3gp", mediaType: ""},
 	} {
 		t.Run(testCase.extension, func(t *testing.T) {
 			filename := filepath.Join(t.TempDir(), "fixture."+testCase.extension)
@@ -363,8 +342,8 @@ func TestProbeCarriesISOContainerBrand(t *testing.T) {
 				t.Fatalf("major_brand = %q, want prefix %q", brand, testCase.brand)
 			}
 			container := describeContainer(probe.Format, "video", "")
-			if !container.supported || container.mediaType != testCase.mediaType {
-				t.Fatalf("container = %#v, want supported %s", container, testCase.mediaType)
+			if container != testCase.mediaType {
+				t.Fatalf("container = %q, want %q", container, testCase.mediaType)
 			}
 		})
 	}
@@ -397,52 +376,21 @@ func TestSourceSegmentationProfileComesFromProbe(t *testing.T) {
 		want     SegmentContainer
 	}{
 		{name: "mpeg-ts", format: Format{Name: "mpegts"}, want: SegmentContainer{Muxer: "mpegts", Extension: ".ts"}},
-		{name: "webm content", format: Format{Name: "matroska,webm"}, detected: "video/webm", want: SegmentContainer{Muxer: "webm", Extension: ".webm"}},
-		{name: "matroska shared demuxer", format: Format{Name: "matroska,webm"}, want: SegmentContainer{Muxer: "matroska", Extension: ".mkv"}},
-		{name: "quicktime brand", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "qt  "}}, want: SegmentContainer{Muxer: "mov", Extension: ".mov"}},
+		{name: "webm content", format: Format{Name: "matroska,webm"}, detected: "video/webm"},
+		{name: "matroska shared demuxer", format: Format{Name: "matroska,webm"}},
+		{name: "quicktime brand", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "qt  "}}},
 		{name: "mp4 compatible brand", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "new1", "compatible_brands": "new1isom"}}, want: SegmentContainer{Muxer: "mp4", Extension: ".mp4"}},
 		{name: "unknown", format: Format{Name: "proprietary"}},
-		{name: "mj2 is storable but not safely remuxed", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "mjp2"}}},
-		{name: "aac remuxes as adts", format: Format{Name: "aac"}, want: SegmentContainer{Muxer: "adts", Extension: ".aac"}},
-		{name: "mpeg elementary video is storable but not remuxed", format: Format{Name: "mpegvideo"}},
-		{name: "image sequence follows content", format: Format{Name: "image2"}, detected: "image/png", want: SegmentContainer{Muxer: "image2", Extension: ".png"}},
-		{name: "image sequence without a remux suffix", format: Format{Name: "image2"}, detected: "image/jp2"},
+		{name: "mj2 rejected", format: Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "mjp2"}}},
+		{name: "raw aac rejected", format: Format{Name: "aac"}},
+		{name: "elementary video rejected", format: Format{Name: "mpegvideo"}},
+		{name: "png sequence rejected", format: Format{Name: "image2"}, detected: "image/png"},
+		{name: "jpeg2000 sequence rejected", format: Format{Name: "image2"}, detected: "image/jp2"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			if got := SourceSegmentContainer(testCase.format, testCase.detected); got != testCase.want {
 				t.Fatalf("SourceSegmentContainer() = %#v, want %#v", got, testCase.want)
-			}
-		})
-	}
-}
-
-func TestMatroskaAndWebMUseContentEvidence(t *testing.T) {
-	for _, executable := range []string{"ffmpeg", "ffprobe"} {
-		if _, err := exec.LookPath(executable); err != nil {
-			t.Skipf("requires %s", executable)
-		}
-	}
-	for _, fixture := range []struct{ extension, codec, muxer, mime string }{
-		{"mkv", "libx264", "matroska", "video/matroska"},
-		{"webm", "libvpx", "webm", "video/webm"},
-	} {
-		t.Run(fixture.extension, func(t *testing.T) {
-			filename := filepath.Join(t.TempDir(), "fixture."+fixture.extension)
-			buildFixture(t, "-f", "lavfi", "-i", "color=size=64x64:rate=25", "-t", "0.2", "-c:v", fixture.codec, filename)
-			probe, err := (FFprobe{}).Probe(context.Background(), filename)
-			if err != nil {
-				t.Fatal(err)
-			}
-			detected, err := DetectContentType(filename)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := describeContainer(probe.Format, "video", detected); got.mediaType != fixture.mime {
-				t.Fatalf("container = %#v; probe=%q detected=%q", got, probe.Format.Name, detected)
-			}
-			if got := SourceSegmentContainer(probe.Format, detected); got.Muxer != fixture.muxer {
-				t.Fatalf("segment container = %#v, want %s", got, fixture.muxer)
 			}
 		})
 	}
@@ -460,33 +408,6 @@ func TestDetectContentTypeDoesNotTrustExtension(t *testing.T) {
 	}
 	if got != "text/plain" {
 		t.Fatalf("DetectContentType() = %q, want content-derived text/plain", got)
-	}
-}
-
-func TestEBMLContentDetectionRequiresACompleteDocTypeElement(t *testing.T) {
-	t.Parallel()
-	for _, test := range []struct {
-		name, header, want string
-	}{
-		{"webm", "\x1a\x45\xdf\xa3\x87\x42\x82\x84webm", "video/webm"},
-		{"matroska", "\x1a\x45\xdf\xa3\x8b\x42\x82\x88matroska", "video/matroska"},
-		{"two-byte size", "\x1a\x45\xdf\xa3\x88\x42\x82\x40\x04webm", "video/webm"},
-		{"void payload is not a document type", "\x1a\x45\xdf\xa3\x89\xec\x87\x42\x82\x84webm", "application/octet-stream"},
-		{"outside header", "\x1a\x45\xdf\xa3\x80\x42\x82\x84webm", "application/octet-stream"},
-		{"truncated", "\x1a\x45\xdf\xa3\x87\x42\x82\x84web", "application/octet-stream"},
-		{"invalid size", "\x1a\x45\xdf\xa3\x00", "application/octet-stream"},
-		{"unknown size", "\x1a\x45\xdf\xa3\xff\x42\x82\x84webm", "application/octet-stream"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "media.bin")
-			if err := os.WriteFile(path, []byte(test.header), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			got, err := DetectContentType(path)
-			if err != nil || got != test.want {
-				t.Fatalf("DetectContentType() = %q, %v; want %q", got, err, test.want)
-			}
-		})
 	}
 }
 

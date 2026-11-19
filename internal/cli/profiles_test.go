@@ -34,7 +34,7 @@ func TestProfilesCommandPublishesOrderedHumanAndMachineCatalogues(t *testing.T) 
 		t.Fatalf("JSON profiles exit = %d, stderr = %s", code, jsonErr.String())
 	}
 	wire := assertJSONKeys(t, jsonOut.Bytes(), "schema_version", "profile_policy_version", "profiles")
-	if string(wire["schema_version"]) != `"1.0"` || string(wire["profile_policy_version"]) != `"1"` {
+	if string(wire["schema_version"]) != `"1.0"` || string(wire["profile_policy_version"]) != `"2"` {
 		t.Fatalf("profiles report versions = %s", jsonOut.String())
 	}
 	var profiles []json.RawMessage

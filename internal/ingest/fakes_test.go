@@ -31,7 +31,7 @@ type presentationCountingProber struct {
 }
 
 func (*presentationCountingProber) Probe(context.Context, string) (media.Probe, error) {
-	return media.Probe{Streams: []media.Stream{{
+	return media.Probe{Format: media.Format{Name: "mpegts"}, Streams: []media.Stream{{
 		CodecName: "h264", CodecType: "video", Width: 64, Height: 64, AverageFrameRate: "25/1",
 	}}}, nil
 }
@@ -555,6 +555,7 @@ func (c *fakeClient) RegisterSegment(_ context.Context, flowID string, request t
 	c.segments[flowID][request.ObjectID] = tams.Segment{
 		ObjectID: request.ObjectID, Timerange: request.Timerange,
 		ObjectTimerange: request.ObjectTimerange, TSOffset: request.TSOffset,
+		LastDuration: request.LastDuration, KeyFrameCount: request.KeyFrameCount,
 		GetURLs: []tams.PresignedURL{{URL: "mem://" + request.ObjectID}},
 	}
 	return nil
