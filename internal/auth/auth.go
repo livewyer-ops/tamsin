@@ -158,7 +158,10 @@ func NewRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper) (h
 			request.URL.RawQuery = query.Encode()
 		}}, mode, nil
 	case ModeOAuthClient:
-		tokenContext := oauthHTTPContext(ctx, cfg.Timeout, base)
+		// Refreshes happen for as long as the transport lives, including the
+		// cleanup that runs after the run itself is cancelled, so they must
+		// not inherit that cancellation; the HTTP client's timeout bounds them.
+		tokenContext := oauthHTTPContext(context.WithoutCancel(ctx), cfg.Timeout, base)
 		source := (&clientcredentials.Config{
 			ClientID:     cfg.ClientID,
 			ClientSecret: cfg.ClientSecret,
@@ -178,7 +181,7 @@ func NewRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper) (h
 		if tokenErr != nil {
 			return nil, "", tokenErr
 		}
-		tokenContext := oauthHTTPContext(ctx, cfg.Timeout, base)
+		tokenContext := oauthHTTPContext(context.WithoutCancel(ctx), cfg.Timeout, base)
 		source := oauthAuthorizationConfig(cfg).TokenSource(tokenContext, token)
 		return credentialTransport{
 			base:   &oauth2.Transport{Source: oauth2.ReuseTokenSource(token, source), Base: base},

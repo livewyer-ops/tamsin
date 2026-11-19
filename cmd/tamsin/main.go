@@ -11,6 +11,12 @@ import (
 
 func main() {
 	ctx, cancel := context.WithCancelCause(context.Background())
+	// A consumer of the event stream or the log that exits first, such as a
+	// pipeline pager or a crashed supervisor, closes the pipe. Left unhandled,
+	// the next write would end the process with SIGPIPE before any cleanup;
+	// ignored, the write fails with EPIPE and the output-failure path retains
+	// the error, cancels the run and reconciles the store.
+	signal.Ignore(syscall.SIGPIPE)
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	go func() {

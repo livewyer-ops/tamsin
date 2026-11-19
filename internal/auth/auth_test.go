@@ -649,3 +649,45 @@ func TestUnauthenticatedHTTPRemainsAvailable(t *testing.T) {
 		t.Fatalf("base transport called %d times", calls.Load())
 	}
 }
+
+// Cleanup after a cancelled run still talks to the store. The OAuth
+// transport's refreshes must not inherit the run's cancellation, or the first
+// refresh during cleanup fails and every retraction is reported stranded.
+func TestOAuthRefreshOutlivesTheRunContext(t *testing.T) {
+	t.Parallel()
+	var issued atomic.Int32
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		issued.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		// Shorter than the refresh margin, so every use needs a refresh.
+		_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "short-lived", "token_type": "Bearer", "expires_in": 1})
+	}))
+	defer tokenServer.Close()
+	apiServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer apiServer.Close()
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	transport, _, err := NewRoundTripper(runCtx, Config{
+		Mode: ModeOAuthClient, Endpoint: apiServer.URL,
+		TokenURL: tokenServer.URL, ClientID: "client", ClientSecret: "secret",
+		AllowInsecureLoopback: true,
+	}, isolatedTransport())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	request, err := http.NewRequestWithContext(context.WithoutCancel(runCtx), http.MethodGet, apiServer.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := (&http.Client{Transport: transport}).Do(request)
+	if err != nil {
+		t.Fatalf("refresh after the run was cancelled: %v", err)
+	}
+	_ = response.Body.Close()
+	if issued.Load() < 2 {
+		t.Fatalf("token issued %d times; the request did not exercise a refresh", issued.Load())
+	}
+}
