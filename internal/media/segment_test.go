@@ -2,6 +2,8 @@ package media
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -171,6 +173,54 @@ func TestInstalledFFmpegPublishesLiveSegmentManifest(t *testing.T) {
 	}
 	if !sawPressureFlush {
 		t.Fatal("closed output above the high watermark did not request a staging flush")
+	}
+}
+
+// TestInstalledFFmpegRendersAreByteStable pins the property resume depends on:
+// an identical re-render produces identical bytes, hence identical Object
+// identifiers. Matroska is the sensitive case, since its muxer writes a random
+// segment UID unless the render is bit-exact.
+func TestInstalledFFmpegRendersAreByteStable(t *testing.T) {
+	executable, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg is not installed")
+	}
+	directory := t.TempDir()
+	input := filepath.Join(directory, "input.mkv")
+	command := exec.Command(executable,
+		"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=25",
+		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "2", "-c:v", "libx264", "-g", "25", "-c:a", "aac", "-shortest", input)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Skipf("installed ffmpeg cannot create the fixture: %v: %s", err, output)
+	}
+	render := func(run string) map[string]string {
+		digests := make(map[string]string)
+		err := (FFmpeg{Executable: executable}).Segment(context.Background(), SegmentRequest{
+			Input: input, Duration: time.Second, Format: SegmentFormatSource,
+			SourceContainer: SegmentContainer{Muxer: "matroska", Extension: ".mkv"},
+			StreamIndices:   []int{AllStreams}, Directory: filepath.Join(directory, run), BitExact: true,
+		}, func(record SegmentRecord) error {
+			data, err := os.ReadFile(record.Path)
+			if err != nil {
+				return err
+			}
+			sum := sha256.Sum256(data)
+			digests[filepath.Base(record.Path)] = hex.EncodeToString(sum[:])
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return digests
+	}
+	first, second := render("one"), render("two")
+	if len(first) == 0 || len(first) != len(second) {
+		t.Fatalf("renders produced %d and %d outputs", len(first), len(second))
+	}
+	for name, digest := range first {
+		if second[name] != digest {
+			t.Fatalf("output %s differs between identical renders: %s vs %s", name, digest, second[name])
+		}
 	}
 }
 

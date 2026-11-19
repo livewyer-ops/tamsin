@@ -67,7 +67,7 @@ func (p *Pipeline) observeInputStarted(index int) error {
 }
 
 func (p *Pipeline) observeObjectBatch(ctx context.Context, flowID string,
-	results []ObjectResult, objectIDs map[string]struct{}) error {
+	results []ObjectResult, objectIDs map[segmentKey]struct{}) error {
 	if p.config.LifecycleObserver == nil {
 		return nil
 	}
@@ -80,7 +80,7 @@ func (p *Pipeline) observeObjectBatch(ctx context.Context, flowID string,
 		if results[resultIndex].reported {
 			continue
 		}
-		if _, selected := objectIDs[results[resultIndex].ObjectID]; !selected {
+		if _, selected := objectIDs[results[resultIndex].key()]; !selected {
 			continue
 		}
 		results[resultIndex].reported = true

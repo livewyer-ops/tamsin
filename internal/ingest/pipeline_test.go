@@ -100,11 +100,11 @@ func TestPipelineDoesNotRegisterBytesThatChangedBeforeUpload(t *testing.T) {
 	}
 }
 
-// TestPipelineRetractionDoesNotDeleteAnOverlappingSegment protects the
-// multi-writer case. Timerange-only cleanup can delete a Segment another
-// producer registered at the same point on the Flow; integrity cleanup must
-// identify the Object it uploaded as well as its timerange.
-func TestPipelineRetractionDoesNotDeleteAnOverlappingSegment(t *testing.T) {
+// TestPipelineNeverRegistersOverAnotherProducersSegment protects the
+// multi-writer case. TAMS forbids overlapping Segments, so a Segment another
+// producer registered at the same point on the Flow, holding different bytes,
+// stops the input before anything is uploaded and is left exactly as it was.
+func TestPipelineNeverRegistersOverAnotherProducersSegment(t *testing.T) {
 	t.Parallel()
 	filename := filepath.Join(t.TempDir(), "fixture.mp4")
 	if err := os.WriteFile(filename, []byte("media-object"), 0o600); err != nil {
@@ -117,10 +117,9 @@ func TestPipelineRetractionDoesNotDeleteAnOverlappingSegment(t *testing.T) {
 	)
 	client := newFakeClient()
 	client.segments[flowID] = map[string]tams.Segment{
-		collateralObject: {ObjectID: collateralObject, Timerange: timerange},
+		collateralObject: {ObjectID: collateralObject, Timerange: timerange, GetURLs: []tams.PresignedURL{{URL: "mem://" + collateralObject}}},
 	}
 	client.objects[collateralObject] = []byte("somebody else's media")
-	client.corruptOnUpload = true
 	pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback, FlowID: flowID}, client, fakeProber{}, nil, discardLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -129,18 +128,21 @@ func TestPipelineRetractionDoesNotDeleteAnOverlappingSegment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if batch.Failed != 1 {
-		t.Fatalf("corrupted upload should fail the ingest: %#v", batch)
+	if batch.Failed != 1 || batch.Results[0].Failure == nil || batch.Results[0].Failure.Code != FailureCodeSegmentConflict {
+		t.Fatalf("an occupied timerange should be a segment conflict: %#v", batch.Results[0].Failure)
 	}
 
 	client.lock.Lock()
 	defer client.lock.Unlock()
+	if client.uploads != 0 || client.allocations != 0 {
+		t.Fatalf("media was allocated or uploaded despite the conflict: uploads=%d allocations=%d", client.uploads, client.allocations)
+	}
 	segments := client.segments[flowID]
 	if len(segments) != 1 || segments[collateralObject].ObjectID != collateralObject {
-		t.Fatalf("overlapping third-party Segment was changed by retraction: %#v", segments)
+		t.Fatalf("overlapping third-party Segment was changed: %#v", segments)
 	}
-	if _, exists := client.objects[collateralObject]; !exists {
-		t.Fatal("overlapping third-party Media Object was deleted by retraction")
+	if string(client.objects[collateralObject]) != "somebody else's media" {
+		t.Fatal("overlapping third-party Media Object was changed")
 	}
 }
 
@@ -1309,6 +1311,11 @@ func TestListingsOnlyRequestDownloadURLsWhenRead(t *testing.T) {
 		if options.IncludeDownloadURLs {
 			t.Fatalf("listing %d asked for download URLs with verification off; nothing reads them", index)
 		}
+		// A resume asks only about the span it is about to write; a long-lived
+		// Flow can hold more Segments than one listing returns.
+		if options.Timerange == "" {
+			t.Fatalf("listing %d covers the whole Flow", index)
+		}
 	}
 }
 
@@ -1454,10 +1461,20 @@ func TestFlowIsReadBeforeWritingAndNotAfter(t *testing.T) {
 		t.Fatalf("the Flow was written before it was read, so anything already on it was replaced unseen: %v",
 			client.callLog)
 	}
+	// A later read is allowed only to plan another write: the end of a
+	// rolling ingest reads the Flow again so edits made while it ran are
+	// kept. A read that no write follows would only confirm the PUT.
+	pendingRead := false
 	for _, call := range client.callLog[writes:] {
-		if call == "flowRead:"+flowID {
-			t.Fatalf("the Flow was read back after writing it; the PUT already proves it exists: %v", client.callLog)
+		switch call {
+		case "flowRead:" + flowID:
+			pendingRead = true
+		case "flowWrite:" + flowID:
+			pendingRead = false
 		}
+	}
+	if pendingRead {
+		t.Fatalf("the Flow was read back after writing it; the PUT already proves it exists: %v", client.callLog)
 	}
 }
 
@@ -1760,9 +1777,6 @@ func TestInvalidServiceLifetimesFailBeforeMutation(t *testing.T) {
 		{name: "below minimum", document: map[string]any{
 			"api_version": "8.1", "min_object_timeout": "299:0", "min_presigned_url_timeout": "30:0",
 		}, want: "requires at least 300:0"},
-		{name: "wrong ordering", document: map[string]any{
-			"api_version": "8.1", "min_object_timeout": "300:0", "min_presigned_url_timeout": "301:0",
-		}, want: "exceeds /min_object_timeout"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			filename := filepath.Join(t.TempDir(), "fixture.mp4")

@@ -115,20 +115,25 @@ func New(config Config, client TAMSClient, prober media.Prober, segmenter media.
 		return nil, err
 	}
 	config.TAMSFlowProfiles = normalizedProfiles
+	// Identifiers are sent in the lowercase hyphenated spelling the schema
+	// requires, whatever spelling the operator typed, and a version or variant
+	// the schema excludes is refused before any resource is written.
 	for _, identifier := range [...]struct {
 		label string
-		value string
+		value *string
 	}{
-		{label: "flow ID", value: config.FlowID},
-		{label: "source ID", value: config.SourceID},
-		{label: "storage ID", value: config.StorageID},
+		{label: "flow ID", value: &config.FlowID},
+		{label: "source ID", value: &config.SourceID},
+		{label: "storage ID", value: &config.StorageID},
 	} {
-		if identifier.value == "" {
+		if *identifier.value == "" {
 			continue
 		}
-		if _, err := uuid.Parse(identifier.value); err != nil {
+		canonical, err := tams.CanonicalUUID(*identifier.value)
+		if err != nil {
 			return nil, fmt.Errorf("%s must be a UUID: %w", identifier.label, err)
 		}
+		*identifier.value = canonical
 	}
 	if (config.DryRunMode == DryRunOff || len(profileAssignments) > 0) && client == nil {
 		return nil, errors.New("TAMS client is required unless dry-run is enabled without a TAMS Flow Profile")
@@ -163,8 +168,7 @@ func New(config Config, client TAMSClient, prober media.Prober, segmenter media.
 		apiVersion:         tams.APIVersion{Major: tams.SpecMajor, Minor: tams.SpecMinor},
 		profileAssignments: profileAssignments,
 		profileCache:       make(map[string]tams.Profile),
-		flowStatuses:       make(map[string]string),
-		recoveryTimeout:    retractionTimeout,
+		recoveryTimeout:    recoveryDeadline(client),
 		limits: tams.ServiceLimits{
 			ObjectRegistration: tams.MinimumObjectRegistration,
 			PresignedURL:       tams.MinimumPresignedURL,
@@ -406,8 +410,15 @@ func (p *Pipeline) verificationFailureStatus(err error) VerificationStatus {
 	if !errors.As(err, &verificationErr) {
 		return VerificationNotReached
 	}
-	if verificationErr.Stranded > 0 {
+	switch {
+	case verificationErr.Stranded > 0:
 		return VerificationFailedStranded
+	case verificationErr.Retracted > 0:
+		// Corrupt media was found and withdrawn; that outranks Segments the
+		// run merely could not read.
+		return VerificationFailedRetracted
+	case verificationErr.Preserved > 0:
+		return VerificationNotReached
 	}
 	return VerificationFailedRetracted
 }
@@ -545,7 +556,7 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 		RootFlowID: flowID, Bytes: staged.size, SHA256: staged.sha256,
 		Status: ResultStatusPlanned, Flows: make([]FlowResult, 0, len(flowInfo.Collected)+1),
 	}
-	graph := flowGraph{flows: make([]graphFlow, 0, len(flowInfo.Collected)+1), storage: p.config.EssenceStorage}
+	graph := flowGraph{changes: make(flowChanges), flows: make([]graphFlow, 0, len(flowInfo.Collected)+1), storage: p.config.EssenceStorage}
 	// Each collected essence gets its own Flow and Source: a video track and an
 	// audio track are distinct essences, not alternative representations of one
 	// another, so they are not editorially equivalent. TAMS derives the
@@ -795,6 +806,7 @@ func (p *Pipeline) ingestIndependently(ctx context.Context, item source.Item, st
 		}},
 	}
 	graph := flowGraph{
+		changes:     make(flowChanges),
 		flows:       make([]graphFlow, 0, len(flowInfo.Collected)+1),
 		collectorID: collectorID,
 		storage:     media.EssenceStorageIndependent,
@@ -1074,7 +1086,10 @@ func (p *Pipeline) renderSegmentsTo(ctx context.Context, staged stagedFile, flow
 		Input: staged.path, Duration: p.config.SegmentDuration, Format: p.config.SegmentFormat,
 		SourceContainer: flowInfo.SegmentContainer, StreamIndices: streamIndices,
 		Directory: directory, AdditionalArgs: additionalArgs, StagingWindow: window,
-		BitExact: staged.bridge != nil,
+		// Every render is bit-exact so an identical re-run produces identical
+		// bytes, and with them identical Object identifiers: without it the
+		// Matroska muxer writes a random segment UID into every output.
+		BitExact: true,
 	}, func(record media.SegmentRecord) error {
 		if err := segmentCtx.Err(); err != nil {
 			return err
@@ -1319,26 +1334,45 @@ func (p *Pipeline) verifyObject(ctx context.Context, expected preparedObject, se
 	if len(segment.GetURLs) == 0 {
 		return fmt.Errorf("segment %s has no download URL for verification", expected.id)
 	}
-	// A service may also list direct storage URLs that require separate credentials.
-	// Prefer its presigned access route when one is available.
-	download := segment.GetURLs[0]
+	// A service may list several routes to one Object: a presigned one, a
+	// direct storage URL that needs credentials of its own, an unsigned route
+	// on the API origin. Presigned routes are tried first, then the rest, until
+	// one can be read. A route that serves the wrong bytes or the wrong length
+	// is an integrity failure, not a reason to try another.
+	candidates := make([]tams.PresignedURL, 0, len(segment.GetURLs))
 	for _, candidate := range segment.GetURLs {
 		if candidate.Presigned {
-			download = candidate
-			break
+			candidates = append(candidates, candidate)
 		}
 	}
-	size, checksum, err := p.client.DownloadDigest(ctx, download, expected.size)
-	if err != nil {
-		return fmt.Errorf("verify object %s: %w", expected.id, err)
+	for _, candidate := range segment.GetURLs {
+		if !candidate.Presigned {
+			candidates = append(candidates, candidate)
+		}
 	}
-	if size != expected.size {
-		return fmt.Errorf("object %s byte length mismatch: expected %d, got %d", expected.id, expected.size, size)
+	var unreadable []error
+	for _, download := range candidates {
+		size, checksum, err := p.client.DownloadDigest(ctx, download, expected.size)
+		if err != nil {
+			var sizeErr *tams.ObjectSizeError
+			if errors.As(err, &sizeErr) {
+				return fmt.Errorf("%w: verify object %s: %w", errObjectIntegrity, expected.id, err)
+			}
+			if ctx.Err() != nil || len(candidates) == 1 {
+				return fmt.Errorf("verify object %s: %w", expected.id, err)
+			}
+			unreadable = append(unreadable, err)
+			continue
+		}
+		if size != expected.size {
+			return fmt.Errorf("%w: object %s byte length mismatch: expected %d, got %d", errObjectIntegrity, expected.id, expected.size, size)
+		}
+		if checksum != expected.sha256 {
+			return fmt.Errorf("%w: object %s SHA-256 mismatch: expected %s, got %s", errObjectIntegrity, expected.id, expected.sha256, checksum)
+		}
+		return nil
 	}
-	if checksum != expected.sha256 {
-		return fmt.Errorf("object %s SHA-256 mismatch: expected %s, got %s", expected.id, expected.sha256, checksum)
-	}
-	return nil
+	return fmt.Errorf("verify object %s: none of %d advertised URLs could be read: %w", expected.id, len(candidates), errors.Join(unreadable...))
 }
 
 func digestFile(ctx context.Context, filename string) (int64, string, error) {
@@ -1454,6 +1488,16 @@ func flowProfileForRendererEpoch(digest string, config Config, rendererEpoch str
 	parts = append(parts, config.TAMSFlowProfiles...)
 	parts = append(parts, rendererEpoch)
 	return identityFingerprint("media-treatment/v1", parts...)
+}
+
+// recoveryDeadline is how long detached cleanup may take. Retraction waits
+// for the service's deletion to complete, so it follows the client's deletion
+// deadline when that is longer than the cleanup floor.
+func recoveryDeadline(client TAMSClient) time.Duration {
+	if deadline, ok := client.(interface{ DeletionTimeout() time.Duration }); ok {
+		return max(retractionTimeout, deadline.DeletionTimeout())
+	}
+	return retractionTimeout
 }
 
 // ffmpegWritesOutput distinguishes probing from treatment. FFmpeg always

@@ -256,20 +256,20 @@ func TestStreamRevisionAndMetadataGuardExplicitFlowID(t *testing.T) {
 	client := newFakeClient()
 	client.flows[flowID] = map[string]any{"source_id": "source", "tags": map[string]any{media.TagPrefix + "input_revision": "old"}}
 	pipeline := &Pipeline{client: client, config: Config{DryRunMode: DryRunOff}}
-	_, err := pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: map[string]any{"source_id": "source", "tags": map[string]any{media.TagPrefix + "input_revision": "new"}}})
+	_, err := pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: map[string]any{"source_id": "source", "tags": map[string]any{media.TagPrefix + "input_revision": "new"}}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "different input revision") || client.putFlowCalls != 0 {
 		t.Fatalf("revision guard: %v, writes=%d", err, client.putFlowCalls)
 	}
 	// A Flow written from staged bytes lets auto mode stage again instead of
 	// failing; a Flow written from a streamed revision names its remedy.
 	client.flows[flowID] = map[string]any{"source_id": "source", "tags": map[string]any{}}
-	_, err = pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: map[string]any{"source_id": "source", "tags": map[string]any{media.TagPrefix + "input_revision": "new"}}})
+	_, err = pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: map[string]any{"source_id": "source", "tags": map[string]any{media.TagPrefix + "input_revision": "new"}}}, nil)
 	var unavailable *source.StreamUnavailableError
 	if !errors.As(err, &unavailable) || client.putFlowCalls != 0 {
 		t.Fatalf("staged Flow streamed: %v, writes=%d", err, client.putFlowCalls)
 	}
 	client.flows[flowID] = map[string]any{"source_id": "source", "tags": map[string]any{media.TagPrefix + "input_revision": "old"}}
-	_, err = pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: map[string]any{"source_id": "source", "tags": map[string]any{}}})
+	_, err = pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: map[string]any{"source_id": "source", "tags": map[string]any{}}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "--input-mode=stream") || client.putFlowCalls != 0 {
 		t.Fatalf("streamed Flow staged: %v, writes=%d", err, client.putFlowCalls)
 	}
@@ -278,11 +278,11 @@ func TestStreamRevisionAndMetadataGuardExplicitFlowID(t *testing.T) {
 	existing := maps.Clone(flow)
 	existing["essence_parameters"] = map[string]any{"frame_rate": map[string]any{"numerator": 25, "denominator": 1}, "vfr": false}
 	client.flows[flowID] = existing
-	if _, err := pipeline.planFlowWrite(t.Context(), graphFlow{id: flowID, flow: flow}); err != nil {
+	if _, err := pipeline.planFlowWrite(t.Context(), graphFlow{id: flowID, flow: flow}, nil); err != nil {
 		t.Fatalf("normal Flow GET defaults prevented resume: %v", err)
 	}
 	existing["essence_parameters"] = map[string]any{"frame_rate": map[string]any{"numerator": 30, "denominator": 1}}
-	if _, err := pipeline.planFlowWrite(t.Context(), graphFlow{id: flowID, flow: flow}); err == nil || !strings.Contains(err.Error(), "/essence_parameters") {
+	if _, err := pipeline.planFlowWrite(t.Context(), graphFlow{id: flowID, flow: flow}, nil); err == nil || !strings.Contains(err.Error(), "/essence_parameters") {
 		t.Fatalf("technical metadata guard: %v", err)
 	}
 }

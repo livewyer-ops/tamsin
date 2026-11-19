@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/livewyer-ops/tamsin/internal/auth"
 	"github.com/livewyer-ops/tamsin/internal/ingest"
 	"github.com/livewyer-ops/tamsin/internal/media"
+	"github.com/livewyer-ops/tamsin/internal/tams"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"go.yaml.in/yaml/v3"
@@ -198,6 +198,7 @@ func configDefinitions() []configDefinition {
 		{key: "config", kind: configString, flag: "config"},
 		{key: "endpoint", kind: configString, flag: "endpoint", redactURL: true, fileAllowed: true},
 		{key: "format", kind: configString, flag: "format", fileAllowed: true},
+		{key: "http.deletion_timeout", kind: configDuration, flag: "deletion-timeout", fileAllowed: true},
 		{key: "http.insecure_skip_verify", kind: configBool, flag: "insecure-skip-verify", fileAllowed: true},
 		{key: "http.retries", kind: configInt, flag: "retries", fileAllowed: true},
 		{key: "http.timeout", kind: configDuration, flag: "timeout", fileAllowed: true},
@@ -597,7 +598,7 @@ func (s *settings) validate() error {
 		if value == "" {
 			continue
 		}
-		if _, err := uuid.Parse(value); err != nil {
+		if _, err := tams.CanonicalUUID(value); err != nil {
 			return fmt.Errorf("%s must be a UUID: %w", identifier.label, err)
 		}
 	}

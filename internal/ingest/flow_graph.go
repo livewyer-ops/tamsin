@@ -31,16 +31,23 @@ func (p *Pipeline) planFlowGraph(ctx context.Context, graph flowGraph) ([]planne
 		if err != nil {
 			return nil, err
 		}
-		plan, err := p.planFlowWrite(ctx, member)
+		plan, err := p.planFlowWrite(ctx, member, p.overridesFor(graph, member))
 		if err != nil {
 			return nil, err
 		}
-		if err := tamsschema.ValidateFlowGet(p.apiVersion, plan.effective); err != nil {
-			return nil, fmt.Errorf(
-				"final Flow metadata for %s (%s) is not valid against pinned TAMS %d.%d at %w",
-				member.id, member.role, tams.SpecMajor, tams.SpecMinor, err)
+		effective, request := plan.effective, plan.request
+		if p.storeIsNewerMinor() {
+			// A newer minor may return Flow fields the pinned schemas do not
+			// know. What Tamsin generated is still held to them; what the
+			// store added is sent back as it came.
+			effective, request = member.flow, flowPutProjection(member.flow, member.profileID)
 		}
-		if err := tamsschema.ValidateFlowPut(p.apiVersion, plan.request); err != nil {
+		if err := tamsschema.ValidateFlowGet(p.apiVersion, effective); err != nil {
+			return nil, fmt.Errorf(
+				"final Flow metadata for %s (%s) is not valid against the pinned TAMS schemas for %s at %w",
+				member.id, member.role, p.apiVersion, err)
+		}
+		if err := tamsschema.ValidateFlowPut(p.apiVersion, request); err != nil {
 			return nil, fmt.Errorf("flow PUT metadata for %s (%s) is not valid against TAMS %s at %w",
 				member.id, member.role, p.apiVersion, err)
 		}
@@ -52,11 +59,28 @@ func (p *Pipeline) planFlowGraph(ctx context.Context, graph flowGraph) ([]planne
 	return planned, nil
 }
 
+// overridesFor is the operator metadata that applies to one graph member:
+// the root takes --flow-metadata, a collected essence takes its role's
+// --collected-flow-metadata, and an independent essence inherits the root
+// metadata before its role's overrides.
+func (p *Pipeline) overridesFor(graph flowGraph, member graphFlow) tams.Flow {
+	if graph.collectorID == "" || member.id == graph.collectorID {
+		return p.config.FlowMetadata
+	}
+	if graph.storage != media.EssenceStorageIndependent {
+		return p.config.CollectedFlowMetadata[member.role]
+	}
+	overrides := make(tams.Flow)
+	maps.Copy(overrides, p.config.FlowMetadata)
+	maps.Copy(overrides, p.config.CollectedFlowMetadata[member.role])
+	return overrides
+}
+
 // planFlowWrite applies the ownership rule without mutating TAMS. A PUT
 // replaces a Flow, so the final value must preserve everything this run does
 // not own. The dry-run path has no store to read and validates the generated
 // value as-is.
-func (p *Pipeline) planFlowWrite(ctx context.Context, member graphFlow) (plannedFlowWrite, error) {
+func (p *Pipeline) planFlowWrite(ctx context.Context, member graphFlow, overrides tams.Flow) (plannedFlowWrite, error) {
 	plan := plannedFlowWrite{member: member, effective: member.flow, changed: true}
 	plan.request = flowPutProjection(member.flow, member.profileID)
 	if p.config.DryRunMode != DryRunOff {
@@ -76,6 +100,11 @@ func (p *Pipeline) planFlowWrite(ctx context.Context, member graphFlow) (planned
 	plan.existed = true
 	existingTags, _ := existing["tags"].(map[string]any)
 	generatedTags, _ := member.flow["tags"].(map[string]any)
+	if stored := stringField(existingTags, media.TagPrefix+"sha256"); stored != "" {
+		if incoming := stringField(generatedTags, media.TagPrefix+"sha256"); incoming != "" && incoming != stored {
+			return plannedFlowWrite{}, fmt.Errorf("flow %s belongs to different staged content; use a new Flow ID", member.id)
+		}
+	}
 	existingRevision := stringField(existingTags, media.TagPrefix+"input_revision")
 	generatedRevision := stringField(generatedTags, media.TagPrefix+"input_revision")
 	switch {
@@ -123,7 +152,7 @@ func (p *Pipeline) planFlowWrite(ctx context.Context, member graphFlow) (planned
 			"flow %s already exists with profile_id %q; refusing to attach, repoint, or remove immutable Profile identity %q",
 			member.id, existingProfileID, member.profileID)
 	}
-	plan.effective = preserveForeignMetadata(existing, member.flow, p.config.FlowMetadata)
+	plan.effective = preserveForeignMetadata(existing, member.flow, overrides, p.storeIsNewerMinor())
 	plan.request = flowPutProjection(plan.effective, member.profileID)
 	plan.changed = !equalJSONValues(plan.effective, existing)
 	return plan, nil
@@ -131,7 +160,7 @@ func (p *Pipeline) planFlowWrite(ctx context.Context, member graphFlow) (planned
 
 // writeFlow commits one already validated member through the same
 // ownership-aware path for elemental Flows and collectors alike.
-func (p *Pipeline) writeFlow(ctx context.Context, plan plannedFlowWrite) error {
+func (p *Pipeline) writeFlow(ctx context.Context, plan plannedFlowWrite, changes flowChanges) error {
 	if !plan.changed {
 		p.logger.Debug("flow already describes this ingest", "flow_id", plan.member.id)
 		return nil
@@ -144,6 +173,11 @@ func (p *Pipeline) writeFlow(ctx context.Context, plan plannedFlowWrite) error {
 	if _, err := p.client.PutFlow(ctx, plan.member.id, plan.request); err != nil {
 		return fmt.Errorf("%s flow %s: %w", verb, plan.member.id, err)
 	}
+	if !plan.existed {
+		change := changes[plan.member.id]
+		change.opened = true
+		changes[plan.member.id] = change
+	}
 	return nil
 }
 
@@ -152,7 +186,7 @@ func (p *Pipeline) writeFlow(ctx context.Context, plan plannedFlowWrite) error {
 // PUT can therefore leave an unavoidable partial metadata mutation (including
 // the ambiguous case where the service committed but the response was lost),
 // which is reported explicitly. No Object has been allocated at this point.
-func (p *Pipeline) commitFlowGraphObserved(ctx context.Context, planned []plannedFlowWrite, results []FlowResult) error {
+func (p *Pipeline) commitFlowGraphObserved(ctx context.Context, planned []plannedFlowWrite, results []FlowResult, changes flowChanges) error {
 	for _, plan := range planned {
 		if !plan.changed {
 			setFlowDisposition(results, plan.member.id, FlowUnchanged)
@@ -160,7 +194,7 @@ func (p *Pipeline) commitFlowGraphObserved(ctx context.Context, planned []planne
 	}
 	written := make([]string, 0, len(planned))
 	for index, plan := range planned {
-		if err := p.writeFlow(ctx, plan); err != nil {
+		if err := p.writeFlow(ctx, plan, changes); err != nil {
 			setFlowDisposition(results, plan.member.id, FlowIndeterminate)
 			for _, pending := range planned[index+1:] {
 				if pending.changed {
@@ -295,7 +329,7 @@ var descriptiveFields = [...]string{"label", "description"}
 // A tag Tamsin writes carries its own prefix, so one already in the store under
 // that prefix but absent from this run is a leftover of Tamsin's own and is
 // dropped. Anything else belongs to somebody, and is kept.
-func preserveForeignMetadata(existing, generated, operatorOverrides tams.Flow) tams.Flow {
+func preserveForeignMetadata(existing, generated, operatorOverrides tams.Flow, keepStoreParameters bool) tams.Flow {
 	merged := make(tams.Flow, len(existing)+len(generated))
 	for key, value := range existing {
 		merged[key] = value
@@ -311,6 +345,17 @@ func preserveForeignMetadata(existing, generated, operatorOverrides tams.Flow) t
 	}
 	for key, value := range generated {
 		merged[key] = value
+	}
+	// A store on a newer minor may hold essence parameters the pinned
+	// schemas do not know; they are its and are kept. On the pinned minor
+	// every parameter is Tamsin's, so a value an earlier version got wrong
+	// is replaced rather than carried forward.
+	if generatedParameters, ok := generated["essence_parameters"].(map[string]any); ok && keepStoreParameters {
+		parameters := make(map[string]any)
+		existingParameters, _ := existing["essence_parameters"].(map[string]any)
+		maps.Copy(parameters, existingParameters)
+		maps.Copy(parameters, generatedParameters)
+		merged["essence_parameters"] = parameters
 	}
 	for _, field := range descriptiveFields {
 		if _, asked := operatorOverrides[field]; asked {

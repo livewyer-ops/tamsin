@@ -187,18 +187,18 @@ func (e *rollingExecution) flush(state *rollingFlowState) error {
 	objects := state.pending
 	pendingSize := state.pendingSize
 	objectResults := make([]ObjectResult, len(objects))
-	objectIDs := make(map[string]struct{}, len(objects))
+	objectIDs := make(map[segmentKey]struct{}, len(objects))
 	for index, object := range objects {
 		objectResults[index] = e.pipeline.newObjectResult(object)
-		objectIDs[object.id] = struct{}{}
+		objectIDs[object.key()] = struct{}{}
 	}
 
 	var operationErr error
 	if e.pipeline.config.DryRunMode != DryRunOff {
 		operationErr = e.pipeline.observeObjectBatch(e.ctx, state.flowID, objectResults, objectIDs)
 	} else {
-		operationErr = e.pipeline.registerRollingChunk(
-			e.ctx, state.flowID, objects, objectResults, e.storageID, &state.throughput)
+		operationErr = e.pipeline.registerFlow(
+			e.ctx, state.flowID, plannedContainer(e.planned, state.flowID), objects, objectResults, e.storageID, &state.throughput, e.graph.changes)
 		if operationErr != nil {
 			for index := range objectResults {
 				if objectResults[index].Disposition == ObjectDispositionPlanned {
@@ -293,7 +293,7 @@ func (p *Pipeline) beginRollingFlowPlan(ctx context.Context, graph flowGraph,
 		planned[index].effective = maps.Clone(planned[index].effective)
 		planned[index].request = maps.Clone(planned[index].request)
 	}
-	if err := p.writeFlowGraph(ctx, planned, results); err != nil {
+	if err := p.writeFlowGraph(ctx, planned, results, graph.changes); err != nil {
 		return nil, err
 	}
 	return planned, nil
@@ -309,25 +309,36 @@ func (p *Pipeline) finishRollingFlowMetadata(ctx context.Context, graph flowGrap
 	}
 	for index := range planned {
 		member := byID[planned[index].member.id]
-		planned[index].changed = false
-		fields := []string{"avg_bit_rate", "max_bit_rate"}
-		if planned[index].member.profileID != "" {
-			fields = []string{"max_bit_rate"}
+		member.flow = maps.Clone(member.flow)
+		if member.profileID != "" {
+			// A Profile owns the encoding target; only the measured maximum
+			// is Flow-specific.
+			delete(member.flow, "avg_bit_rate")
 		}
-		for _, field := range fields {
-			if value, present := member.flow[field]; present {
-				if planned[index].effective[field] != value {
-					planned[index].effective[field] = value
-					planned[index].changed = true
-				}
-			}
+		expanded, err := p.expandFlowProfile(ctx, member)
+		if err != nil {
+			return err
 		}
-		planned[index].request = flowPutProjection(planned[index].effective, planned[index].member.profileID)
-		if err := tamsschema.ValidateFlowGet(p.apiVersion, planned[index].effective); err != nil {
+		// The Flow is read again rather than rewritten from the snapshot
+		// taken when the ingest began: a PUT replaces the whole Flow, and an
+		// hours-long ingest gives an operator or a MAM time to add tags or a
+		// label that must survive.
+		plan, err := p.planFlowWrite(ctx, expanded, p.overridesFor(graph, member))
+		if err != nil {
+			return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
+				fmt.Errorf("plan final rolling Flow metadata for %s: %w", member.id, err))
+		}
+		planned[index] = plan
+		member = expanded
+		effective, request := planned[index].effective, planned[index].request
+		if p.storeIsNewerMinor() {
+			effective, request = member.flow, flowPutProjection(member.flow, planned[index].member.profileID)
+		}
+		if err := tamsschema.ValidateFlowGet(p.apiVersion, effective); err != nil {
 			return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
 				fmt.Errorf("final rolling Flow metadata for %s is invalid at %w", member.id, err))
 		}
-		if err := tamsschema.ValidateFlowPut(p.apiVersion, planned[index].request); err != nil {
+		if err := tamsschema.ValidateFlowPut(p.apiVersion, request); err != nil {
 			return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
 				fmt.Errorf("final rolling Flow PUT metadata for %s is invalid at %w", member.id, err))
 		}
@@ -340,7 +351,7 @@ func (p *Pipeline) finishRollingFlowMetadata(ctx context.Context, graph flowGrap
 		if !plan.changed {
 			continue
 		}
-		if err := p.writeFlow(ctx, plan); err != nil {
+		if err := p.writeFlow(ctx, plan, graph.changes); err != nil {
 			return withFailure(FailureCodeFlowWriteFailed, FailureMessageFlowWriteFailed, true,
 				fmt.Errorf("write final rolling Flow metadata: %w", err))
 		}
