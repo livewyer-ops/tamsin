@@ -15,7 +15,7 @@ import sys
 
 NUMBER = r"[0-9]+"
 TAG = re.compile(
-    rf"^v?(?P<major>{NUMBER})\.(?P<minor>{NUMBER})\.(?P<patch>{NUMBER})"
+    rf"^(?P<major>{NUMBER})\.(?P<minor>{NUMBER})\.(?P<patch>{NUMBER})"
     rf"-in(?P<release>{NUMBER})(?:-rc(?P<candidate>{NUMBER}))?$"
 )
 

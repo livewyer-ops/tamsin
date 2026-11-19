@@ -7,34 +7,53 @@ for example `8.2.0-in1`. Append `-rcM` for a release candidate, for example
 without `-rc` is a stable release and moves the minor, major and `latest`
 image tags; a candidate is published as a GitHub prerelease and moves none.
 
-Releases are published from the public repository, so the tag is pushed to
-the `public` remote by explicit refspec. `origin` is not the release remote.
-Never push with `--tags` or `--mirror`; either would publish private history
-and archive tags.
+Repository tag protection must cover `*.*.*`, including candidates. A rule
+covering only legacy `v*` tags does not protect these releases.
 
-See [Contributing](../CONTRIBUTING.md) for prerequisites. Before tagging:
+The commands below assume a clone of `https://github.com/livewyer-ops/tamsin`
+with that repository as `origin`. Confirm its push URL with
+`git remote get-url --push origin` before tagging. Push only the intended tag
+using an explicit refspec; do not use `--tags` or `--mirror`.
 
-1. ensure CI is green on `main`;
-2. add a `## [8.2.0-in1] - YYYY-MM-DD` section to [CHANGELOG.md](../CHANGELOG.md)
-   with the full version in brackets and a non-empty body; the workflow takes
-   the release notes from it and fails without it;
-3. run `make verify` from a fresh clone of the release commit, then
+See [Contributing](../CONTRIBUTING.md) for prerequisites. Select an unused
+version and keep it in the same shell for the commands below (replace the
+placeholder before running them):
+
+```sh
+version=MAJOR.MINOR.PATCH-inN
+```
+
+For a candidate, include its `-rcM` suffix. Before tagging:
+
+1. move the intended unreleased notes into a dated section in
+   [CHANGELOG.md](../CHANGELOG.md), with the base release version in brackets
+   and a non-empty body. A candidate such as `8.2.0-in3-rc1` uses the
+   `[8.2.0-in3]` section. Check extraction with
+   `./scripts/release-notes.py "$version" CHANGELOG.md` before tagging;
+2. for a stable release, update the README downloads, image example and
+   documentation version links to the selected version; for a candidate, keep
+   the stable install links and identify the candidate documentation explicitly;
+3. merge the release documentation changes into `main` and wait for green CI;
+4. run `make verify` from a fresh clone of the release commit, then
    `make image-smoke` and the live `make e2e` matrix;
-4. delete stray local tags so that only the release tag can be pushed;
 5. confirm the `ghcr.io/livewyer-ops/tamsin-ffmpeg-runtime` package is public
-   and that the runtime tag and digest in `Dockerfile` resolve.
+   and that the runtime tag and digest in `Dockerfile` resolve;
+6. verify the first-ingest tutorial with that build.
+   For a candidate, record the current major, minor and `latest` image digests
+   so they can be checked for unintended movement afterwards.
 
 Create and push the tag:
 
 ```sh
-git fetch public
+git fetch origin
 git switch main
-git merge --ff-only public/main
-git tag -a 8.2.0-in1 -m 'Release 8.2.0-in1'
-git push public 8.2.0-in1
+git merge --ff-only origin/main
+git tag -a "$version" -m "Release $version"
+git push origin "refs/tags/$version:refs/tags/$version"
 ```
 
-The release workflow repeats verification and both TAMOSS compatibility tests,
+The release workflow requires the tagged commit to belong to `main`, repeats
+verification and both TAMOSS compatibility tests,
 then:
 
 - builds Linux and macOS binaries for amd64 and arm64;
@@ -49,8 +68,11 @@ then:
 - creates the GitHub release from the matching changelog section.
 
 After completion, verify one binary and the versioned image from a clean
-machine and confirm that `latest` and the minor tag share its digest. Do not
-move or recreate an existing release tag; publish a new `-inN` or `-rcM` tag
+machine. For a stable release, confirm that the major, minor and `latest`
+image tags share the versioned image's digest. For a candidate, confirm that
+the moving tags retain their previous digests and the GitHub release is marked
+as a prerelease. Do not move or recreate an existing release tag; publish a new
+`-inN` or `-rcM` tag
 instead. `go install` is not a supported install path: the binaries and the
 image are the distribution.
 

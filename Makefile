@@ -22,7 +22,7 @@ clean:
 	rm -f *.test
 
 format-check:
-	@unformatted="$$(find . \( -path ./.git -o -path ./.cache -o -path ./.tmp -o -path ./bin -o -path ./dist \) -prune -o -name '*.go' -print0 | xargs -0 -r gofmt -l)" && \
+	@unformatted="$$(find . \( -path ./.git -o -path ./.local -o -path ./.cache -o -path ./.tmp -o -path ./bin -o -path ./dist \) -prune -o -name '*.go' -print0 | xargs -0 -r gofmt -l)" && \
 		{ test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }; }
 	@for script in scripts/*.sh; do bash -n "$$script" || exit; done
 	python3 -c 'import pathlib, sys; [compile(pathlib.Path(name).read_text(), name, "exec") for name in sys.argv[1:]]' scripts/*.py
