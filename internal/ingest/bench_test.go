@@ -109,6 +109,26 @@ func (c *countingClient) AllocateStorage(ctx context.Context, flowID string, req
 	return c.inner.AllocateStorage(ctx, flowID, request)
 }
 
+func (c *countingClient) Source(ctx context.Context, id string) (tams.Source, error) {
+	c.count("Source")
+	return c.inner.Source(ctx, id)
+}
+
+func (c *countingClient) PutSourceLabel(ctx context.Context, id, label string) error {
+	c.count("PutSourceLabel")
+	return c.inner.PutSourceLabel(ctx, id, label)
+}
+
+func (c *countingClient) PutSourceDescription(ctx context.Context, id, description string) error {
+	c.count("PutSourceDescription")
+	return c.inner.PutSourceDescription(ctx, id, description)
+}
+
+func (c *countingClient) PutSourceTag(ctx context.Context, id, name string, value any) error {
+	c.count("PutSourceTag")
+	return c.inner.PutSourceTag(ctx, id, name, value)
+}
+
 func (c *countingClient) RegisterSegments(ctx context.Context, flowID string, requests []tams.SegmentRequest) error {
 	defer c.record("RegisterSegments")()
 	return c.inner.RegisterSegments(ctx, flowID, requests)

@@ -36,6 +36,9 @@ func (p *Pipeline) planFlowGraph(ctx context.Context, graph flowGraph) ([]planne
 			return nil, err
 		}
 		effective, request := plan.effective, plan.request
+		if parameters, _ := effective["essence_parameters"].(map[string]any); parameters["init_segments"] == true {
+			return nil, fmt.Errorf("flow %s requires initialisation Objects which this renderer cannot supply", member.id)
+		}
 		if p.storeIsNewerMinor() {
 			// A newer minor may return Flow fields the pinned schemas do not
 			// know. What Tamsin generated is still held to them; what the
@@ -105,6 +108,9 @@ func (p *Pipeline) planFlowWrite(ctx context.Context, member graphFlow, override
 			return plannedFlowWrite{}, fmt.Errorf("flow %s belongs to different staged content; use a new Flow ID", member.id)
 		}
 	}
+	if stringField(existingTags, media.TagPrefix+"ffmpeg_version") != "" && stringField(existingTags, media.TagPrefix+"renderer_epoch") != stringField(generatedTags, media.TagPrefix+"renderer_epoch") {
+		return plannedFlowWrite{}, fmt.Errorf("flow %s was written by a different renderer epoch; use a new Flow ID", member.id)
+	}
 	existingRevision := stringField(existingTags, media.TagPrefix+"input_revision")
 	generatedRevision := stringField(generatedTags, media.TagPrefix+"input_revision")
 	switch {
@@ -118,23 +124,31 @@ func (p *Pipeline) planFlowWrite(ctx context.Context, member graphFlow, override
 	default:
 		return plannedFlowWrite{}, fmt.Errorf("flow %s belongs to a different input revision; use a new Flow ID", member.id)
 	}
-	if generatedRevision != "" {
+	// A Flow that already declares its technical metadata is not rewritten to
+	// describe other media, whatever the input mode: with an explicit
+	// --flow-id a different staged file must fail here, before mutation.
+	if flowDeclaresTechnicalMetadata(existing) {
 		for _, field := range []string{"format", "codec", "container", "essence_parameters", "segment_duration"} {
 			existingValue, existingPresent := existing[field]
 			generatedValue, generatedPresent := member.flow[field]
+			if existingPresent != generatedPresent {
+				return plannedFlowWrite{}, fmt.Errorf("flow %s already declares different metadata at /%s; use a new Flow ID", member.id, field)
+			}
 			if field == "essence_parameters" {
-				// A normal Flow GET may materialise the BBC default vfr=false.
-				// This is a reuse guard, not Profile matching: Profile fields
-				// remain presence-strict in expandFlowProfile.
+				// A store may materialise defaults (the BBC vfr=false) or, on a
+				// newer minor, add parameters of its own. Every parameter this
+				// run established must agree; the store's extras say nothing
+				// about which media the Flow holds.
 				existingParameters, _ := existingValue.(map[string]any)
 				generatedParameters, _ := generatedValue.(map[string]any)
-				if _, present := generatedParameters["vfr"]; !present && existingParameters["vfr"] == false && generatedParameters["frame_rate"] != nil {
-					existingParameters = maps.Clone(existingParameters)
-					delete(existingParameters, "vfr")
-					existingValue = existingParameters
+				for key, value := range generatedParameters {
+					if existing, present := existingParameters[key]; !present || !equalJSONValues(existing, value) {
+						return plannedFlowWrite{}, fmt.Errorf("flow %s already declares different metadata at /%s/%s; use a new Flow ID", member.id, field, key)
+					}
 				}
+				continue
 			}
-			if existingPresent != generatedPresent || !equalJSONValues(existingValue, generatedValue) {
+			if !equalJSONValues(existingValue, generatedValue) {
 				return plannedFlowWrite{}, fmt.Errorf("flow %s already declares different metadata at /%s; use a new Flow ID", member.id, field)
 			}
 		}
@@ -309,6 +323,18 @@ func validateFlowGraph(graph flowGraph, planned []plannedFlowWrite) error {
 		}
 	}
 	return nil
+}
+
+// flowDeclaresTechnicalMetadata reports whether a stored Flow already says
+// what media it holds. A Flow created by a metadata-only tool may not, and
+// such a Flow is still free to be described.
+func flowDeclaresTechnicalMetadata(flow tams.Flow) bool {
+	for _, field := range []string{"format", "codec", "container", "essence_parameters", "segment_duration"} {
+		if _, present := flow[field]; present {
+			return true
+		}
+	}
+	return false
 }
 
 // descriptiveFields are written when a Flow is created and then left alone.
