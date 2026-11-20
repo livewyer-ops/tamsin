@@ -306,8 +306,28 @@ func TestRendererEpochAndByteProfilesDeriveStableFlowIDs(t *testing.T) {
 			t.Fatalf("%s derived the same Flow ID %s", label, id)
 		}
 	}
-	if rendererIdentityEpoch != "5" {
-		t.Fatalf("renderer identity epoch = %q, want 5", rendererIdentityEpoch)
+	if rendererIdentityEpoch != "6" {
+		t.Fatalf("renderer identity epoch = %q, want 6", rendererIdentityEpoch)
+	}
+}
+
+// TestRendererEpochRenewsEveryProfilesFlowIDs covers what a renewal of the
+// renderer epoch reaches: the generated Flow ID of every named profile, and
+// no Source ID, which the epoch is no part of.
+func TestRendererEpochRenewsEveryProfilesFlowIDs(t *testing.T) {
+	t.Parallel()
+	for _, profile := range BuiltInProfiles() {
+		config := Config{
+			Profile: profile.Name, ProfileVersion: profile.Version, SegmentDuration: profile.SegmentDuration,
+			SegmentFormat: profile.SegmentFormat, EssenceStorage: profile.EssenceStorage,
+		}
+		earlier := namedID("flow", "input", flowProfileForRendererEpoch("bytes", config, "5"))
+		if current := namedID("flow", "input", flowProfile("bytes", config)); current == earlier {
+			t.Errorf("%s: epoch %s derives the Flow ID %s that epoch 5 did", profile.Name, rendererIdentityEpoch, current)
+		}
+	}
+	if got := sourceIdentity("abc"); got != "51d68e09-61df-503d-bfbf-3c6c9840b2ba" {
+		t.Errorf("Source ID changed to %s", got)
 	}
 }
 

@@ -36,7 +36,7 @@ const multiOutputEssenceThreshold = 4
 // rendererIdentityEpoch changes only when TAMSin deliberately changes the
 // semantics of media it writes. Package rebuilds and FFmpeg patch releases are
 // provenance, not a new ingest policy, and must not manufacture a new Flow.
-const rendererIdentityEpoch = "5"
+const rendererIdentityEpoch = "6"
 
 func New(config Config, client TAMSClient, prober media.Prober, segmenter media.Segmenter, logger *slog.Logger, reporter progress.Reporter) (*Pipeline, error) {
 	if config.InputMode == "" {

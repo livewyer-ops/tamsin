@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -291,6 +292,65 @@ func TestExplicitFlowRejectsChangedStagedContentBeforeWrites(t *testing.T) {
 	second := run()
 	if second.Status != ResultStatusFailed || client.uploads != 1 || client.flows[first.RootFlowID]["tags"].(map[string]any)[media.TagPrefix+"sha256"] != before {
 		t.Fatalf("changed source was adopted: %+v", second)
+	}
+}
+
+// TestFlowOfAnEarlierRendererEpochIsRefusedBeforeWrites covers an explicit
+// Flow that a build of an earlier renderer epoch rendered. Its media was
+// placed by other rules, so a run over it is refused before it writes
+// anything, while a Flow of this build's own epoch resumes.
+func TestFlowOfAnEarlierRendererEpochIsRefusedBeforeWrites(t *testing.T) {
+	requireEncoders(t, "libx264")
+	input := streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=2", "-c:v", "libx264", "-g", "25", "-bf", "0")
+	for _, version := range []string{"8.1", "8.2"} {
+		t.Run("TAMS "+version, func(t *testing.T) {
+			const flowID = "69aa64e4-0d55-4690-a7a7-07050d4ca493"
+			client := newFakeClient()
+			client.serviceDocument = map[string]any{"api_version": version, "min_object_timeout": "300:0", "min_presigned_url_timeout": "30:0"}
+			run := func() Result {
+				pipeline, err := New(Config{FlowID: flowID, SourceID: "046f3837-aaab-4335-83c7-a41f15ce522d", TempDirectory: t.TempDir(),
+					SegmentDuration: time.Second, SegmentFormat: media.SegmentFormatSource, EssenceStorage: media.EssenceStorageMuxed},
+					client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				batch, err := pipeline.Run(t.Context(), []source.Item{localSource(input)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return batch.Results[0]
+			}
+			if first := run(); first.Status != ResultStatusIngested {
+				t.Fatal(first.Error)
+			}
+			if again := run(); again.Status != ResultStatusResumed {
+				t.Fatalf("a Flow of this build's epoch did not resume: %+v", again)
+			}
+			client.lock.Lock()
+			tags := client.flows[flowID]["tags"].(map[string]any)
+			if tags[media.TagPrefix+"renderer_epoch"] != rendererIdentityEpoch {
+				t.Fatalf("the Flow carries renderer epoch %v, want %s", tags[media.TagPrefix+"renderer_epoch"], rendererIdentityEpoch)
+			}
+			tags[media.TagPrefix+"renderer_epoch"] = "5"
+			calls, uploads, deletions := len(client.callLog), client.uploads, len(client.deletedSegments)
+			client.lock.Unlock()
+
+			refused := run()
+			client.lock.Lock()
+			defer client.lock.Unlock()
+			if refused.Status != ResultStatusFailed || !strings.Contains(refused.Error, "renderer epoch") {
+				t.Fatalf("a Flow of renderer epoch 5 was not refused: %+v", refused)
+			}
+			for _, call := range client.callLog[calls:] {
+				if !strings.HasPrefix(call, "flowRead:") && !strings.HasPrefix(call, "sourceRead:") {
+					t.Errorf("the refused run made the store call %s", call)
+				}
+			}
+			if client.uploads != uploads || len(client.deletedSegments) != deletions || tags[media.TagPrefix+"renderer_epoch"] != "5" {
+				t.Errorf("the refused run uploaded %d Objects, deleted %d ranges and left epoch %v on the Flow",
+					client.uploads-uploads, len(client.deletedSegments)-deletions, tags[media.TagPrefix+"renderer_epoch"])
+			}
+		})
 	}
 }
 
