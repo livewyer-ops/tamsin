@@ -11,16 +11,16 @@ example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
 
 ## [8.2.0-in3] - 2026-11-20
 
+### Fixed
+
+- Prevent gaps between MPEG-TS Segments when the source plays continuously.
+- Discard the incomplete final Segment after a failed render so the ingest can resume.
+
 ### Changed
 
 - Ingest now accepts only MP4 and MPEG-TS.
 - Set metadata for individual tracks with `--collected-flow-metadata`.
 - Re-ingesting media from `8.2.0-in2` can create new Flows and upload the media again.
-
-### Fixed
-
-- Prevent gaps between MPEG-TS Segments when the source plays continuously.
-- Discard the incomplete final Segment after a failed render so the ingest can resume.
 
 ## [8.2.0-in2] - 2026-09-08
 
