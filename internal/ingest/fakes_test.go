@@ -1117,3 +1117,19 @@ func (r *objectRecorder) ObjectsCompleted(_ int, flowID string, objects []Object
 	r.objects[flowID] = append(r.objects[flowID], objects...)
 	return nil
 }
+
+func (fakeSegmenter) ProbeParameterSets(context.Context, string, int) (media.ParameterSets, error) {
+	return media.ParameterSets{}, nil
+}
+
+func (*recordingSegmenter) ProbeParameterSets(context.Context, string, int) (media.ParameterSets, error) {
+	return media.ParameterSets{}, nil
+}
+
+func (*failSecondEssenceSegmenter) ProbeParameterSets(context.Context, string, int) (media.ParameterSets, error) {
+	return media.ParameterSets{}, nil
+}
+
+func (sizedSegmenter) ProbeParameterSets(context.Context, string, int) (media.ParameterSets, error) {
+	return media.ParameterSets{}, nil
+}

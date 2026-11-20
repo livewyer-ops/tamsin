@@ -39,6 +39,8 @@ type FlowInfo struct {
 	ContentType string
 	// SegmentContainer is the FFmpeg muxer/suffix pair for the source family.
 	SegmentContainer SegmentContainer
+	// Streams is the probed source in container order, kept for the renderer.
+	Streams []Stream
 	// Collected holds the mono-essence Flows a multi-essence Flow gathers, in
 	// container track order. Empty for single-essence inputs.
 	Collected []CollectedFlow
@@ -88,6 +90,7 @@ func BuildFlow(probe Probe, identity Identity, detectedContentType string, stora
 	info := FlowInfo{
 		Start: start, Duration: duration,
 		SegmentContainer: SourceSegmentContainer(probe.Format, detectedContentType),
+		Streams:          probe.Streams,
 	}
 	if info.ReferenceOffset, err = referenceOffset(streams, start); err != nil {
 		return nil, FlowInfo{}, err

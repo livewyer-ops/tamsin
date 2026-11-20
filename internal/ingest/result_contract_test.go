@@ -386,3 +386,7 @@ func assertBatchResultSchema(t *testing.T, batch BatchResult) {
 		t.Fatalf("batch failed count = %d, want %d: %#v", batch.Failed, failed, batch)
 	}
 }
+
+func (*sequencedVersionSegmenter) ProbeParameterSets(context.Context, string, int) (media.ParameterSets, error) {
+	return media.ParameterSets{}, nil
+}

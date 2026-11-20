@@ -78,6 +78,8 @@ const (
 	FailureMessageMediaNoKeyFrame          = "The video has no key frame in its first five minutes, so MP4 output cannot be placed; use --profile preserve."
 	FailureMessageMediaOpenGOP             = "A cut lands on an open GOP, whose leading pictures an MP4 Segment does not show; use --profile mpegts-segments or --profile preserve."
 	FailureMessageMediaCutMidGOP           = "A cut on the first video stream falls between the key frames of another; use --profile mpegts-segments or --profile preserve."
+	FailureMessageMediaNoParameterSets     = "An MPEG-TS Object would hold H.264 pictures without the parameter sets a decoder needs; use --profile preserve."
+	FailureMessageMediaParameterSetsChange = "The H.264 parameter sets change within the video, which MPEG-TS Segments cut from MP4 cannot follow; use --profile preserve."
 	FailureMessageMediaOptionsInvalid      = "The FFmpeg options conflict with the selected media treatment."
 	FailureMessageCollectedMetadataInvalid = "The collected Flow metadata names a role the input does not have."
 	FailureMessageMediaToolUnavailable     = "The configured media toolchain is unavailable."

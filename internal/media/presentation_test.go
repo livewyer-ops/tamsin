@@ -67,11 +67,19 @@ func TestCadenceTimelineRetainsBoundaryEvidence(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		step, nextEnd int64
-		want          CadenceEvidence
+		// leading is when the second Object's packets show its leading
+		// pictures, against the zero of the first frame read from it.
+		leading []int64
+		want    CadenceEvidence
 	}{
-		{"fixed", 40, 2_000_000_000, CadenceFixed},
-		{"gap at boundary", 40, 2_040_000_000, CadenceVariable},
-		{"later different constant rate", 50, 2_250_000_000, CadenceVariable},
+		{"fixed", 40, 2_000_000_000, nil, CadenceFixed},
+		{"gap at boundary", 40, 2_040_000_000, nil, CadenceVariable},
+		{"leading pictures a decoder drops", 40, 2_080_000_000, []int64{-40, -80}, CadenceFixed},
+		{"leading pictures a decoder shows", 40, 2_000_000_000, []int64{40, 0}, CadenceFixed},
+		{"leading pictures at uneven steps", 40, 2_080_000_000, []int64{-30, -80}, CadenceVariable},
+		{"gap before the leading pictures", 40, 2_280_000_000, []int64{-40}, CadenceVariable},
+		{"gap between the leading pictures and the cut frame", 40, 2_240_000_000, []int64{-240}, CadenceVariable},
+		{"later different constant rate", 50, 2_250_000_000, nil, CadenceVariable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stream := Stream{CodecType: "video", TimeBase: "1/1000", AverageFrameRate: "25/1",
@@ -81,11 +89,29 @@ func TestCadenceTimelineRetainsBoundaryEvidence(t *testing.T) {
 				t.Fatalf("initial cadence=%v, %v", cadence, err)
 			}
 			stream.Presentation = PresentationSpan{First: 0, Last: tc.step * 24, LastDuration: tc.step, Frames: 25, MinimumStep: tc.step, MaximumStep: tc.step}
+			stream.LeadingPTS = tc.leading
 			cadence, err := timeline.Observe(stream, stream, tc.nextEnd)
 			if err != nil || cadence != tc.want {
 				t.Fatalf("second cadence=%v, want %v, err=%v", cadence, tc.want, err)
 			}
 		})
+	}
+}
+
+// The packets of a transport stream Object may be read past a timestamp wrap
+// that the frames decoded from it are read before.
+func TestCadenceTimelineReadsLeadingPicturesAcrossAWrap(t *testing.T) {
+	t.Parallel()
+	stream := Stream{CodecType: "video", TimeBase: "1/90000", AverageFrameRate: "25/1",
+		Presentation: PresentationSpan{First: 0, Last: 86400, LastDuration: 3600, Frames: 25, MinimumStep: 3600, MaximumStep: 3600}}
+	var timeline CadenceTimeline
+	if cadence, err := timeline.Observe(stream, stream, 1_000_000_000); err != nil || cadence != CadenceFixed {
+		t.Fatalf("initial cadence=%v, %v", cadence, err)
+	}
+	stream.Presentation.First, stream.Presentation.Last = 100, 86500
+	stream.LeadingPTS = []int64{mpegTSWrap + 100 - 3600, mpegTSWrap + 100 - 7200}
+	if cadence, err := timeline.Observe(stream, stream, 2_080_000_000); err != nil || cadence != CadenceFixed {
+		t.Fatalf("cadence=%v, %v; want the leading pictures found before the cut frame", cadence, err)
 	}
 }
 

@@ -78,9 +78,35 @@ func (c *timelineCursor) refuseUnsafeCut(record media.SegmentRecord, hiddenLead 
 	return nil
 }
 
+// refuseParameterSets refuses an MPEG-TS Object whose H.264 video a decoder
+// given that Object alone cannot decode, or would decode wrongly. Every
+// picture must find the parameter sets it refers to earlier in the Object.
+// Where the renderer repeats the sets of the sample description before every
+// key frame, the stream itself must not replace one: the stale set would
+// follow it at the next key frame. Every such Object begins with the repeated
+// sets, so the one in which the stream replaces a set carries that set with
+// two contents.
+func refuseParameterSets(record media.SegmentRecord, streams []media.Stream) error {
+	for _, stream := range streams {
+		switch sets := stream.ParameterSets; {
+		case sets == nil:
+		case sets.Missing:
+			return withFailure(FailureCodeMediaUnsupported, FailureMessageMediaNoParameterSets, true,
+				fmt.Errorf("the Object cut at %s holds pictures of stream %d without their H.264 parameter sets", media.Timestamp(record.Start), stream.Index))
+		case record.RepeatsParameterSets && sets.Changed:
+			return withFailure(FailureCodeMediaUnsupported, FailureMessageMediaParameterSetsChange, true,
+				fmt.Errorf("the Object cut at %s changes the H.264 parameter sets of stream %d", media.Timestamp(record.Start), stream.Index))
+		}
+	}
+	return nil
+}
+
 // place returns the Flow position for record and advances past the Segment's
 // reference-stream span.
 func (c *timelineCursor) place(record media.SegmentRecord, measured objectMeasurement) (int64, error) {
+	if err := refuseParameterSets(record, measured.streams); err != nil {
+		return 0, err
+	}
 	position := c.position
 	if record.Timed {
 		switch {

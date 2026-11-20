@@ -472,3 +472,11 @@ func TestRollingSegmentsKeepDiskAndTerminalMemoryBounded(t *testing.T) {
 		t.Fatalf("renderer staging window = %#v", segmenter.window)
 	}
 }
+
+func (sparseCapacitySegmenter) ProbeParameterSets(context.Context, string, int) (media.ParameterSets, error) {
+	return media.ParameterSets{}, nil
+}
+
+func (*rollingBoundSegmenter) ProbeParameterSets(context.Context, string, int) (media.ParameterSets, error) {
+	return media.ParameterSets{}, nil
+}

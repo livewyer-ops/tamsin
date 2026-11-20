@@ -819,6 +819,8 @@ type objectMeasurement struct {
 	// lead is how far before the frame it was cut on the Object presents:
 	// the leading pictures of an open GOP.
 	lead int64
+	// streams are the Object's own, with what was read of their parameter sets.
+	streams []media.Stream
 	// hiddenLead counts such pictures that an MP4 Object stores but does not
 	// show.
 	hiddenLead int
@@ -1160,6 +1162,7 @@ func (p *Pipeline) renderSegmentsTo(ctx context.Context, staged stagedFile, flow
 		SourceContainer: flowInfo.SegmentContainer, StreamIndices: streamIndices,
 		Directory: directory, AdditionalArgs: additionalArgs, StagingWindow: window,
 		FlowStart: p.config.Start, ProgrammeDuration: programmeDuration, Muxed: len(flowInfo.Collected) > 0,
+		Streams: flowInfo.Streams,
 		// Every render is bit-exact so an identical re-run produces identical
 		// bytes, and with them identical Object identifiers.
 		BitExact: true,
@@ -1319,6 +1322,7 @@ func measureObject(probe media.Probe, size int64, checksum string) (objectMeasur
 	}
 	entry.lead = reference.Lead
 	entry.hiddenLead, entry.midGOP = media.VideoCut(probe)
+	entry.streams = probe.Streams
 	// A regularised reference stream presents its last sample for a whole
 	// period, which can reach past the rounded timestamps every stream
 	// recorded. The Object's own range must still contain the Segment.

@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -118,6 +119,7 @@ func TestVideoCutEvidence(t *testing.T) {
 	for name, tc := range map[string]struct {
 		packets string
 		hidden  int
+		leading []int64
 		midGOP  bool
 	}{
 		"closed GOP":                                                     {packets: shown},
@@ -130,6 +132,7 @@ func TestVideoCutEvidence(t *testing.T) {
 		"a second video stream between key frames":                       {packets: shown + `,{"stream_index":2,"pts":0,"duration":40,"flags":"___"},{"stream_index":2,"pts":40,"duration":40,"flags":"K__"}`, midGOP: true},
 		"a second video stream whose first stored picture is hidden":     {packets: shown + `,{"stream_index":2,"pts":-80,"duration":40,"flags":"_D_"},{"stream_index":2,"pts":80,"duration":40,"flags":"___"},{"stream_index":2,"pts":0,"duration":40,"flags":"___"}`, midGOP: true},
 		"leading pictures of a second video stream":                      {packets: shown + `,{"stream_index":2,"pts":0,"duration":40,"flags":"K__"},{"stream_index":2,"pts":-40,"duration":40,"flags":"_D_"},{"stream_index":2,"pts":40,"duration":40,"flags":"___"}`, hidden: 1},
+		"leading pictures an Object shows":                               {packets: `{"stream_index":0,"pts":80,"duration":40,"flags":"K__"},{"stream_index":0,"pts":0,"duration":40,"flags":"___"},{"stream_index":0,"pts":40,"duration":40,"flags":"___"},{"stream_index":0,"pts":120,"duration":40,"flags":"___"}`, leading: []int64{0, 40}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -150,6 +153,9 @@ func TestVideoCutEvidence(t *testing.T) {
 			if hidden, midGOP := VideoCut(probe); hidden != tc.hidden || midGOP != tc.midGOP || probe.Streams[1].HiddenLead != 0 || probe.Streams[1].MidGOP {
 				t.Fatalf("VideoCut() = %d hidden, mid-GOP %t (audio: %d, %t); want %d, %t",
 					hidden, midGOP, probe.Streams[1].HiddenLead, probe.Streams[1].MidGOP, tc.hidden, tc.midGOP)
+			}
+			if leading := probe.Streams[0].LeadingPTS; !slices.Equal(leading, tc.leading) || probe.Streams[1].LeadingPTS != nil {
+				t.Fatalf("leading pictures shown at %v (audio: %v), want %v", leading, probe.Streams[1].LeadingPTS, tc.leading)
 			}
 		})
 	}

@@ -52,6 +52,7 @@ func measureObjectPackets(reader io.Reader, probe *Probe) error {
 		first, end, last, decoded *big.Rat
 		samples, keyFrames        int
 		hiddenLead                int
+		leading                   []int64
 	}
 	bounds := make(map[int]span)
 	startsOnKey := make(map[int]bool)
@@ -154,6 +155,8 @@ func measureObjectPackets(reader io.Reader, probe *Probe) error {
 			}
 			if bound.decoded == nil {
 				bound.decoded = first
+			} else if stream.CodecType == "video" && first.Cmp(bound.decoded) < 0 && len(bound.leading) <= maxLeadingPictures {
+				bound.leading = append(bound.leading, pts)
 			}
 			bound.samples++
 			if strings.Contains(packet.Flags, "K") {
@@ -196,6 +199,7 @@ func measureObjectPackets(reader io.Reader, probe *Probe) error {
 		stream.SampleCount = bound.samples
 		stream.KeyFrames = bound.keyFrames
 		stream.HiddenLead = bound.hiddenLead
+		stream.LeadingPTS = bound.leading
 		stream.MidGOP = stream.CodecType == "video" && !startsOnKey[stream.Index]
 	}
 	probe.Format.StartTime = ""

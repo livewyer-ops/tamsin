@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -223,6 +225,98 @@ func TestInstalledFFmpegRendersAreByteStable(t *testing.T) {
 	}
 }
 
+// TestLastSegmentWaitsForFFmpegExit lists two Segments, closes the manifest
+// and keeps the tool running. FFmpeg closes its outputs before it exits,
+// whatever its exit status, so the last Segment listed is passed on only
+// after a clean exit, and only then is a multiplex's last Segment final.
+func TestLastSegmentWaitsForFFmpegExit(t *testing.T) {
+	for _, outcome := range []struct {
+		name, status string
+		cancel       bool
+	}{
+		{"clean exit", "0", false},
+		{"failure", "17", false},
+		{"cancellation", "0", true},
+	} {
+		for _, storage := range []struct {
+			name    string
+			muxed   bool
+			streams []int
+		}{
+			{"multiplex", true, []int{AllStreams}},
+			{"one essence", false, []int{0}},
+		} {
+			t.Run(outcome.name+"/"+storage.name, func(t *testing.T) {
+				directory := t.TempDir()
+				release, closed, tool := filepath.Join(directory, "release"), filepath.Join(directory, "closed"), filepath.Join(directory, "ffmpeg")
+				script := "#!/bin/sh\nprintf 'first.mp4,0,2\\nsecond.mp4,2,4\\n' >&3\nexec 3>&-\n: > '" + closed + "'\n" +
+					"while [ ! -f '" + release + "' ]; do sleep 0.02; done\nexit " + outcome.status + "\n"
+				if err := os.WriteFile(tool, []byte(script), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				seen := make(chan SegmentRecord, 4)
+				done := make(chan error, 1)
+				go func() {
+					done <- (FFmpeg{Executable: tool}).Segment(ctx, SegmentRequest{
+						Input: filepath.Join(directory, "input.mp4"), SourceContainer: SegmentContainer{Muxer: "mp4", Extension: ".mp4"},
+						Muxed: storage.muxed, Duration: 2 * time.Second, StreamIndices: storage.streams, Directory: filepath.Join(directory, "out"),
+					}, func(record SegmentRecord) error { seen <- record; return nil })
+				}()
+				select {
+				case record := <-seen:
+					if record.Final || record.Start != 0 {
+						t.Fatalf("first record = %+v, want the Segment at 0 and not final", record)
+					}
+				case <-ctx.Done():
+					t.Fatal("the first Segment never arrived")
+				}
+				for {
+					if _, err := os.Stat(closed); err == nil {
+						break
+					}
+					select {
+					case <-ctx.Done():
+						t.Fatal("the manifest never closed")
+					case <-time.After(5 * time.Millisecond):
+					}
+				}
+				select {
+				case record := <-seen:
+					t.Fatalf("record %+v passed on while the tool is still running", record)
+				case <-time.After(150 * time.Millisecond):
+				}
+				if outcome.cancel {
+					cancel()
+				} else if err := os.WriteFile(release, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				err := <-done
+				close(seen)
+				var last []SegmentRecord
+				for record := range seen {
+					last = append(last, record)
+				}
+				switch {
+				case outcome.cancel:
+					if !errors.Is(err, context.Canceled) || len(last) != 0 {
+						t.Fatalf("cancelled run = %v with records %+v, want the cancellation and no further record", err, last)
+					}
+				case outcome.status != "0":
+					if err == nil || !strings.Contains(err.Error(), "exit status "+outcome.status) || len(last) != 0 {
+						t.Fatalf("failed run = %v with records %+v, want the exit status and no further record", err, last)
+					}
+				default:
+					if err != nil || len(last) != 1 || last[0].Final != storage.muxed || last[0].Start != int64(2*time.Second) {
+						t.Fatalf("clean run = %v with records %+v, want the Segment at 2 s, final for a multiplex", err, last)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestFFmpegVersionRetainsBuildEvidence(t *testing.T) {
 	directory := t.TempDir()
 	tool := filepath.Join(directory, "ffmpeg")
@@ -249,5 +343,96 @@ func TestFFmpegSegmentRejectsUnsupportedSourceContainer(t *testing.T) {
 	}, func(SegmentRecord) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "output container must be MP4 or MPEG-TS") {
 		t.Fatalf("Segment() error = %v, want unsupported source-container guidance", err)
+	}
+}
+
+// TestMPEGTSRenderRepeatsH264ParameterSets pins which outputs are given the
+// filters that write H.264 parameter sets before every key frame: H.264 video
+// copied out of an MP4 into MPEG-TS, named by its place among the video
+// streams when the whole container is mapped.
+func TestMPEGTSRenderRepeatsH264ParameterSets(t *testing.T) {
+	directory := t.TempDir()
+	input := filepath.Join(directory, "input")
+	if err := os.WriteFile(input, []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tool := filepath.Join(directory, "ffmpeg")
+	script := `#!/bin/sh
+printf '%s\n' "$@" > "$0.arguments"
+input=""
+previous=""
+last=""
+list=""
+for argument in "$@"; do
+  if [ "$previous" = "-i" ]; then input="$argument"; fi
+  if [ "$previous" = "-segment_list" ]; then list="$argument"; fi
+  previous="$argument"
+  last="$argument"
+done
+[ -n "$list" ] || exit 0
+output="$(printf "$last" 0)"
+cp "$input" "$output"
+printf '"%s",0.000000,1.000000\n' "$output" >&3
+`
+	if err := os.WriteFile(tool, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	streams := []Stream{
+		{Index: 0, CodecType: "audio", CodecName: "aac"},
+		{Index: 1, CodecType: "video", CodecName: "hevc"},
+		{Index: 2, CodecType: "video", CodecName: "h264"},
+		{Index: 3, CodecType: "data", CodecName: "bin_data"},
+		{Index: 4, CodecType: "video", CodecName: "h264"},
+	}
+	const filters = "h264_mp4toannexb,dump_extra=freq=keyframe"
+	mp4 := SegmentContainer{Muxer: "mp4", Extension: ".mp4"}
+	transport := SegmentContainer{Muxer: "mpegts", Extension: ".ts"}
+	for _, test := range []struct {
+		name    string
+		request SegmentRequest
+		want    []string
+		// repeats lists the outputs whose records say so.
+		repeats []int
+	}{
+		{"each essence of an MP4", SegmentRequest{Format: SegmentFormatMPEGTS, SourceContainer: mp4, StreamIndices: []int{0, 1, 2, 4}},
+			[]string{"0:2 -bsf:v " + filters, "0:2 -time_base:v 1/90000", "0:4 -bsf:v " + filters, "0:4 -time_base:v 1/90000"}, []int{2, 4}},
+		{"the multiplex of an MP4", SegmentRequest{Format: SegmentFormatMPEGTS, SourceContainer: mp4, StreamIndices: []int{AllStreams}, Duration: time.Second},
+			[]string{"0 -bsf:v:1 " + filters, "0 -time_base:v:1 1/90000", "0 -bsf:v:2 " + filters, "0 -time_base:v:2 1/90000"}, []int{AllStreams}},
+		{"an MPEG-TS source", SegmentRequest{Format: SegmentFormatMPEGTS, SourceContainer: transport, StreamIndices: []int{AllStreams}, Duration: time.Second}, nil, nil},
+		{"MP4 output", SegmentRequest{Format: SegmentFormatSource, SourceContainer: mp4, StreamIndices: []int{AllStreams}, Duration: time.Second}, nil, nil},
+		{"custom arguments", SegmentRequest{Format: SegmentFormatMPEGTS, SourceContainer: mp4, StreamIndices: []int{2}, Duration: time.Second,
+			AdditionalArgs: []string{"-c:v", "libx265"}}, nil, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := test.request
+			request.Input, request.Streams, request.Directory = input, streams, t.TempDir()
+			var repeats []int
+			if err := (FFmpeg{Executable: tool}).Segment(t.Context(), request, func(record SegmentRecord) error {
+				if record.RepeatsParameterSets {
+					repeats = append(repeats, record.StreamIndex)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			recorded, err := os.ReadFile(tool + ".arguments")
+			if err != nil {
+				t.Fatal(err)
+			}
+			arguments := strings.Split(strings.TrimSpace(string(recorded)), "\n")
+			var got []string
+			mapped := ""
+			for index, argument := range arguments {
+				if argument == "-map" {
+					mapped = arguments[index+1]
+				}
+				if strings.HasPrefix(argument, "-bsf") || strings.HasPrefix(argument, "-time_base") {
+					got = append(got, mapped+" "+argument+" "+arguments[index+1])
+				}
+			}
+			if !slices.Equal(got, test.want) || !slices.Equal(repeats, test.repeats) {
+				t.Fatalf("filtered streams = %q on records %v, want %q on %v", got, repeats, test.want, test.repeats)
+			}
+		})
 	}
 }

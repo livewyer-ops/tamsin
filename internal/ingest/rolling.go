@@ -77,8 +77,34 @@ func (p *rollingObjectPreparer) prepare(ctx context.Context, record media.Segmen
 	return object, nil
 }
 
+// probeObject measures a rendered Object. An MPEG-TS Object carries its H.264
+// parameter sets in the stream, so those are read as well: whether the Object
+// can be decoded on its own depends on where they are.
 func (p *Pipeline) probeObject(ctx context.Context, path string) (media.Probe, error) {
-	return p.prober.ProbeObject(ctx, path)
+	probe, err := p.prober.ProbeObject(ctx, path)
+	if err != nil || probe.Format.Name != "mpegts" {
+		return probe, err
+	}
+	video := 0
+	for index := range probe.Streams {
+		stream := &probe.Streams[index]
+		if stream.CodecType != "video" {
+			continue
+		}
+		if stream.CodecName == "h264" {
+			// An Object with no sequence parameter set at all has no picture
+			// size, and FFmpeg cannot copy its stream to list what it holds.
+			sets := media.ParameterSets{Missing: true}
+			if stream.Width > 0 && stream.Height > 0 {
+				if sets, err = p.segmenter.ProbeParameterSets(ctx, path, video); err != nil {
+					return media.Probe{}, err
+				}
+			}
+			stream.ParameterSets = &sets
+		}
+		video++
+	}
+	return probe, nil
 }
 
 type rollingFlowState struct {

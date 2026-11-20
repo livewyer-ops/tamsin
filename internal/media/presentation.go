@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -273,6 +274,10 @@ type PresentationSpan struct {
 	Invalid                           bool
 }
 
+// maxLeadingPictures bounds the leading pictures measured for one Object, far
+// above the few an encoder stores after a key frame.
+const maxLeadingPictures = 256
+
 // CadenceTimeline carries presentation intervals across closed segments. It
 // uses rational seconds: different container time bases never pass via float64.
 type CadenceTimeline struct {
@@ -298,7 +303,6 @@ func (c *CadenceTimeline) Observe(stream, reference Stream, segmentEnd int64) (C
 	}
 	offset := new(big.Rat).Sub(new(big.Rat).SetFrac64(segmentEnd, 1_000_000_000),
 		new(big.Rat).Add(seconds(ref.Last, refTick), seconds(ref.LastDuration, refTick)))
-	first := new(big.Rat).Add(seconds(span.First, tick), offset)
 	last := new(big.Rat).Add(seconds(span.Last, tick), offset)
 	add := func(step *big.Rat) error {
 		if step.Sign() <= 0 {
@@ -312,6 +316,36 @@ func (c *CadenceTimeline) Observe(stream, reference Stream, segmentEnd int64) (C
 		}
 		return nil
 	}
+	// An Object may store leading pictures: stored after the frame it was cut
+	// on and shown before it. A decoder given that Object alone shows the ones
+	// it can decode without the Object before and drops the rest, so the
+	// frames read from it begin at the cut frame or at a leading picture. The
+	// packets say when each leading picture is shown. Those the frames leave
+	// out are measured here, each step on its own, and the interval from the
+	// Object before runs to the earliest of them.
+	if len(stream.LeadingPTS) > maxLeadingPictures {
+		return CadenceUnknown, errors.New("too many leading pictures to measure")
+	}
+	var dropped []int64
+	for _, pts := range stream.LeadingPTS {
+		if stream.TimeBase == "1/90000" {
+			// The packets and the frames of a transport stream may have been
+			// read on either side of a timestamp wrap.
+			pts = unwrapTransportPTS(pts, span.First)
+		}
+		if pts < span.First {
+			dropped = append(dropped, pts)
+		}
+	}
+	slices.Sort(dropped)
+	earliest := span.First
+	for index := len(dropped) - 1; index >= 0; index-- {
+		if err := add(seconds(earliest-dropped[index], tick)); err != nil {
+			return CadenceUnknown, err
+		}
+		earliest = dropped[index]
+	}
+	first := new(big.Rat).Add(seconds(earliest, tick), offset)
 	if c.previous != nil {
 		if err := add(new(big.Rat).Sub(first, c.previous)); err != nil {
 			return CadenceUnknown, err

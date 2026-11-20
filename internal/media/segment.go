@@ -99,6 +99,9 @@ type SegmentRequest struct {
 	Directory         string
 	AdditionalArgs    []string
 	BitExact          bool
+	// Streams is the probed source, which tells the renderer the codec of
+	// each stream it copies.
+	Streams []Stream
 	// StagingWindow applies process-level backpressure while a streaming sink
 	// commits and removes completed outputs. It is optional because callers
 	// which retain every output cannot safely acknowledge reclaimed space.
@@ -138,6 +141,10 @@ type SegmentRecord struct {
 	MPEGTS            bool
 	FlowStart         int64
 	ProgrammeDuration int64
+	// RepeatsParameterSets is set for an output whose H.264 video had the
+	// parameter sets of its sample description written before every key
+	// frame. They are the right ones only while the stream never changes them.
+	RepeatsParameterSets bool
 	// FlushStaging asks a streaming sink to reclaim all completed outputs
 	// before returning. It is set when the staging high watermark pauses
 	// FFmpeg at a closed-output boundary.
@@ -148,6 +155,9 @@ type SegmentSink func(SegmentRecord) error
 
 type Segmenter interface {
 	Segment(context.Context, SegmentRequest, SegmentSink) error
+	// ProbeParameterSets reads the parameter sets an MPEG-TS Object carries
+	// for the H.264 stream at the given place among its video streams.
+	ProbeParameterSets(ctx context.Context, filename string, video int) (ParameterSets, error)
 	Version(context.Context) (string, error)
 }
 
@@ -157,6 +167,7 @@ type FFmpeg struct {
 
 type segmentOutput struct {
 	streamIndex int
+	repeats     bool
 	path        string
 	reader      *os.File
 	writer      *os.File
@@ -228,6 +239,11 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 		}
 		arguments = append(arguments, "-map", mapSpec)
 		arguments = append(arguments, "-c", "copy")
+		var filters []string
+		if muxer == "mpegts" && request.SourceContainer.Muxer == "mp4" && len(request.AdditionalArgs) == 0 {
+			filters = parameterSetFilters(request.Streams, streamIndex)
+		}
+		arguments = append(arguments, filters...)
 		if request.BitExact {
 			arguments = append(arguments, "-fflags", "+bitexact")
 		}
@@ -240,7 +256,7 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			}
 			path := filepath.Join(request.Directory, prefix+extension)
 			arguments = append(arguments, "-f", muxer, path)
-			outputs = append(outputs, segmentOutput{streamIndex: streamIndex, path: path})
+			outputs = append(outputs, segmentOutput{streamIndex: streamIndex, repeats: len(filters) > 0, path: path})
 			continue
 		}
 		reader, writer, err := os.Pipe()
@@ -264,7 +280,7 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			"-segment_list_flags", "+live",
 			pattern,
 		)
-		outputs = append(outputs, segmentOutput{streamIndex: streamIndex, reader: reader, writer: writer})
+		outputs = append(outputs, segmentOutput{streamIndex: streamIndex, repeats: len(filters) > 0, reader: reader, writer: writer})
 	}
 
 	if request.Duration <= 0 {
@@ -273,7 +289,7 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			return fmt.Errorf("extract essences from %q: %w: %s", request.Input, err, strings.TrimSpace(string(stderr)))
 		}
 		for _, output := range outputs {
-			if err := sink(SegmentRecord{StreamIndex: output.streamIndex, Path: output.path, MPEGTS: outputContainer.Muxer == "mpegts", Final: true}); err != nil {
+			if err := sink(SegmentRecord{StreamIndex: output.streamIndex, Path: output.path, MPEGTS: outputContainer.Muxer == "mpegts", RepeatsParameterSets: output.repeats, Final: true}); err != nil {
 				return err
 			}
 		}
@@ -310,6 +326,9 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 	workCtx, cancelWork := context.WithCancel(ctx)
 	defer cancelWork()
 	records := make(chan SegmentRecord, maxPendingSegments)
+	var waitErr error
+	exited := make(chan struct{})
+	go func() { waitErr = command.Wait(); close(exited) }()
 	recordError := func(err error) {
 		errMu.Lock()
 		if parseErr == nil {
@@ -349,9 +368,16 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			for {
 				fields, err := decoder.Read()
 				if errors.Is(err, io.EOF) {
+					// FFmpeg closes its outputs and lists the Segment it was
+					// writing when it fails or is signalled, too. That Segment
+					// is the programme's last only if FFmpeg then exits cleanly;
+					// otherwise it may be cut short, and it is not passed on.
 					if pending != nil {
-						pending.Final = true
-						emit(*pending)
+						<-exited
+						if waitErr == nil {
+							pending.Final = request.Muxed && output.streamIndex == AllStreams
+							emit(*pending)
+						}
 					}
 					return
 				}
@@ -374,22 +400,17 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 					recordError(err)
 					return
 				}
-				record := SegmentRecord{StreamIndex: output.streamIndex, Path: path, Start: start, End: end, Timed: true, FlowStart: request.FlowStart, ProgrammeDuration: request.ProgrammeDuration, MPEGTS: outputContainer.Muxer == "mpegts"}
-				if request.Muxed && output.streamIndex == AllStreams {
-					if pending != nil && !emit(*pending) {
-						return
-					}
-					pending = &record
-				} else if !emit(record) {
+				record := SegmentRecord{StreamIndex: output.streamIndex, Path: path, Start: start, End: end, Timed: true, FlowStart: request.FlowStart, ProgrammeDuration: request.ProgrammeDuration, MPEGTS: outputContainer.Muxer == "mpegts", RepeatsParameterSets: output.repeats}
+				// A Segment is passed on once the next one is listed, which
+				// shows it is not the last.
+				if pending != nil && !emit(*pending) {
 					return
 				}
-
+				pending = &record
 				previousStart = start
 			}
 		}()
 	}
-	waitResult := make(chan error, 1)
-	go func() { waitResult <- command.Wait() }()
 	go func() { parsers.Wait(); close(records) }()
 	// Keep reading closure notifications during probing and uploads. Otherwise
 	// a slow sink prevents the high-watermark check while FFmpeg fills the disk.
@@ -412,7 +433,7 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			recordError(err)
 		}
 	}
-	waitErr := <-waitResult
+	<-exited
 	errMu.Lock()
 	manifestErr := parseErr
 	errMu.Unlock()
@@ -431,6 +452,40 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 		}
 	}
 	return nil
+}
+
+// parameterSetFilters returns the bitstream filters an MPEG-TS output needs
+// for the H.264 video it copies out of an MP4. An MP4 keeps the parameter sets
+// in its sample description, and FFmpeg's h264_mp4toannexb writes them into the
+// stream only before IDR pictures. An Object cut on any other key frame, as an
+// open GOP begins with, would hold none and could not be decoded on its own,
+// so dump_extra writes them before every key frame that does not begin with
+// them. They are the sets of the sample description, which stay the right
+// ones only while the stream never changes them: the caller checks that on
+// each Object. H.264 from an MPEG-TS source is left as it is, because its
+// sets arrive in the stream and may change there.
+func parameterSetFilters(streams []Stream, streamIndex int) []string {
+	var arguments []string
+	video := 0
+	for _, stream := range streams {
+		if stream.CodecType != "video" {
+			continue
+		}
+		if stream.CodecName == "h264" && (streamIndex == AllStreams || streamIndex == stream.Index) {
+			specifier := ":v"
+			if streamIndex == AllStreams {
+				// Every stream is mapped, so a video stream keeps its place among the output's.
+				specifier += ":" + strconv.Itoa(video)
+			}
+			// FFmpeg 6 rescales a copied packet to the time base hinted for
+			// its output stream before filtering it, and hints one tick a
+			// frame, which would round every timestamp to the frame rate.
+			// The hint is set to MPEG-TS's own time base instead.
+			arguments = append(arguments, "-bsf"+specifier, "h264_mp4toannexb,dump_extra=freq=keyframe", "-time_base"+specifier, "1/90000")
+		}
+		video++
+	}
+	return arguments
 }
 
 func closeSegmentPipes(outputs []segmentOutput) {

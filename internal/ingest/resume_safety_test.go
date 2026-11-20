@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -332,5 +333,68 @@ func TestSharedObjectDispositionsFollowItsTimerange(t *testing.T) {
 		if item.Disposition != ObjectDispositionResumed || item.Verification != ObjectVerificationVerified {
 			t.Fatalf("shared Object result: %+v", item)
 		}
+	}
+}
+
+// TestRetryAfterFailedRenderMatchesAnUninterruptedRun stops a render part of
+// the way through. FFmpeg closes its outputs when it fails, so its manifest
+// then lists a last Segment that ends short of the next cut. That Segment
+// must not be kept: a retry writes the whole Segment at the same place, which
+// a store refuses as an overlap. The retry reuses the Segments that were kept
+// and ends with the Flows, Segments and Objects of a run that never stopped.
+func TestRetryAfterFailedRenderMatchesAnUninterruptedRun(t *testing.T) {
+	requireEncoders(t, "aac", "libx264")
+	input := streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=96x64:rate=25:duration=14",
+		"-f", "lavfi", "-i", "sine=sample_rate=48000:duration=14",
+		"-c:v", "libx264", "-preset", "veryfast", "-x264-params", "keyint=50:min-keyint=50:scenecut=0:bframes=2:open-gop=0", "-c:a", "aac")
+	// The tool lets FFmpeg render 7.25 s and close its outputs, then reports a failure.
+	tool := filepath.Join(t.TempDir(), "ffmpeg")
+	script := "#!/bin/sh\ncase \" $* \" in\n*' -segment_list '*) ffmpeg -t 7.25 \"$@\" || exit $?; exit 23 ;;\n*) exec ffmpeg \"$@\" ;;\nesac\n"
+	if err := os.WriteFile(tool, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, storage := range []media.EssenceStorage{media.EssenceStorageMuxed, media.EssenceStorageIndependent} {
+		t.Run(string(storage), func(t *testing.T) {
+			run := func(client *fakeClient, executable string) BatchResult {
+				t.Helper()
+				pipeline, err := New(Config{InputMode: InputStage, SegmentDuration: 2 * time.Second, SegmentFormat: media.SegmentFormatSource,
+					EssenceStorage: storage, VerificationMode: VerificationReadback, TempDirectory: t.TempDir()},
+					client, media.FFprobe{}, media.FFmpeg{Executable: executable}, discardLogger(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				batch, err := pipeline.Run(t.Context(), []source.Item{localSource(input)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return batch
+			}
+			reference, client := newFakeClient(), newFakeClient()
+			if batch := run(reference, ""); batch.Succeeded != 1 {
+				t.Fatalf("uninterrupted run failed: %s", batch.Results[0].Error)
+			}
+			if batch := run(client, tool); batch.Failed != 1 {
+				t.Fatalf("run with a failing render = %+v, want it failed", batch.Results[0])
+			}
+			kept := 0
+			for flow, segments := range client.segments {
+				for timerange, segment := range segments {
+					if want, written := reference.segments[flow][timerange]; !written || want.ObjectID != segment.ObjectID {
+						t.Errorf("the failed run kept Segment %s of Flow %s as Object %s, which an uninterrupted run does not write", timerange, flow, segment.ObjectID)
+					}
+					kept++
+				}
+			}
+			if uploads := client.uploads; kept == 0 || uploads != kept {
+				t.Fatalf("the failed run kept %d Segments from %d uploads, want a prefix and nothing else uploaded", kept, uploads)
+			}
+			if batch := run(client, ""); batch.Succeeded != 1 {
+				t.Fatalf("retry failed: %+v: %s", batch.Results[0].Failure, batch.Results[0].Error)
+			}
+			if client.uploads != reference.uploads || !reflect.DeepEqual(client.segments, reference.segments) || !reflect.DeepEqual(client.flows, reference.flows) {
+				t.Fatalf("after the retry the store holds Segments %v from %d uploads, want those of an uninterrupted run, %v from %d, and the same Flows",
+					client.segments, client.uploads, reference.segments, reference.uploads)
+			}
+		})
 	}
 }

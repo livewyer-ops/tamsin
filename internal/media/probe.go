@@ -93,6 +93,13 @@ type Stream struct {
 	// Object stores but its edit list keeps from being shown: pictures stored
 	// after the frame the Object was cut on that present before it.
 	HiddenLead int `json:"-"`
+	// ParameterSets is read from an MPEG-TS Object for its H.264 video.
+	ParameterSets *ParameterSets `json:"-"`
+	// LeadingPTS holds, in the stream's time base, when each picture is shown
+	// that an Object stores after the frame it was cut on and shows before
+	// it: the leading pictures no edit list hides. A stream that stores more
+	// than maxLeadingPictures of them has one entry over that limit.
+	LeadingPTS []int64 `json:"-"`
 	// MidGOP is set when the first packet an Object stores for a video
 	// stream is not a key frame, so the stream cannot be decoded from that
 	// Object alone until its next key frame.

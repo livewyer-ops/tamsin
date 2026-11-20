@@ -572,3 +572,11 @@ func TestCustomMediaProcessUsesTheCompleteLocalBudget(t *testing.T) {
 	}
 	pipeline.mediaProcesses.Release(1)
 }
+
+func (countingSegmenter) ProbeParameterSets(context.Context, string, int) (media.ParameterSets, error) {
+	return media.ParameterSets{}, nil
+}
+
+func (*boundedRollingSegmenter) ProbeParameterSets(context.Context, string, int) (media.ParameterSets, error) {
+	return media.ParameterSets{}, nil
+}

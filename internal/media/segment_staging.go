@@ -26,8 +26,10 @@ func (p osStagingProcess) resume() error { return continueSegmentProcess(p.proce
 // deadlock forever: the sink has nothing reclaimable and FFmpeg cannot close
 // the file which would make it reclaimable. Checking at closure boundaries may
 // exceed the high watermark by the active output for each stream, which is
-// unavoidable for an external process; the Pipeline capacity ledger remains
-// responsible for cancelling an output that cannot fit at all.
+// unavoidable for an external process, and by the newest closed output for
+// each stream, which is held until the next one is listed or FFmpeg exits;
+// the Pipeline capacity ledger remains responsible for cancelling an output
+// that cannot fit at all.
 type segmentBackpressure struct {
 	mu        sync.Mutex
 	process   stagingProcess

@@ -298,6 +298,7 @@ func TestOpenGOPVideoIsRefusedForMP4Segments(t *testing.T) {
 					{"staged MP4", InputStage, media.SegmentFormatSource},
 					{"streamed MP4", InputStream, media.SegmentFormatSource},
 					{"staged MPEG-TS", InputStage, media.SegmentFormatMPEGTS},
+					{"streamed MPEG-TS", InputStream, media.SegmentFormatMPEGTS},
 				} {
 					t.Run(string(storage)+"/"+test.name, func(t *testing.T) {
 						item := localSource(filename)
@@ -538,6 +539,109 @@ func TestMuxedCutsNeedAKeyFrameOfEveryVideo(t *testing.T) {
 						if source := decodedFrames(t, filename, video); len(segments) != 4 || len(source) != 200 || !slices.Equal(decoded[video], source) {
 							t.Fatalf("%d Objects decode %d pictures of video stream %d, want the source's %d in order from four Objects",
 								len(segments), len(decoded[video]), video, len(source))
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+// A streamed input is measured one Object at a time, and an Object stores
+// leading pictures a decoder given it alone may or may not show. The frame
+// rate declared for the Flow has to hold across every one of them: a late key
+// frame and leading pictures at uneven steps are a variable rate, and leading
+// pictures at even steps are not, whether the decoder shows them or not.
+func TestStreamedLeadingPicturesKeepCadenceEvidence(t *testing.T) {
+	// The fixtures' 1/12800 time base puts 200 ms in 2560 ticks and 10 ms in 128.
+	const structure = "keyint=50:min-keyint=50:scenecut=0"
+	x264 := []string{"-c:v", "libx264", "-preset", "veryfast", "-x264-params", "open-gop=1:bframes=2:" + structure}
+	for _, fixture := range []struct {
+		name, encoder string
+		arguments     []string
+		// retime shifts packets of the constant encode, given the place in
+		// decode order of its last key frame, which is shown at 6 s and which
+		// two leading pictures follow.
+		retime func(key int) string
+	}{
+		{name: "leading pictures a decoder drops", encoder: "libx264", arguments: x264},
+		{name: "leading pictures a decoder shows", encoder: "libx265", arguments: []string{"-c:v", "libx265", "-preset", "veryfast",
+			"-x265-params", "open-gop=0:radl=2:bframes=3:log-level=error:" + structure, "-tag:v", "hvc1"}},
+		{name: "a late key frame", encoder: "libx264", arguments: x264, retime: func(key int) string {
+			delay := `+if(gte(N\,` + strconv.Itoa(key) + `)\,2560\,0)`
+			return "setts=pts=PTS" + delay + ":dts=DTS" + delay
+		}},
+		{name: "leading pictures at uneven steps", encoder: "libx264", arguments: x264, retime: func(key int) string {
+			return `setts=pts=PTS+if(eq(N\,` + strconv.Itoa(key+2) + `)\,128\,0)`
+		}},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			requireEncoders(t, fixture.encoder)
+			input := streamFixture(t, ".mp4", append([]string{"-f", "lavfi", "-i", "testsrc2=size=128x96:rate=25:duration=8"}, fixture.arguments...)...)
+			packets, err := exec.Command("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts,flags", "-of", "csv=p=0", input).Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var shown []int64
+			var keys []int
+			for index, packet := range strings.Fields(string(packets)) {
+				pts, flags, _ := strings.Cut(packet, ",")
+				value, err := strconv.ParseInt(pts, 10, 64)
+				if err != nil {
+					t.Fatal(err)
+				}
+				shown = append(shown, value)
+				if strings.Contains(flags, "K") {
+					keys = append(keys, index)
+				}
+			}
+			key := keys[len(keys)-1]
+			if key == 0 || key+2 >= len(shown) || shown[key+1] >= shown[key] || shown[key+2] >= shown[key] {
+				t.Fatalf("fixture has key frames at %v, want two leading pictures after the last", keys)
+			}
+			if fixture.retime != nil {
+				input = streamFixture(t, ".mp4", "-i", input, "-c", "copy", "-bsf:v", fixture.retime(key))
+			}
+			for _, mode := range []InputMode{InputStage, InputStream} {
+				t.Run(string(mode), func(t *testing.T) {
+					item := localSource(input)
+					if mode == InputStream {
+						item, _ = serveStreamFixture(t, input, 0)
+					}
+					client := newFakeClient()
+					pipeline, err := New(Config{InputMode: mode, SegmentDuration: 2 * time.Second, SegmentFormat: media.SegmentFormatMPEGTS,
+						EssenceStorage: media.EssenceStorageIndependent, TempDirectory: t.TempDir()}, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					batch, err := pipeline.Run(t.Context(), []source.Item{item})
+					if err != nil {
+						t.Fatal(err)
+					}
+					result := batch.Results[0]
+					flows := registeredVideoSpans(t, client)
+					if len(flows) != 1 {
+						t.Fatalf("run = %+v (%s) with video Segments %v, want one video Flow", result.Failure, result.Error, flows)
+					}
+					end := flows[0][len(flows[0])-1][1]
+					if mode == InputStream && fixture.retime != nil {
+						if batch.Failed != 1 || result.Failure == nil || result.Failure.Code != FailureCodeMediaPrepareFailed ||
+							!strings.Contains(result.Error, "/essence_parameters/frame_rate") {
+							t.Fatalf("streamed run = %+v (%s), want the retimed pictures to contradict the declared frame rate", result.Failure, result.Error)
+						}
+						if end > int64(6*time.Second) {
+							t.Fatalf("streamed run kept video Segments %v, want only those before the retimed pictures", flows)
+						}
+						return
+					}
+					client.lock.Lock()
+					defer client.lock.Unlock()
+					for _, flow := range client.flows {
+						parameters, _ := flow["essence_parameters"].(map[string]any)
+						retimed := fixture.retime != nil
+						if variable := parameters["vfr"] == true; batch.Succeeded != 1 || variable != retimed || (!retimed && end != int64(8*time.Second)) {
+							t.Fatalf("run = %+v (%s) with essence parameters %v and video Segments %v, want a variable frame rate only for retimed pictures and otherwise all 8 s",
+								result.Failure, result.Error, parameters, flows)
 						}
 					}
 				})
