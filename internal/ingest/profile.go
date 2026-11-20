@@ -272,10 +272,7 @@ func validateResolvedProfile(config Config) error {
 	return nil
 }
 
-// validateMPEGTSSegmentCodecs keeps the MPEG-TS promise conservative. The
-// FFmpeg muxer accepts more combinations than broadcast and streaming readers
-// reliably consume, so compatibility is an explicit allow-list rather than an
-// assumption that a successful mux is interoperable.
+// mpegtsCompatible lists the codecs the MPEG-TS segment policy accepts.
 var mpegtsCompatible = map[string]map[string]bool{
 	"video": {"h264": true, "hevc": true, "mpeg2video": true},
 	"audio": {"aac": true, "mp2": true, "mp3": true, "ac3": true, "eac3": true, "s302m": true},
@@ -299,6 +296,10 @@ func validateRenderedTracks(probe media.Probe, muxer string) error {
 	return nil
 }
 
+// validateMPEGTSSegmentCodecs keeps the MPEG-TS promise conservative. The
+// FFmpeg muxer accepts more combinations than broadcast and streaming readers
+// reliably consume, so compatibility is an explicit allow-list rather than an
+// assumption that a successful mux is interoperable.
 func validateMPEGTSSegmentCodecs(probe media.Probe) error {
 	essences := 0
 	for _, stream := range probe.Streams {

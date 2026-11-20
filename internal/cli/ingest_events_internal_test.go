@@ -147,7 +147,7 @@ func TestInputFailurePrefersActionRequiredTerminalState(t *testing.T) {
 	t.Parallel()
 	result := ingest.Result{
 		Status: ingest.ResultStatusFailed, Verification: ingest.VerificationFailedStranded,
-		Failure: &ingest.Failure{Code: ingest.FailureCodeInterrupted, Message: ingest.FailureMessageRunInterrupted},
+		Failure: &ingest.Failure{Code: ingest.FailureCodeInterrupted, Message: ingest.FailureMessageInputInterrupt},
 		Flows:   []ingest.FlowResult{{Objects: []ingest.ObjectResult{{Disposition: ingest.ObjectDispositionStranded}}}},
 	}
 	code, _, action := inputFailure(result)

@@ -152,12 +152,6 @@ func BuildFlow(probe Probe, identity Identity, detectedContentType string, stora
 	return flow, info, nil
 }
 
-// provenanceTags records where the media came from. AppNote 0003 reserves
-// unprefixed tag names for interoperable use and requires implementation-
-// specific tags to carry an underscore and the service name.
-//
-// Every Flow Tamsin creates carries these, including the per-essence Flows of a
-// demultiplexed input, so provenance survives however the essences were stored.
 // TagPrefix marks a tag as Tamsin's own. AppNote 0003 reserves unprefixed names
 // for tags that mean the same thing across implementations, so anything an
 // implementation invents carries an underscore and its name. It is also how a
@@ -167,6 +161,9 @@ const (
 	ProvenanceSourcesTag = TagPrefix + "sources"
 )
 
+// provenanceTags records where the media came from. Every Flow Tamsin creates
+// carries these, including the per-essence Flows of a demultiplexed input, so
+// provenance survives however the essences were stored.
 func provenanceTags(identity Identity) map[string]any {
 	tags := map[string]any{
 		ProvenanceSourcesTag: []string{identity.URI},
@@ -209,23 +206,16 @@ func applyEssence(flow tams.Flow, stream Stream, probe Probe, identity Identity,
 	codec := essenceCodec(stream, stillImage)
 	switch stream.CodecType {
 	case "video":
+		if stream.Width <= 0 || stream.Height <= 0 {
+			return false, errorsForDimensions(identity.Label)
+		}
 		if stillImage {
-			if stream.Width <= 0 || stream.Height <= 0 {
-				return false, errorsForDimensions(identity.Label)
-			}
 			flow["format"] = "urn:x-tam:format:image"
 			flow["essence_parameters"] = map[string]any{
 				"frame_width":  stream.Width,
 				"frame_height": stream.Height,
 			}
-			if codec != "" {
-				flow["codec"] = codec
-			}
-			return true, nil
 		} else {
-			if stream.Width <= 0 || stream.Height <= 0 {
-				return false, errorsForDimensions(identity.Label)
-			}
 			parameters := map[string]any{
 				"frame_width":  stream.Width,
 				"frame_height": stream.Height,
@@ -242,8 +232,8 @@ func applyEssence(flow tams.Flow, stream Stream, probe Probe, identity Identity,
 				if numerator, denominator, ok := streamFrameRate(stream); ok {
 					parameters["frame_rate"] = map[string]any{"numerator": numerator, "denominator": denominator}
 				} else if stream.Cadence == CadenceUnexamined {
-					// Preserve the behavior of direct/programmatic Probe values. The
-					// production pipeline always performs the timestamp scan first.
+					// Preserve the behavior of direct/programmatic Probe values,
+					// which no timestamp scan has examined.
 					parameters["vfr"] = true
 				}
 			}
@@ -271,9 +261,6 @@ func applyEssence(flow tams.Flow, stream Stream, probe Probe, identity Identity,
 				parameters["bit_depth"] = depth
 			}
 			flow["format"] = "urn:x-nmos:format:video"
-			if codec != "" {
-				flow["codec"] = codec
-			}
 			flow["essence_parameters"] = parameters
 		}
 	case "audio":
@@ -291,21 +278,17 @@ func applyEssence(flow tams.Flow, stream Stream, probe Probe, identity Identity,
 			parameters["unc_parameters"] = map[string]any{"unc_type": pcmUncompressedType(stream.CodecName)}
 		}
 		flow["format"] = "urn:x-nmos:format:audio"
-		if codec != "" {
-			flow["codec"] = codec
-		}
 		flow["essence_parameters"] = parameters
 	case "data", "subtitle", "attachment":
 		flow["format"] = "urn:x-nmos:format:data"
-		if codec != "" {
-			flow["codec"] = codec
-		}
 		flow["essence_parameters"] = map[string]any{}
 	default:
 		return false, fmt.Errorf("unsupported FFprobe stream type %q", stream.CodecType)
 	}
-
-	return false, nil
+	if codec != "" {
+		flow["codec"] = codec
+	}
+	return stillImage, nil
 }
 
 // CollectedFlow is a mono-essence Flow gathered by a multi-essence Flow. Role

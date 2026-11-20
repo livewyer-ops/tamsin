@@ -177,12 +177,12 @@ type segmentOutput struct {
 	writer      *os.File
 }
 
-// Segment uses stream copy by default. Tamsin never silently transcodes or
-// increments media generation; callers may provide explicit additional args.
-// Segment cuts input into Media Objects. streamIndex selects a single
-// elementary stream for independent essence storage, or AllStreams to carry the
-// whole container through. A zero duration is only meaningful for a single
-// stream, where it extracts that essence whole rather than cutting it.
+// Segment cuts input into Media Objects by stream copy. Tamsin never silently
+// transcodes or increments media generation; callers may provide explicit
+// additional args. request.StreamIndices selects elementary streams for
+// independent essence storage, or AllStreams to carry the whole container
+// through. A zero duration extracts each selected stream whole rather than
+// cutting it.
 func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink SegmentSink) error {
 	if len(request.StreamIndices) == 0 {
 		return errors.New("at least one stream index is required")

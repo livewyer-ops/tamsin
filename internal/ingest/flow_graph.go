@@ -35,24 +35,11 @@ func (p *Pipeline) planFlowGraph(ctx context.Context, graph flowGraph) ([]planne
 		if err != nil {
 			return nil, err
 		}
-		effective, request := plan.effective, plan.request
-		if parameters, _ := effective["essence_parameters"].(map[string]any); parameters["init_segments"] == true {
+		if parameters, _ := plan.effective["essence_parameters"].(map[string]any); parameters["init_segments"] == true {
 			return nil, fmt.Errorf("flow %s requires initialisation Objects which this renderer cannot supply", member.id)
 		}
-		if p.storeIsNewerMinor() {
-			// A newer minor may return Flow fields the pinned schemas do not
-			// know. What Tamsin generated is still held to them; what the
-			// store added is sent back as it came.
-			effective, request = member.flow, flowPutProjection(member.flow, member.profileID)
-		}
-		if err := tamsschema.ValidateFlowGet(p.apiVersion, effective); err != nil {
-			return nil, fmt.Errorf(
-				"final Flow metadata for %s (%s) is not valid against the pinned TAMS schemas for %s at %w",
-				member.id, member.role, p.apiVersion, err)
-		}
-		if err := tamsschema.ValidateFlowPut(p.apiVersion, request); err != nil {
-			return nil, fmt.Errorf("flow PUT metadata for %s (%s) is not valid against TAMS %s at %w",
-				member.id, member.role, p.apiVersion, err)
+		if err := p.validatePlannedFlow(plan); err != nil {
+			return nil, err
 		}
 		planned = append(planned, plan)
 	}
@@ -60,6 +47,27 @@ func (p *Pipeline) planFlowGraph(ctx context.Context, graph flowGraph) ([]planne
 		return nil, fmt.Errorf("final Flow graph is not valid: %w", err)
 	}
 	return planned, nil
+}
+
+// validatePlannedFlow holds one planned graph member to the pinned schemas.
+func (p *Pipeline) validatePlannedFlow(plan plannedFlowWrite) error {
+	member, effective, request := plan.member, plan.effective, plan.request
+	if p.storeIsNewerMinor() {
+		// A newer minor may return Flow fields the pinned schemas do not
+		// know. What Tamsin generated is still held to them; what the
+		// store added is sent back as it came.
+		effective, request = member.flow, flowPutProjection(member.flow, member.profileID)
+	}
+	if err := tamsschema.ValidateFlowGet(p.apiVersion, effective); err != nil {
+		return fmt.Errorf(
+			"final Flow metadata for %s (%s) is not valid against the pinned TAMS schemas for %s at %w",
+			member.id, member.role, p.apiVersion, err)
+	}
+	if err := tamsschema.ValidateFlowPut(p.apiVersion, request); err != nil {
+		return fmt.Errorf("flow PUT metadata for %s (%s) is not valid against TAMS %s at %w",
+			member.id, member.role, p.apiVersion, err)
+	}
+	return nil
 }
 
 // overridesFor is the operator metadata that applies to one graph member:
@@ -195,11 +203,12 @@ func (p *Pipeline) writeFlow(ctx context.Context, plan plannedFlowWrite, changes
 	return nil
 }
 
-// commitFlowGraph writes children before their collector, as required by the
-// Collection Item schema. TAMS has no transaction spanning Flow PUTs. A failed
-// PUT can therefore leave an unavoidable partial metadata mutation (including
-// the ambiguous case where the service committed but the response was lost),
-// which is reported explicitly. No Object has been allocated at this point.
+// commitFlowGraphObserved writes children before their collector, as required
+// by the Collection Item schema. TAMS has no transaction spanning Flow PUTs. A
+// failed PUT can therefore leave an unavoidable partial metadata mutation
+// (including the ambiguous case where the service committed but the response
+// was lost), which is reported explicitly. No Object has been allocated at
+// this point.
 func (p *Pipeline) commitFlowGraphObserved(ctx context.Context, planned []plannedFlowWrite, results []FlowResult, changes flowChanges) error {
 	for _, plan := range planned {
 		if !plan.changed {

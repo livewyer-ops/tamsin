@@ -173,13 +173,13 @@ type Pipeline struct {
 }
 
 type ObjectResult struct {
-	ObjectID           string                   `json:"object_id"`
-	Timerange          string                   `json:"timerange"`
-	Bytes              int64                    `json:"bytes"`
-	SHA256             string                   `json:"sha256"`
-	Disposition        ObjectDisposition        `json:"disposition"`
-	Verification       ObjectVerificationStatus `json:"verification_status"`
-	VerificationMethod VerificationMethod       `json:"verification_method"`
+	ObjectID           string
+	Timerange          string
+	Bytes              int64
+	SHA256             string
+	Disposition        ObjectDisposition
+	Verification       ObjectVerificationStatus
+	VerificationMethod VerificationMethod
 
 	reported bool
 }
@@ -233,16 +233,16 @@ type ObjectSummary struct {
 // in Result.Flows; Result.RootFlowID points at the Flow which represents the
 // input as a whole rather than duplicating it at the Result level.
 type FlowResult struct {
-	FlowID            string          `json:"flow_id"`
-	SourceID          string          `json:"source_id"`
-	Role              string          `json:"role,omitempty"`
-	TAMSFlowProfileID string          `json:"tams_flow_profile_id,omitempty"`
-	Disposition       FlowDisposition `json:"disposition"`
-	ObjectSummary     ObjectSummary   `json:"object_summary"`
-	Objects           []ObjectResult  `json:"-"`
+	FlowID            string
+	SourceID          string
+	Role              string
+	TAMSFlowProfileID string
+	Disposition       FlowDisposition
+	ObjectSummary     ObjectSummary
+	Objects           []ObjectResult
 	// Kind prevents terminal consumers from inferring media ownership from an
 	// empty role or Object count.
-	Kind FlowKind `json:"kind"`
+	Kind FlowKind
 }
 
 // FlowDisposition reports what this invocation knows about each planned Flow
@@ -287,9 +287,9 @@ const (
 // human receipt and process event adapters. It never contains raw
 // provider bodies, URLs, headers, FFmpeg commands, or arbitrary error text.
 type Failure struct {
-	Code           string `json:"code"`
-	Message        string `json:"message"`
-	ActionRequired bool   `json:"action_required"`
+	Code           string
+	Message        string
+	ActionRequired bool
 }
 
 type Result struct {

@@ -14,10 +14,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/livewyer-ops/tamsin/internal/ingest"
 	"github.com/livewyer-ops/tamsin/internal/observability"
+	"github.com/livewyer-ops/tamsin/internal/progress"
 )
 
 // HumanOptions controls the permanent human receipt. Verbose expands
@@ -93,17 +93,12 @@ const (
 )
 
 type resultState struct {
-	stranded              []objectState
-	retracted             []objectState
-	registrationUncertain []objectState
+	stranded              bool
+	retracted             bool
+	registrationUncertain bool
 	indeterminateFlows    []ingest.FlowResult
 	unattemptedFlows      []ingest.FlowResult
 	totalObjects          int
-}
-
-type objectState struct {
-	flow   ingest.FlowResult
-	object ingest.ObjectResult
 }
 
 func inspectResult(result ingest.Result) resultState {
@@ -117,14 +112,13 @@ func inspectResult(result ingest.Result) resultState {
 		}
 		state.totalObjects += flow.ObjectSummary.Total
 		for _, object := range flow.Objects {
-			entry := objectState{flow: flow, object: object}
 			switch object.Disposition {
 			case ingest.ObjectDispositionStranded:
-				state.stranded = append(state.stranded, entry)
+				state.stranded = true
 			case ingest.ObjectDispositionRetracted:
-				state.retracted = append(state.retracted, entry)
+				state.retracted = true
 			case ingest.ObjectDispositionRegistrationIndeterminate:
-				state.registrationUncertain = append(state.registrationUncertain, entry)
+				state.registrationUncertain = true
 			}
 		}
 	}
@@ -132,8 +126,8 @@ func inspectResult(result ingest.Result) resultState {
 }
 
 func resultSeverity(result ingest.Result, state resultState) severity {
-	if result.Status == ingest.ResultStatusFailed || len(state.stranded) > 0 ||
-		len(state.registrationUncertain) > 0 || len(state.indeterminateFlows) > 0 ||
+	if result.Status == ingest.ResultStatusFailed || state.stranded ||
+		state.registrationUncertain || len(state.indeterminateFlows) > 0 ||
 		result.Verification == ingest.VerificationFailedStranded {
 		return severityFailure
 	}
@@ -144,7 +138,7 @@ func resultSeverity(result ingest.Result, state resultState) severity {
 		result.Verification == ingest.VerificationNotReached ||
 		result.Verification == ingest.VerificationFailedRetracted ||
 		result.Verification == ingest.VerificationFailedStranded ||
-		len(state.retracted) > 0 || len(state.unattemptedFlows) > 0 {
+		state.retracted || len(state.unattemptedFlows) > 0 {
 		return severityWarning
 	}
 	return severitySuccess
@@ -201,10 +195,10 @@ func writeResult(output *humanWriter, result ingest.Result, state resultState, l
 }
 
 func resultHeading(result ingest.Result, state resultState) string {
-	if len(state.stranded) > 0 || result.Verification == ingest.VerificationFailedStranded {
+	if state.stranded || result.Verification == ingest.VerificationFailedStranded {
 		return "INGEST FAILED - OBJECTS STRANDED: ACTION REQUIRED"
 	}
-	if len(state.registrationUncertain) > 0 {
+	if state.registrationUncertain {
 		return "INGEST FAILED - OBJECT STATE INDETERMINATE: ACTION REQUIRED"
 	}
 	if len(state.indeterminateFlows) > 0 {
@@ -347,16 +341,16 @@ func writeObject(output *humanWriter, object ingest.ObjectResult) {
 }
 
 func writeAbnormalDetails(output *humanWriter, state resultState) {
-	if len(state.stranded) > 0 {
+	if state.stranded {
 		output.line(2, "Action: inspect or retract every stranded media object before retrying.")
 	}
-	if len(state.registrationUncertain) > 0 {
+	if state.registrationUncertain {
 		output.line(2, "Action: determine whether each indeterminate media object was registered before retrying.")
 	}
 	if len(state.indeterminateFlows) > 0 {
 		output.line(2, "Action: determine whether each indeterminate Flow update committed before retrying.")
 	}
-	if len(state.retracted) > 0 && len(state.stranded) == 0 {
+	if state.retracted && !state.stranded {
 		output.line(2, "Unverified media objects were retracted; correct the cause before retrying.")
 	}
 }
@@ -459,10 +453,10 @@ func inputLabel(input string) string {
 		if name := filepath.Base(filepath.FromSlash(parsed.Path)); name != "." && name != string(filepath.Separator) {
 			// url.Parse decodes Path escapes. Re-sanitize so a filename such as
 			// %1B%5B31m cannot introduce a terminal control sequence.
-			return sanitizeHumanText(name)
+			return progress.Sanitize(name)
 		}
 	}
-	return sanitizeHumanText(input)
+	return progress.Sanitize(input)
 }
 
 func joinedVersion(name, version string) string {
@@ -543,7 +537,7 @@ func (w *humanWriter) blank() {
 }
 
 func (w *humanWriter) line(indent int, text string) {
-	w.indented(indent, strings.TrimSpace(sanitizeHumanText(text)))
+	w.indented(indent, strings.TrimSpace(progress.Sanitize(text)))
 }
 
 // indented writes text that is already sanitised and trimmed.
@@ -553,8 +547,8 @@ func (w *humanWriter) indented(indent int, text string) {
 }
 
 func (w *humanWriter) keyValue(indent int, key, value string) {
-	key = strings.TrimSpace(sanitizeHumanText(key))
-	value = strings.TrimSpace(sanitizeHumanText(value))
+	key = strings.TrimSpace(progress.Sanitize(key))
+	value = strings.TrimSpace(progress.Sanitize(value))
 	switch {
 	case key == "":
 		w.indented(indent, value)
@@ -596,7 +590,7 @@ func (w *humanWriter) footerHeading(heading, summary string, level severity) {
 }
 
 func (w *humanWriter) writeStatusLine(heading, suffix string, level severity) {
-	heading, suffix = sanitizeHumanText(heading), sanitizeHumanText(suffix)
+	heading, suffix = progress.Sanitize(heading), progress.Sanitize(suffix)
 	if !w.color {
 		w.writePhysical(heading + suffix)
 		return
@@ -609,15 +603,6 @@ func (w *humanWriter) writeStatusLine(heading, suffix string, level severity) {
 		code = "\x1b[1;31m"
 	}
 	w.writePhysical(code + heading + "\x1b[0m" + suffix)
-}
-
-func sanitizeHumanText(value string) string {
-	return strings.Map(func(character rune) rune {
-		if unicode.IsControl(character) {
-			return ' '
-		}
-		return character
-	}, value)
 }
 
 func (w *humanWriter) writePhysical(text string) {

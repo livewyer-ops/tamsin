@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/livewyer-ops/tamsin/internal/auth"
@@ -145,12 +144,7 @@ func (a *application) runDoctor(command *cobra.Command) error {
 	v := a.v.forCommand(command)
 	selection := v.GetString("ingest.profile")
 	storageID := v.GetString("ingest.storage_id")
-	var configErr error
-	if storageID != "" {
-		if _, err := tams.CanonicalUUID(storageID); err != nil {
-			configErr = errors.Join(configErr, fmt.Errorf("storage ID must be a UUID: %w", err))
-		}
-	}
+	configErr := identifierError("storage ID", storageID)
 	if configErr != nil {
 		run.fail("configuration", configErr, ExitUsage, nil)
 	} else {
@@ -312,23 +306,7 @@ func (a *application) runDoctorOnline(ctx context.Context, run *doctorRun, stora
 	}
 	run.report.Auth = string(mode)
 
-	var (
-		wait        sync.WaitGroup
-		service     map[string]any
-		serviceErr  error
-		backends    []tams.StorageBackend
-		backendsErr error
-	)
-	wait.Add(2)
-	go func() {
-		defer wait.Done()
-		service, serviceErr = client.Service(ctx)
-	}()
-	go func() {
-		defer wait.Done()
-		backends, backendsErr = client.StorageBackends(ctx)
-	}()
-	wait.Wait()
+	service, backends, serviceErr, backendsErr := tams.ServiceAndBackends(ctx, client)
 
 	authStatus := authenticationRejectionStatus(serviceErr, backendsErr)
 	if serviceErr == nil || backendsErr == nil {

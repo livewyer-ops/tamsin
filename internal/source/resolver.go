@@ -151,8 +151,6 @@ func New(config Config) *Resolver {
 		metadataTimeout:     config.MetadataTimeout,
 		maxInputs:           config.MaxInputs,
 		observability:       config.Observability,
-		seen:                make(map[string]struct{}),
-		manifests:           make(map[string]struct{}),
 	}
 }
 

@@ -33,10 +33,25 @@ var idNamespace = uuid.MustParse("d1f5657c-cee0-5ac4-a0a5-c78ba122fa39")
 // pair stays on the simpler isolated-output path.
 const multiOutputEssenceThreshold = 4
 
+// rendersTogether reports whether one FFmpeg process writes every essence of
+// an input. Operator arguments are written for one output, so with them each
+// essence keeps a process of its own.
+func rendersTogether(essences int, additionalArgs []string) bool {
+	return essences >= multiOutputEssenceThreshold && len(additionalArgs) == 0
+}
+
 // rendererIdentityEpoch changes only when TAMSin deliberately changes the
 // semantics of media it writes. Package rebuilds and FFmpeg patch releases are
 // provenance, not a new ingest policy, and must not manufacture a new Flow.
 const rendererIdentityEpoch = "6"
+
+// MaxConcurrency bounds each of a run's concurrency settings and MaxRetries
+// its retries. The CLI refuses a setting beyond them before a Pipeline is
+// built.
+const (
+	MaxConcurrency = 256
+	MaxRetries     = 20
+)
 
 func New(config Config, client TAMSClient, prober media.Prober, segmenter media.Segmenter, logger *slog.Logger, reporter progress.Reporter) (*Pipeline, error) {
 	if config.InputMode == "" {
@@ -76,23 +91,23 @@ func New(config Config, client TAMSClient, prober media.Prober, segmenter media.
 	if config.Concurrency <= 0 {
 		config.Concurrency = 1
 	}
-	if config.Concurrency > 256 {
-		return nil, errors.New("concurrency cannot exceed 256")
+	if config.Concurrency > MaxConcurrency {
+		return nil, fmt.Errorf("concurrency cannot exceed %d", MaxConcurrency)
 	}
 	if config.Transfers <= 0 {
 		config.Transfers = config.Concurrency
 	}
-	if config.Transfers > 256 {
-		return nil, errors.New("transfers cannot exceed 256")
+	if config.Transfers > MaxConcurrency {
+		return nil, fmt.Errorf("transfers cannot exceed %d", MaxConcurrency)
 	}
 	if config.ProbeConcurrency <= 0 {
 		config.ProbeConcurrency = 2
 	}
-	if config.ProbeConcurrency > 256 {
-		return nil, errors.New("probe concurrency cannot exceed 256")
+	if config.ProbeConcurrency > MaxConcurrency {
+		return nil, fmt.Errorf("probe concurrency cannot exceed %d", MaxConcurrency)
 	}
-	if config.Retries < 0 || config.Retries > 20 {
-		return nil, errors.New("retries must be between 0 and 20")
+	if config.Retries < 0 || config.Retries > MaxRetries {
+		return nil, fmt.Errorf("retries must be between 0 and %d", MaxRetries)
 	}
 	if config.StagingByteBudget < 0 {
 		return nil, errors.New("staging byte budget cannot be negative")
@@ -424,10 +439,8 @@ func (p *Pipeline) verificationFailureStatus(err error) VerificationStatus {
 		// Corrupt media was found and withdrawn; that outranks Segments the
 		// run merely could not read.
 		return VerificationFailedRetracted
-	case verificationErr.Preserved > 0:
-		return VerificationNotReached
 	}
-	return VerificationFailedRetracted
+	return VerificationNotReached
 }
 
 func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID string, mode InputMode) (result Result, returnErr error) {
@@ -899,7 +912,7 @@ func (p *Pipeline) ingestIndependently(ctx context.Context, item source.Item, st
 	// begins.
 	targets := make([]flowRegistrationTarget, 0, len(flowInfo.Collected))
 	renderedByStream := make(map[int][]media.SegmentRecord)
-	if p.config.DryRunMode != DryRunFast && len(flowInfo.Collected) >= multiOutputEssenceThreshold && len(p.config.FFmpegArgs) == 0 {
+	if p.config.DryRunMode != DryRunFast && rendersTogether(len(flowInfo.Collected), p.config.FFmpegArgs) {
 		streamIndices := make([]int, len(flowInfo.Collected))
 		for index, essence := range flowInfo.Collected {
 			streamIndices[index] = essence.StreamIndex
@@ -912,12 +925,6 @@ func (p *Pipeline) ingestIndependently(ctx context.Context, item source.Item, st
 		defer cleanup()
 		for _, record := range records {
 			renderedByStream[record.StreamIndex] = append(renderedByStream[record.StreamIndex], record)
-		}
-		for _, streamIndex := range streamIndices {
-			if len(renderedByStream[streamIndex]) == 0 {
-				return result, withFailure(FailureCodeMediaPrepareFailed, FailureMessageMediaStreamPrepareFailed, true,
-					fmt.Errorf("multi-output renderer produced no objects for stream %d", streamIndex))
-			}
 		}
 	}
 
@@ -1124,9 +1131,17 @@ func (p *Pipeline) renderSegments(ctx context.Context, staged stagedFile, flowIn
 		cleanup()
 		return nil, func() {}, err
 	}
-	if len(records) == 0 {
-		cleanup()
-		return nil, func() {}, errors.New("media renderer produced no objects")
+	// Every stream asked for has an Object: one left out would otherwise be
+	// rendered again on its own, or dropped.
+	produced := make(map[int]bool, len(streamIndices))
+	for _, record := range records {
+		produced[record.StreamIndex] = true
+	}
+	for _, streamIndex := range streamIndices {
+		if !produced[streamIndex] {
+			cleanup()
+			return nil, func() {}, fmt.Errorf("media renderer produced no objects for stream %d", streamIndex)
+		}
 	}
 	return records, cleanup, nil
 }
@@ -1191,12 +1206,9 @@ func (p *Pipeline) renderSegmentsTo(ctx context.Context, staged stagedFile, flow
 	monitorErr := <-monitorResult
 	cancelSegment()
 	if monitorErr == nil {
-		size, sizeErr := media.StagingDirectoryBytes(directory)
-		if sizeErr != nil {
-			monitorErr = fmt.Errorf("measure segment staging directory: %w", sizeErr)
-		} else if capacityErr := staged.lease.setArtifact(directory, size); capacityErr != nil {
-			monitorErr = fmt.Errorf("segment output exceeded staging capacity: %w", capacityErr)
-		}
+		// The monitor polls, so a render can finish between two of its
+		// readings. This one is exact.
+		monitorErr = accountStagingDirectory(staged.lease, directory)
 	}
 	if monitorErr != nil {
 		return cleanup, monitorErr
@@ -1207,10 +1219,11 @@ func (p *Pipeline) renderSegmentsTo(ctx context.Context, staged stagedFile, flow
 	return cleanup, nil
 }
 
-// prepareObjectsForStream cuts one stream, or the whole input, into Media
-// Objects and places them from start on the Flow timeline. The start is passed
-// rather than read from the configuration because demultiplexed essences do not
-// all begin together: each is placed where its own stream begins.
+// prepareObjectsForStream makes the one Media Object of a whole input, or of
+// one whole stream of it, and places it at start on the Flow timeline. The
+// start is passed rather than read from the configuration because
+// demultiplexed essences do not all begin together: each is placed where its
+// own stream begins. A segmented ingest is placed by rollingObjectPreparer.
 func (p *Pipeline) prepareObjectsForStream(ctx context.Context, flowID string, staged stagedFile, flowInfo media.FlowInfo,
 	streamIndex int, start int64, rendered []media.SegmentRecord) (_ []preparedObject, release func(), err error) {
 	records := rendered
@@ -1233,7 +1246,7 @@ func (p *Pipeline) prepareObjectsForStream(ctx context.Context, flowID string, s
 	if p.config.DryRunMode == DryRunFast && (p.config.SegmentDuration > 0 || streamIndex != media.AllStreams) {
 		return []preparedObject{}, cleanup, nil
 	}
-	if records == nil && (p.config.SegmentDuration > 0 || streamIndex != media.AllStreams) {
+	if records == nil && streamIndex != media.AllStreams {
 		records, cleanup, err = p.renderSegments(ctx, staged, flowInfo, []int{streamIndex}, p.config.FFmpegArgs)
 		if err != nil {
 			return nil, nil, err
@@ -1242,19 +1255,9 @@ func (p *Pipeline) prepareObjectsForStream(ctx context.Context, flowID string, s
 	if records == nil {
 		records = []media.SegmentRecord{{StreamIndex: streamIndex, Path: staged.path}}
 	}
-	if len(records) == 0 {
-		return nil, nil, errors.New("media renderer produced no objects")
-	}
-	firstTimedStart := start
-	if streamIndex == media.AllStreams {
-		firstTimedStart, err = media.TimestampShift(start, flowInfo.ReferenceOffset)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-	cursor := newTimelineCursor(start, firstTimedStart, p.logger)
+	cursor := newTimelineCursor(start, start, p.logger)
 	sourceObject := len(records) == 1 && records[0].Path == staged.path
-	probeObject := len(records) > 1 || streamIndex != media.AllStreams || records[0].Timed
+	probeObject := streamIndex != media.AllStreams
 	objects := make([]preparedObject, 0, len(records))
 	for _, record := range records {
 		measurement := objectMeasurement{
@@ -1390,33 +1393,34 @@ func placeObject(flowID, path string, measured objectMeasurement, position int64
 // transcode into a metadata polling workload of its own.
 const stagingDirectoryPollInterval = 250 * time.Millisecond
 
+// accountStagingDirectory charges the lease with what the directory holds.
+func accountStagingDirectory(lease *stagingLease, directory string) error {
+	size, err := media.StagingDirectoryBytes(directory)
+	if err != nil {
+		return fmt.Errorf("measure segment staging directory: %w", err)
+	}
+	if err := lease.setArtifact(directory, size); err != nil {
+		return fmt.Errorf("segment output exceeded staging capacity: %w", err)
+	}
+	return nil
+}
+
 // monitorStagingDirectory accounts for files written by FFmpeg, which cannot
 // write through a Go io.Writer. The reservation made before the process starts
 // is the primary bound; this monitor extends it when an output grows beyond its
 // estimate and cancels the process immediately when no global capacity remains.
-// The final scan is exact even when a short-lived test segmenter finishes
-// between polling ticks.
+// It reports only a reading that failed: the caller takes the final one.
 func monitorStagingDirectory(ctx context.Context, cancel context.CancelFunc, lease *stagingLease,
 	directory string, done <-chan struct{}, result chan<- error) {
-	syncDirectory := func() error {
-		size, err := media.StagingDirectoryBytes(directory)
-		if err != nil {
-			return fmt.Errorf("measure segment staging directory: %w", err)
-		}
-		if err := lease.setArtifact(directory, size); err != nil {
-			return fmt.Errorf("segment output exceeded staging capacity: %w", err)
-		}
-		return nil
-	}
 	ticker := time.NewTicker(stagingDirectoryPollInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-done:
-			result <- syncDirectory()
+			result <- nil
 			return
 		case <-ticker.C:
-			if err := syncDirectory(); err != nil {
+			if err := accountStagingDirectory(lease, directory); err != nil {
 				cancel()
 				result <- err
 				return

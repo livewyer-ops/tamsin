@@ -141,7 +141,7 @@ func TestEmittedObjectPresentationTiming(t *testing.T) {
 				// The declared programme excludes the AAC encoder preroll.
 				want := 24.0
 
-				if got := float64(rolling.flowPosition-start) / 1e9; math.Abs(got-want) > 0.000002 {
+				if got := float64(rolling.cursor.position-start) / 1e9; math.Abs(got-want) > 0.000002 {
 					t.Fatalf("duration = %.9f, want %.9f", got, want)
 				}
 			})

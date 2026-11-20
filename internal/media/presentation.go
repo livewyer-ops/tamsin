@@ -20,9 +20,9 @@ import (
 type CadenceEvidence uint8
 
 const (
-	// CadenceUnexamined is retained for callers that supply Probe values
-	// directly. The production pipeline always asks its Prober to inspect
-	// video before building its Flow.
+	// CadenceUnexamined means no scan was made: a caller built the Probe
+	// itself, the operator supplied essence_parameters, or a fast dry run of
+	// a streamed input took the rate the stream declares.
 	CadenceUnexamined CadenceEvidence = iota
 	// CadenceUnknown means the scan ran but the input did not expose enough
 	// usable presentation timestamps to make either claim.

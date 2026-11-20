@@ -321,8 +321,9 @@ func TestSegmentOutputsCannotGrowPastTheGlobalBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	staged := stagedFile{path: input, size: 1, lease: lease, cleanup: func() {}}
-	_, cleanup, err := pipeline.prepareObjects(context.Background(), "flow", staged,
-		media.FlowInfo{Duration: int64(time.Second), SegmentContainer: media.SegmentContainer{Muxer: "mpegts", Extension: ".ts"}})
+	cleanup, err := pipeline.renderSegmentsTo(context.Background(), staged,
+		media.FlowInfo{Duration: int64(time.Second), SegmentContainer: media.SegmentContainer{Muxer: "mpegts", Extension: ".ts"}},
+		[]int{media.AllStreams}, nil, pipeline.rollingStagingWindow(staged), func(media.SegmentRecord) error { return nil })
 	cleanup()
 	var capacity *stagingCapacityError
 	if !errors.As(err, &capacity) {

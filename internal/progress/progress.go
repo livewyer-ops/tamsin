@@ -329,11 +329,11 @@ func renderSnapshot(snapshot Snapshot) string {
 }
 
 func displayLabel(input string) string {
-	input = sanitize(input)
+	input = Sanitize(input)
 	parsed, err := url.Parse(input)
 	if err == nil && parsed.Path != "" {
 		if base := path.Base(parsed.Path); base != "." && base != "/" {
-			return sanitize(base)
+			return Sanitize(base)
 		}
 	}
 	if input == "" {
@@ -342,7 +342,9 @@ func displayLabel(input string) string {
 	return input
 }
 
-func sanitize(value string) string {
+// Sanitize replaces control characters with spaces, so text taken from an
+// input name or a store cannot move the cursor or recolour a terminal.
+func Sanitize(value string) string {
 	return strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
 			return ' '

@@ -245,9 +245,6 @@ func TestGeneratedIdentityCoversEveryMediaTreatmentField(t *testing.T) {
 	if flowProfile("bytes-a", left) == flowProfile("bytes-a", right) {
 		t.Fatal("FFmpeg argument boundaries collide in the media-treatment fingerprint")
 	}
-	if flowProfileForRendererEpoch("bytes-a", base, "1") == flowProfileForRendererEpoch("bytes-a", base, "2") {
-		t.Fatal("different renderer policy epochs reused the same treatment fingerprint")
-	}
 }
 
 func TestStreamIdentityUsesRevisionAndCallerResource(t *testing.T) {

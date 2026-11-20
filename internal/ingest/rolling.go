@@ -11,7 +11,6 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/progress"
 	"github.com/livewyer-ops/tamsin/internal/source"
 	"github.com/livewyer-ops/tamsin/internal/tams"
-	"github.com/livewyer-ops/tamsin/internal/tamsschema"
 )
 
 const (
@@ -24,9 +23,7 @@ type rollingObjectPreparer struct {
 	flowID      string
 	streamIndex int
 	cursor      *timelineCursor
-	// flowPosition is where the last placed Segment ends on the Flow timeline.
-	flowPosition int64
-	rates        *media.SegmentBitRateAccumulator
+	rates       *media.SegmentBitRateAccumulator
 	// ahead is the probe of the Object at aheadPath, the one after the last
 	// prepared. It was read to place that one and is kept for its own turn.
 	ahead     media.Probe
@@ -48,8 +45,8 @@ func (p *rollingObjectPreparer) timedBy(source []media.Stream) *rollingObjectPre
 func newRollingObjectPreparer(p *Pipeline, flowID string, streamIndex int, start, referenceStart int64) *rollingObjectPreparer {
 	return &rollingObjectPreparer{
 		pipeline: p, flowID: flowID, streamIndex: streamIndex,
-		cursor: newTimelineCursor(start, referenceStart, p.logger), flowPosition: start,
-		rates: media.NewSegmentBitRateAccumulator(p.config.SegmentDuration),
+		cursor: newTimelineCursor(start, referenceStart, p.logger),
+		rates:  media.NewSegmentBitRateAccumulator(p.config.SegmentDuration),
 	}
 }
 
@@ -100,7 +97,6 @@ func (p *rollingObjectPreparer) prepare(ctx context.Context, record media.Segmen
 	if err != nil {
 		return preparedObject{}, err
 	}
-	p.flowPosition = p.cursor.position
 	p.rates.Add(media.SegmentMeasurement{Bytes: size, Duration: object.duration})
 	return object, nil
 }
@@ -387,33 +383,20 @@ func (p *Pipeline) finishRollingFlowMetadata(ctx context.Context, graph flowGrap
 		// hours-long ingest gives an operator or a MAM time to add tags or a
 		// label that must survive.
 		plan, err := p.planFlowWrite(ctx, expanded, p.overridesFor(graph, member))
+		if err == nil {
+			err = p.validatePlannedFlow(plan)
+		}
 		if err != nil {
 			return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
 				fmt.Errorf("plan final rolling Flow metadata for %s: %w", member.id, err))
 		}
 		planned[index] = plan
-		member = expanded
-		effective, request := planned[index].effective, planned[index].request
-		if p.storeIsNewerMinor() {
-			effective, request = member.flow, flowPutProjection(member.flow, planned[index].member.profileID)
-		}
-		if err := tamsschema.ValidateFlowGet(p.apiVersion, effective); err != nil {
-			return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
-				fmt.Errorf("final rolling Flow metadata for %s is invalid at %w", member.id, err))
-		}
-		if err := tamsschema.ValidateFlowPut(p.apiVersion, request); err != nil {
-			return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
-				fmt.Errorf("final rolling Flow PUT metadata for %s is invalid at %w", member.id, err))
-		}
 	}
 	if err := validateFlowGraph(graph, planned); err != nil {
 		return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
 			fmt.Errorf("final rolling Flow graph is invalid: %w", err))
 	}
 	for _, plan := range planned {
-		if !plan.changed {
-			continue
-		}
 		if err := p.writeFlow(ctx, plan, graph.changes); err != nil {
 			return withFailure(FailureCodeFlowWriteFailed, FailureMessageFlowWriteFailed, true,
 				fmt.Errorf("write final rolling Flow metadata: %w", err))
@@ -567,8 +550,10 @@ func (p *Pipeline) ingestIndependentRolling(ctx context.Context, staged stagedFi
 	return result, p.finishRollingFlowMetadata(ctx, graph, execution.planned)
 }
 
+// canRenderRollingMultiOutput also asks that no two essences share a stream
+// index, since a joint render names each of its outputs by that index.
 func canRenderRollingMultiOutput(states []*rollingFlowState, additionalArgs []string) bool {
-	if len(states) < multiOutputEssenceThreshold || len(additionalArgs) > 0 {
+	if !rendersTogether(len(states), additionalArgs) {
 		return false
 	}
 	seen := make(map[int]struct{}, len(states))

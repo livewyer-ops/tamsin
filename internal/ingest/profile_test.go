@@ -285,29 +285,18 @@ func TestMPEGTSSegmentPolicyFailsBeforeInvokingFFmpeg(t *testing.T) {
 	}
 }
 
-func TestRendererEpochAndByteProfilesDeriveStableFlowIDs(t *testing.T) {
+// TestGeneratedFlowIDIsFixed holds the treatment fingerprint's encoding and
+// the renderer epoch together. Changing either renews this identifier, and
+// with it every generated Flow ID, so the literal moves only on purpose.
+func TestGeneratedFlowIDIsFixed(t *testing.T) {
 	t.Parallel()
 	config := Config{
 		Profile: ProfileEssenceSegments, ProfileVersion: "1",
 		SegmentDuration: 10 * time.Second, SegmentFormat: media.SegmentFormatSource,
 		EssenceStorage: media.EssenceStorageIndependent,
 	}
-	one := namedID("flow", "input", flowProfile("bytes-one", config))
-	differentBytes := namedID("flow", "input", flowProfile("bytes-two", config))
-	newProfile := config
-	newProfile.ProfileVersion = "2"
-	differentProfileVersion := namedID("flow", "input", flowProfile("bytes-one", newProfile))
-	differentRendererEpoch := namedID("flow", "input", flowProfileForRendererEpoch("bytes-one", config, "2"))
-	for label, id := range map[string]string{
-		"different bytes": differentBytes, "different semantic profile": differentProfileVersion,
-		"different renderer epoch": differentRendererEpoch,
-	} {
-		if id == one {
-			t.Fatalf("%s derived the same Flow ID %s", label, id)
-		}
-	}
-	if rendererIdentityEpoch != "6" {
-		t.Fatalf("renderer identity epoch = %q, want 6", rendererIdentityEpoch)
+	if got := namedID("flow", "input", flowProfile("bytes-one", config)); got != "95d9b777-3c9c-559c-adac-9540f073060a" {
+		t.Fatalf("generated Flow ID changed to %s", got)
 	}
 }
 

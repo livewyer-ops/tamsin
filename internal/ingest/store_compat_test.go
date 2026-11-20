@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -62,6 +63,42 @@ func TestNewerMinorStoreFieldsDoNotFailPinnedSchemas(t *testing.T) {
 		if run == 1 && flow["future_top_level"] != "added by an 8.7 store" {
 			t.Fatalf("the store's own field was not sent back on resume: %#v", flow)
 		}
+	}
+}
+
+// TestLateInitSegmentsFlagDoesNotFailTheClose holds what a segmented ingest
+// does when a newer store's Flow comes to ask for initialisation Objects only
+// after its Segments are registered. The opening plan refuses such a Flow; the
+// plan made at the close does not, and the ingest completes.
+func TestLateInitSegmentsFlagDoesNotFailTheClose(t *testing.T) {
+	t.Parallel()
+	filename := filepath.Join(t.TempDir(), "fixture.mp4")
+	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := newFakeClient()
+	client.serviceDocument = map[string]any{"api_version": "8.7", "min_object_timeout": "300:0", "min_presigned_url_timeout": "30:0"}
+	var registered atomic.Bool
+	client.onRegisterSegments = func() { registered.Store(true) }
+	client.decorateFlowReads = func(flow tams.Flow) tams.Flow {
+		if parameters, ok := flow["essence_parameters"].(map[string]any); ok && registered.Load() {
+			parameters = maps.Clone(parameters)
+			parameters["init_segments"] = true
+			flow["essence_parameters"] = parameters
+		}
+		return flow
+	}
+	config := Config{Concurrency: 1, Transfers: 2, SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed}
+	pipeline, err := New(config, client, fakeProber{}, countingSegmenter{objects: 2}, discardLogger(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batch.Succeeded != 1 || !registered.Load() {
+		t.Fatalf("result = %#v / %s, registered = %t", batch.Results[0].Failure, batch.Results[0].Error, registered.Load())
 	}
 }
 

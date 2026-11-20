@@ -19,6 +19,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/livewyer-ops/tamsin/internal/auth"
@@ -164,6 +165,26 @@ func (c *Client) Service(ctx context.Context) (map[string]any, error) {
 
 func (c *Client) StorageBackends(ctx context.Context) ([]StorageBackend, error) {
 	return listPages[StorageBackend](ctx, c, "service/storage-backends", "storage backends")
+}
+
+// ServiceAndBackends reads the service document and the storage backends at
+// the same time. Each read has its own error.
+func ServiceAndBackends(ctx context.Context, client interface {
+	Service(context.Context) (map[string]any, error)
+	StorageBackends(context.Context) ([]StorageBackend, error)
+}) (service map[string]any, backends []StorageBackend, serviceErr, backendsErr error) {
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		service, serviceErr = client.Service(ctx)
+	}()
+	go func() {
+		defer wait.Done()
+		backends, backendsErr = client.StorageBackends(ctx)
+	}()
+	wait.Wait()
+	return service, backends, serviceErr, backendsErr
 }
 
 func (c *Client) Profile(ctx context.Context, profileID string) (Profile, error) {

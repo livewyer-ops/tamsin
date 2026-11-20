@@ -49,7 +49,7 @@ func boundaryTolerance(measured objectMeasurement) int64 {
 // timestamps is judged on the nominal timeline it was regularised to.
 //
 // Untimed records (a whole file, a whole essence) have no manifest and follow
-// one another from untimedStart, as they always did.
+// one another from untimedStart.
 type timelineCursor struct {
 	untimedStart    int64
 	firstTimedStart int64

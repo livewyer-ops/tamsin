@@ -1216,6 +1216,52 @@ func TestPipelinePreservesBatchOrderAndReportsPartialFailure(t *testing.T) {
 
 func TestIndependentHighTrackInputUsesOneRenderProcess(t *testing.T) {
 	t.Parallel()
+	for name, duration := range map[string]time.Duration{"segmented": time.Second, "whole essences": 0} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			filename := filepath.Join(t.TempDir(), "fixture.ts")
+			if err := os.WriteFile(filename, []byte("four essences"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			segmenter := &recordingSegmenter{}
+			pipeline, err := New(Config{
+				Concurrency: 1, Transfers: 2, VerificationMode: VerificationNone, SegmentDuration: duration,
+				EssenceStorage: media.EssenceStorageIndependent,
+			}, newFakeClient(), fourEssenceProber{}, segmenter, discardLogger(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
+			if err != nil || batch.Succeeded != 1 {
+				t.Fatalf("Run() = %#v, %v", batch, err)
+			}
+			segmenter.lock.Lock()
+			defer segmenter.lock.Unlock()
+			if len(segmenter.requests) != 1 || !reflect.DeepEqual(segmenter.requests[0].StreamIndices, []int{0, 1, 2, 3}) {
+				t.Fatalf("render requests = %#v, want one four-output invocation", segmenter.requests)
+			}
+		})
+	}
+}
+
+// sharedIndexProber reports two essences under one stream index, which a
+// caller's Prober can do although FFprobe does not.
+type sharedIndexProber struct{ fourEssenceProber }
+
+func (p sharedIndexProber) Probe(ctx context.Context, filename string) (media.Probe, error) {
+	probe, err := p.fourEssenceProber.Probe(ctx, filename)
+	probe.Streams[1].Index = 0
+	return probe, err
+}
+
+func (p sharedIndexProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
+	return p.Probe(ctx, filename)
+}
+
+// A joint render names each output by its stream index, so a segmented ingest
+// of essences that share one renders each essence on its own.
+func TestEssencesSharingAStreamIndexRenderSeparately(t *testing.T) {
+	t.Parallel()
 	filename := filepath.Join(t.TempDir(), "fixture.ts")
 	if err := os.WriteFile(filename, []byte("four essences"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1224,7 +1270,7 @@ func TestIndependentHighTrackInputUsesOneRenderProcess(t *testing.T) {
 	pipeline, err := New(Config{
 		Concurrency: 1, Transfers: 2, VerificationMode: VerificationNone, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageIndependent,
-	}, newFakeClient(), fourEssenceProber{}, segmenter, discardLogger(), nil)
+	}, newFakeClient(), sharedIndexProber{}, segmenter, discardLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1234,8 +1280,61 @@ func TestIndependentHighTrackInputUsesOneRenderProcess(t *testing.T) {
 	}
 	segmenter.lock.Lock()
 	defer segmenter.lock.Unlock()
-	if len(segmenter.requests) != 1 || !reflect.DeepEqual(segmenter.requests[0].StreamIndices, []int{0, 1, 2, 3}) {
-		t.Fatalf("render requests = %#v, want one four-output invocation", segmenter.requests)
+	if len(segmenter.requests) != 4 {
+		t.Fatalf("render requests = %#v, want one per essence", segmenter.requests)
+	}
+	for _, request := range segmenter.requests {
+		if len(request.StreamIndices) != 1 {
+			t.Fatalf("render request = %#v, want one stream", request)
+		}
+	}
+}
+
+// omittingSegmenter renders every stream it is asked for but one.
+type omittingSegmenter struct {
+	recordingSegmenter
+	omit int
+}
+
+func (s *omittingSegmenter) Segment(ctx context.Context, request media.SegmentRequest, sink media.SegmentSink) error {
+	return s.recordingSegmenter.Segment(ctx, request, func(record media.SegmentRecord) error {
+		if record.StreamIndex == s.omit {
+			return nil
+		}
+		return sink(record)
+	})
+}
+
+// A render that leaves out a stream it was asked for fails the input. The
+// stream is not rendered again on its own, and nothing is uploaded.
+func TestRenderThatOmitsAStreamFailsTheInput(t *testing.T) {
+	t.Parallel()
+	filename := filepath.Join(t.TempDir(), "fixture.ts")
+	if err := os.WriteFile(filename, []byte("four essences"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := newFakeClient()
+	segmenter := &omittingSegmenter{omit: 2}
+	pipeline, err := New(Config{
+		Concurrency: 1, Transfers: 2, VerificationMode: VerificationNone,
+		EssenceStorage: media.EssenceStorageIndependent,
+	}, client, fourEssenceProber{}, segmenter, discardLogger(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := batch.Results[0]
+	if result.Status != ResultStatusFailed || result.Failure == nil || result.Failure.Code != FailureCodeMediaPrepareFailed ||
+		!strings.Contains(result.Error, "produced no objects for stream 2") {
+		t.Fatalf("result = %+v, failure = %+v", result, result.Failure)
+	}
+	segmenter.lock.Lock()
+	defer segmenter.lock.Unlock()
+	if len(segmenter.requests) != 1 || client.uploads != 0 {
+		t.Fatalf("renders = %d, uploads = %d; want one render and no upload", len(segmenter.requests), client.uploads)
 	}
 }
 
@@ -1618,12 +1717,9 @@ func flowIDsFromSegmenter(t *testing.T, config Config, prober media.Prober, segm
 // identifier has to account for.
 //
 // The identifier is a function of the input and how it is treated, and anything
-// that changes what ends up in the store has to be part of it. Essence storage
-// decides whether one Flow or several are written and what shape the parent
-// takes: two arrangements sharing an identifier would mean a muxed
-// multi-essence Flow and a demultiplexed collector claiming the same one. The
-// start decides where the media sits on the timeline, so without it a second
-// ingest at a different --start silently appends to the first Flow instead of
+// that changes what ends up in the store has to be part of it. The start
+// decides where the media sits on the timeline, so without it a second ingest
+// at a different --start silently appends to the first Flow instead of
 // describing the placement that was asked for.
 func TestGeneratedIdentityCoversWhatChangesTheResult(t *testing.T) {
 	t.Parallel()
@@ -1635,22 +1731,6 @@ func TestGeneratedIdentityCoversWhatChangesTheResult(t *testing.T) {
 		Concurrency: 1, Transfers: 2, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}
-
-	// Asserted against the derivation rather than a run, because independent
-	// storage writes no parent Flow yet: comparing the Flows two ingests
-	// actually create would pass whether or not the arrangement is accounted
-	// for, and would only start failing once a collector exists to collide.
-	t.Run("storage arrangement", func(t *testing.T) {
-		t.Parallel()
-		muxed := base
-		muxed.EssenceStorage = media.EssenceStorageMuxed
-		independent := base
-		independent.EssenceStorage = media.EssenceStorageIndependent
-		if flowProfile("digest", muxed) == flowProfile("digest", independent) {
-			t.Fatal("both storage arrangements derive one identity; a collector and a " +
-				"multi-essence Flow would claim the same Flow ID for the same input")
-		}
-	})
 
 	t.Run("timeline placement", func(t *testing.T) {
 		t.Parallel()
