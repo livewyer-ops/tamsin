@@ -12,7 +12,7 @@ It runs as a standalone client. [TAMOSS](https://github.com/livewyer-ops/tamoss)
 is one compatible store; Go and Kubernetes are not required to run TAMSin.
 
 Version `8.2.0-in3` accepts MP4 and MPEG-TS. Upgrading renews generated Flow
-IDs. Read the [upgrade notes](CHANGELOG.md#upgrading-from-820-in2) before
+IDs. Read the [compatibility notes](docs/compatibility.md#media-policy-exception) before
 resuming an ingest from an earlier version.
 
 ## Features
