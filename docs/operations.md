@@ -45,13 +45,14 @@ local runtime (1). Cancellation exits 8; failure to write the report exits 1.
 ## Local resources and scheduling
 
 All profiles use FFprobe. Local and staged video may require a complete decoded
-timestamp scan before upload, even under `preserve`. Streamed inputs are
-validated segment by segment; this reduces startup I/O but adds per-segment
-probe work. It does not eliminate B-frame decoding or guarantee lower total CPU
-use. Overlapping FFmpeg and validation can also increase peak RAM. Choose
-`--input-mode=stage` when startup latency and temporary disk use matter less
-than process overlap. See [profiles](profiles.md) for processing and Object-count
-costs.
+timestamp scan before upload, even under `preserve`. In that scan each video
+decoder uses up to four threads, capped by Go's `GOMAXPROCS` setting. Streamed
+inputs are validated segment by segment; this reduces startup I/O but adds
+per-segment probe work. It does not eliminate B-frame decoding or guarantee
+lower total CPU use. Overlapping FFmpeg and validation can also increase peak
+RAM. Choose `--input-mode=stage` when startup latency and temporary disk use
+matter less than process overlap. See [profiles](profiles.md) for processing
+and Object-count costs.
 
 `--dry-run=exact` renders and validates using the selected input mode, without
 TAMS mutation. `--dry-run=fast` skips rendering and cannot report exact Objects.
@@ -60,10 +61,16 @@ output metadata remain unverified; insufficient metadata still fails planning.
 
 `--concurrency` bounds inputs, `--transfers` bounds uploads and verification
 across the run, and `--probe-concurrency` bounds queued measurements; active
-media processes remain capped at two in total. Segmentation uses a rolling disk
-spool, not an in-memory copy of the input. Streamed independent essences share
-one FFmpeg input reader. Whole-essence demultiplexing can need the staged source
-and complete output essences at once.
+media processes remain capped at two in total. Sources are populated side by
+side under a separate limit of the same size as `--transfers`. Segmentation
+uses a rolling disk spool, not an in-memory copy of the input. Streamed
+independent essences share one FFmpeg input reader. Whole-essence
+demultiplexing can need the staged source and complete output essences at once.
+
+`--transfers` follows `--concurrency` unless it is set, and `--concurrency`
+follows the CPU count. A container limited to one or two CPUs therefore uploads
+and verifies one or two Objects at a time, although that work waits on the
+network and not on a CPU. Set `--transfers` there, for example `--transfers 8`.
 
 `--staging-byte-budget` coordinates one process, not an entire filesystem.
 Use a writable `--temp-dir` with sufficient headroom and a volume quota when
@@ -73,8 +80,10 @@ The default `auto` budget uses 80% of free space in `--temp-dir` at startup.
 A configured budget is capped by available space. Streaming reserves output
 space only, with a target of at most 512 MiB per active input, reduced for
 smaller budgets. Closed segments are removed after registration and verification.
-Large active segments can exceed the target; the global budget remains the
-limit. Staging needs the whole remote source plus its output allowance.
+Large active segments can exceed the target, as can the newest closed Segment
+of each output, which waits on disk until the next one is listed or FFmpeg
+exits. The global budget remains the limit. Staging needs the whole remote
+source plus its output allowance.
 
 Updates to one root Flow are serialised within a process only. Schedule one
 writer per explicit or deterministic root Flow across processes, or provide
@@ -151,10 +160,13 @@ each advertised download URL in turn, presigned first.
 
 1. Wait for the original process to exit, including its cleanup. Keep its
    receipt or event stream and confirm no other worker is writing the same Flow.
-2. Inspect any result with `action_required: true` in your store. Retain the
-   exact Flow, Object and timerange identifiers. Resolve stranded or
-   indeterminate state before retrying; do not delete a whole Flow merely to
-   clear one failed Segment.
+2. Read the cause and hint of any result with `action_required: true`. The
+   flag alone does not establish that the store was written to, and a
+   transient cause can clear without a configuration change. Where
+   a code or an Object's disposition is stranded or indeterminate, inspect the
+   store and retain the exact Flow, Object and timerange identifiers. Resolve
+   that state before retrying; do not delete a whole Flow merely to clear one
+   failed Segment.
 3. Restore the same input revision, binary, profile, start time, input mode,
    metadata and explicit IDs, if any. Check readiness and rerun the original
    command. For a local file previously ingested with `essence-segments`:
@@ -183,7 +195,9 @@ batch immediately. Every later segment is checked before storage allocation,
 including cadence across segment boundaries. A later contradiction stops new
 uploads and discards queued output. Already committed valid segments remain;
 the Flow is not marked `closed_complete`. Use `--input-mode=stage` when the whole
-input must pass media preflight before the first upload.
+input must pass media preflight before the first upload. Flow status is
+written only to a store at TAMS 8.2 or later within the supported major: on
+8.1 no Flow is marked, whatever the outcome.
 
 A Segment that already occupies an Object's exact timerange under another
 identifier (an earlier run that fell back to a service-assigned identifier,
@@ -204,7 +218,8 @@ the corrupt Segment and reports `failed_retracted`, even when other Segments
 were left in place. Every resumed Segment must match the expected media timing,
 even with verification disabled; a timing conflict leaves it unchanged.
 
-A failed ingest returns to `awaiting_content` only the Flows it created or
+On a store that takes Flow status, a failed ingest returns to
+`awaiting_content` only the Flows it created or
 moved to `ingesting`, the Flow that owns the media first. A retry that found
 everything in place and then failed leaves `closed_complete` Flows, and a
 status another client set, as it found them. The metadata write at the end of
@@ -256,6 +271,9 @@ tamsin --version
 
 Add the export to your shell's startup file to keep it in new sessions.
 
+The table is keyed by failure code. A human receipt prints the code with
+`--verbose`; `--format json` always carries it.
+
 | Failure | Action |
 | --- | --- |
 | `media.tool_unavailable` | Check FFmpeg/FFprobe 5.1+ run as the workload user, from the same maintained build |
@@ -263,7 +281,7 @@ Add the export to your shell's startup file to keep it in new sessions.
 | `source.stream_unavailable` | The input cannot be streamed as requested; use `--input-mode=auto` to stage automatically, or `--input-mode=stage` |
 | `tams.preflight_failed`, `tams.storage_unavailable` | Check endpoint, auth, API version, lifetimes and selected backend before retrying |
 | `flow.plan_failed` | Inspect the JSON Pointer; correct source, metadata or assigned Profile rather than forcing a match |
-| `verification.stranded`, `object.stranded`, `object.indeterminate`, `flow.indeterminate` | Keep exact UUIDs and inspect the store whenever `action_required` is true; do not retry blindly |
+| `verification.stranded`, `object.stranded`, `object.indeterminate`, `flow.indeterminate` | Keep exact UUIDs and inspect the store; do not retry blindly |
 
 Preserve the [event stream](events.md), exit code, exact version/image digest
 and redacted doctor report for investigation. EOF without `run.finished` is

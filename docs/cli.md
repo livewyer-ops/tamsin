@@ -56,12 +56,13 @@ environment variables or a mode-`0600` configuration file for secrets; see
 | `1` | Internal or output failure |
 | `2` | Invalid arguments, configuration, environment variable or value |
 | `3` | Authentication failed or credentials are unsafe for the transport |
-| `4` | A batch completed with at least one failed input |
+| `4` | At least one input failed, whether in its media, a TAMS write, a transfer or verification |
 | `5` | Input discovery or reading failed |
 | `6` | `doctor` only: FFprobe or FFmpeg is missing, fails its version check or is unsupported |
-| `7` | TAMS preflight, mutation, transfer or verification failed |
+| `7` | Start-up failed before any input began: TAMS or Flow Profile preflight, FFprobe or the staging directory |
 | `8` | The run was interrupted or its parent context ended |
 | `130` | A second SIGINT or SIGTERM forced exit before cleanup finished |
 
-Ingest reports media failures as `4` or `7`. See [events](events.md#exit-codes)
+Ingest reports a media failure in an input as `4` and a missing or unsupported
+FFprobe as `7`. See [events](events.md#exit-codes)
 for the JSON `run.finished` record and failure codes.

@@ -35,12 +35,13 @@ storage settings unchanged. Excluded formats require conversion before ingest.
 Renders that previously dropped subtitle or data tracks now fail; use
 `preserve` for accepted containers when their original bytes must be retained.
 
-Renderer epoch 5 creates new generated Flow IDs for every profile. Generated
+Renderer epoch 6 creates new generated Flow IDs for every profile. Generated
 Source IDs remain stable. An explicitly named Flow carrying earlier TAMSin
-render provenance needs a fresh ID for the corrected timeline. BBC pins, the TAMS
-8.1 floor and public report/event schemas are unchanged. The expanded MP4/TS
-live matrix on the pinned runtime must pass against both TAMS versions before
-release; synthetic checks do not qualify off-air subtitle or data carriage.
+render provenance is refused before any write and needs a fresh ID for the
+corrected timeline. BBC pins, the TAMS 8.1 floor and public report/event
+schemas are unchanged. The expanded MP4/TS live matrix on the pinned runtime
+must pass against both TAMS versions before release; synthetic checks do not
+qualify off-air subtitle or data carriage.
 
 ## Runtime
 
@@ -60,7 +61,8 @@ TAMSin targets [BBC TAMS 8.2](https://github.com/bbc/tams/tree/34fb31b80cb8afb31
 a tested [TAMS 8.1](https://github.com/bbc/tams/tree/98d307b09b5ebf79278aa7d3aad53295154e2c17) compatibility floor.
 TAMS 8.0, missing or malformed versions, and different major versions fail
 preflight. Newer 8.x minors pass, with their relationship to the target
-reported by `doctor`.
+reported by `doctor`. Flow status is written from 8.2: a store at 8.1
+receives none.
 
 The [embedded BBC schemas](../internal/tamsschema/schemas) validate generated
 Flows. The [live test script](../scripts/e2e-kind.sh) pins both BBC TAMS and
@@ -126,7 +128,7 @@ declares `format`, `codec`, `container`, `essence_parameters` or
 `segment_duration` is never rewritten to describe other media. Input revision
 and checksum tags cannot be overridden.
 Segment timeranges do not overlap. TAMS 8.2 initial Object identity is
-supported, but TAMSin does not manufacture fragmented-MP4 initialisation media. A Profile requiring initialisation Objects fails preflight.
+supported, but TAMSin does not manufacture fragmented-MP4 initialisation media.
 
 TAMSin does not infer editorial purpose or source lineage generation.
 `--flow-metadata` supplies workflow-owned metadata but cannot directly set

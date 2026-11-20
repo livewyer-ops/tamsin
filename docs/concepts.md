@@ -44,7 +44,8 @@ different media. Compare the Flow IDs in exact dry runs before changing an
 existing workflow's metadata, treatment or input mode.
 
 A retry can reuse an existing Segment when its timerange, bytes and timing
-match. TAMSin verifies the stored bytes before reporting a resume. It refuses
+match. TAMSin reads the stored bytes back before reporting a resume unless
+`--verify=none` is set, and always checks the timing. It refuses
 a conflicting or partially overlapping Segment instead of overwriting it.
 Explicit `--flow-id` and `--source-id` select identities; they do not bypass
 these checks. Follow the [recovery procedure](operations.md#resume-an-interrupted-ingest)
@@ -66,8 +67,11 @@ See [verification and network cost](operations.md#verification-and-network-cost)
 for the accepted evidence and transfer overhead.
 
 Ingest is incremental. A failed or cancelled run can leave a verified prefix
-of the input in the store. Recovery retracts failed registrations when it can
-confirm their absence; uncertain cleanup is reported for operator attention.
+of the input in the store. Cleanup deletes the particular Segments it selects
+for retraction, as [registration and cleanup behaviour](operations.md#registration-and-cleanup-behaviour)
+describes, and reports each as retracted once it has confirmed the Segment is
+gone. A Segment it cannot confirm is reported as stranded for operator
+attention.
 Human receipts summarise the input, while the [event protocol](events.md)
 records each Object's outcome. A terminal `run.finished` event and the process
 exit status establish whether the whole invocation completed.

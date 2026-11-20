@@ -9,7 +9,7 @@ that API version, so `8.2.0-in1` is the first TAMSin release targeting TAMS
 8.2. A trailing `-rcM` marks the Mth release candidate for that version, for
 example `8.2.0-in2-rc1`. Tags carry no `v` prefix.
 
-## [8.2.0-in3] - 2026-11-19
+## [8.2.0-in3] - 2026-11-20
 
 ### Upgrading from 8.2.0-in2
 
@@ -17,36 +17,88 @@ TAMSin now accepts MP4 and MPEG-TS as input and output. Convert other
 containers before ingest. The five named profiles retain their `@1` versions,
 durations and storage defaults. Catalogue policy is now `2`.
 
-Renderer epoch 5 renews generated Flow IDs for every profile. Generated Source
+Renderer epoch 6 renews generated Flow IDs for every profile. Generated Source
 IDs remain stable. Repeating an ingest can create new Flows and upload the
 media again. Finish interrupted jobs with the previous binary and settings
-if they must resume their original Flows. Use a fresh explicit Flow ID for a
-new render. Check the identities with an exact dry run before upgrading workers.
+if they must resume their original Flows. A run over an explicit Flow ID that
+an earlier build rendered to is refused before it writes; use a fresh ID for
+a new render. Check the identities with an exact dry run before upgrading
+workers.
+
+`--start` must be a canonical TAMS timestamp, such as `0:0`, and an explicit
+Flow, Source or storage ID must be a version 1 to 5 UUID. Both are checked
+with the other arguments and settings, and a value that fails either check
+ends the run with exit 2. A file given to `--flow-metadata` or
+`--collected-flow-metadata` that holds `null` is refused the same way:
+replace it with `{}` or omit the option.
+
+MP4 Segments are no longer cut on open GOPs. Select `mpegts-segments` or
+`preserve` for inputs that `muxed-segments` or `essence-segments` now refuse.
+MPEG-TS Segments of H.264 are refused where an Object would hold a picture
+without its parameter sets, or where an MP4 source gives one of them new
+content. Select `preserve` for those inputs.
 
 ### Media packaging and playback
 
 - Identify MP4 and MPEG-TS from their contents and MP4 brands across local,
   HTTP, S3 and stdin inputs. Container overrides and custom FFmpeg arguments
-  must match the actual output.
+  must match the actual output. An input in another container is refused
+  with `media.unsupported` before its cadence is scanned.
 - Whole-file preservation retains ancillary tracks in the original bytes.
   Rendering supports sparse MP4 `mov_text` subtitles and refuses tracks it
   cannot carry. MPEG-TS codec checks also apply when the source-family
   profile selects TS. See [supported codecs and containers](docs/profiles.md).
 - Measure Segment placement on the source timeline. Interior muxed cuts follow
-  the reference stream, including leading pictures in open GOPs. A mid-GOP
-  capture starts its video Flow at the first copied key frame. Source gaps
-  remain visible. Fixed-rate video rounded by a container is regularised to
-  its nominal period.
+  the reference stream. MPEG-TS Segments include the leading pictures of open
+  GOPs, and a streamed input with open GOPs is no longer refused as a
+  contradiction of its frame rate. A mid-GOP capture starts its video Flow at the first copied key frame,
+  however long the GOP. MP4 output is refused with `media.unsupported` when
+  the video has no key frame in its first five minutes. Stream starts are
+  read in each stream's own ticks, where FFprobe's printed times round them
+  to the microsecond. Source gaps remain
+  visible. Fixed-rate video rounded by a container is regularised to its
+  nominal period.
+- Refuse to cut MP4 Segments on an open GOP, because an MP4 Object does not
+  show the leading pictures and the Flow would have a hole before each cut.
+  Video whose cuts all land on closed GOPs is kept. A multiplex of several
+  video streams is refused in the same way where a cut falls between the key
+  frames of a stream other than the first; it is always checked on a staged
+  input, so `--input-mode=stream` refuses it. The run fails with
+  `media.unsupported`: before any write for a staged input, and at the first
+  such cut for a streamed input or a render with custom FFmpeg arguments.
+- Write H.264 parameter sets before every key frame of MPEG-TS rendered from
+  MP4. An Object cut on an open GOP held none and could not be decoded on its
+  own. A key frame whose MP4 sample begins with another unit, such as SEI,
+  now carries the sets twice. Custom FFmpeg arguments bypass this automatic
+  insertion, and an MPEG-TS source is rendered without it.
+- Refuse an MPEG-TS Object of H.264 that would hold a picture without the
+  parameter sets it refers to, as an MPEG-TS source that carries them rarely
+  or a custom copy can produce, and refuse an MP4 source that gives a
+  parameter set new content within the stream. The run fails with
+  `media.unsupported` at that Object and keeps the Segments before it.
 - MP4 preserves AAC priming. Rendered MPEG-TS uses the Flow's 90 kHz clock
-  across Objects and 33-bit rollover. A muxed programme includes audio before
+  across Objects and 33-bit rollover. A Segment begins on its Object's first
+  sample and ends on the tick its stream's next sample is due on, so Segments
+  that abut in the source abut on the Flow to the nanosecond, also where the
+  clock rounds the sample period, as at 23.976 fps, 59.94 fps and 44.1 kHz.
+  A gap in the source stays a gap, down to a single tick once the stream
+  has shown its cadence. An Object whose samples keep a steady step that is
+  no rate its stream states, as in the slower part of a variable-rate
+  source, is followed at that step. A muxed programme includes audio before
   its first picture and after its last. Measured Segments carry
   `key_frame_count` and `last_duration`.
+- Known limitation: continuous playback of a muxed MP4 Flow can skip audio at
+  a cut or end its audio early. Use `essence-segments` to store audio
+  separately, or `mpegts-segments --essence-storage muxed` to keep audio and
+  video together in MPEG-TS.
 
 ### Flow metadata and Sources
 
 - Supply per-track overrides with `--collected-flow-metadata` or
   `ingest.collected_flow_metadata`. Staged and streamed ingests validate
   overrides against the corresponding collection role.
+- A metadata file must hold a JSON object. A file holding `null` was read as
+  no overrides and is now refused with exit 2.
 - TAMS 8.2 Flow Profiles may supply essence parameters the probe cannot
   determine. Measured values must agree. Profiles requiring separate
   initialisation Objects fail during planning.
@@ -56,8 +108,10 @@ new render. Check the identities with an exact dry run before upgrading workers.
   and reports PCM and pixel depth from the available evidence.
 - Derived Sources receive missing labels, descriptions and TAMSin provenance.
   Operator edits and additional fields returned by newer-minor stores survive
-  ingest. `--start` requires a canonical TAMS timestamp and accepted UUID
-  spellings are sent in canonical form.
+  ingest. Sources are populated side by side, up to `--transfers` of them
+  across the run, so `retry.scheduled` events for different Sources can
+  arrive in either order. `--start` requires a canonical TAMS timestamp and
+  accepted UUID spellings are sent in canonical form.
 
 ### Storage, verification and resume
 
@@ -69,27 +123,55 @@ new render. Check the identities with an exact dry run before upgrading workers.
   to the affected span. Compare timeranges by value and track each Segment
   separately when multiple Segments share one Object. Reconcile ambiguous
   bulk registration against the store.
+- A Segment listing must be a JSON array whose entries carry `object_id` and
+  a bounded `timerange` with an inclusive start, under those exact keys. Any
+  other response fails the listing, so it cannot read as an empty Flow during
+  resume or as proof that a retraction completed.
 - Follow storage-provided HTTP instructions and send presigned URLs as issued.
   Unsigned uploads send `Content-Digest`. Verification accepts storage
   checksum evidence about the representation and tries alternate download
   URLs when necessary.
-- An expired URL can be refreshed. An unreadable Object or partial HTTP
-  response leaves an existing Segment in place. A confirmed byte mismatch
-  retracts the affected Segment. Failure recovery restores only Flows the
-  current input created or opened, even when two inputs share a Flow.
-  Recovery preserves active replication and concurrent metadata edits.
+- An expired URL can be refreshed, including while a resume reads back a
+  Segment that another identifier already holds at an Object's timerange. An
+  unreadable Object or partial HTTP response leaves an existing Segment in
+  place. A confirmed byte mismatch retracts the Segment of an Object the run
+  registered or resumed. A Segment held under another identifier is left in
+  place, and the input reports `tams.segment_conflict`. Failure recovery
+  restores only Flows the current input created or opened, even when two
+  inputs share a Flow. Recovery preserves active replication and concurrent
+  metadata edits.
 - Segmented retries with `--verify none` emit one `object.result` for every
   resumed Object, including when a retry also uploads missing Objects.
+- The last Segment FFmpeg lists is kept only after FFmpeg exits cleanly. A
+  render that failed or was signalled closed its outputs first, and the
+  Segment it left cut short was stored, so a retry met `tams.segment_conflict`
+  where the whole Segment belonged. Each Segment is now passed on when the
+  next one is listed, one Segment later than before for independent essences.
 - `--timeout` bounds each metadata request attempt. `--deletion-timeout`
-  bounds deletion and detached cleanup, with a five-minute default. Ambiguous
-  deletion is checked against the store. When a service advertises a longer
-  presigned URL lifetime than Object lifetime, scheduling uses the shorter
-  Object lifetime and doctor reports the discrepancy.
+  bounds deletion and detached cleanup, with a five-minute default, and must
+  be positive. Ambiguous deletion is checked against the store, less often
+  the longer it takes, and a check that runs out of time says whether the
+  last listing still showed the Segment or the listing itself failed. When a
+  service advertises a longer presigned URL lifetime than Object lifetime,
+  scheduling uses the shorter Object lifetime and doctor reports the
+  discrepancy.
+- A Segment registration that fails while a render is still going is
+  reported as `tams.registration_failed`, as it already was after the render
+  and for a whole file. It was reported as `media.prepare_failed`.
 
 ### CLI and release tooling
 
 - A closed event or log pipe cancels the run and allows cleanup to finish.
-  OAuth credentials can refresh during cleanup after an interrupt.
+  OAuth credentials can refresh during cleanup after an interrupt, and an
+  interrupt stops a run that is waiting for its first OAuth token.
+- An interrupt stops a directory walk or a manifest expansion. The run then
+  declares no inputs and reports a total of zero. It used to finish the
+  expansion, then declare and close every input. The exit code is still 8.
+- In the cadence scan each video decoder uses up to four threads, capped by
+  Go's `GOMAXPROCS` setting.
+- The `ingest run failed` log record gives `error_class=unclassified` when
+  no request or network error ended the run. It gave `transport` for every
+  cause without a class of its own.
 - The first-ingest tutorial, command help and events reference describe
   profile-supplied defaults, progress modes and the values TAMSin emits. The
   settings reference lists flags, YAML keys, environment variables and defaults together.

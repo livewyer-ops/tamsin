@@ -4,8 +4,11 @@ Use `tamsin --help` and `tamsin COMMAND --help` for the installed version's
 flags and defaults. Settings resolve in order: command-line flags, non-empty
 `TAMSIN_*` environment variables, YAML configuration, then built-in defaults.
 
-The default file is `$XDG_CONFIG_HOME/tamsin/config.yaml`, or beneath the
-platform configuration directory when `XDG_CONFIG_HOME` is unset. Select another
+The default file is `tamsin/config.yaml` in the platform configuration
+directory. On Linux that is `$XDG_CONFIG_HOME/tamsin/config.yaml`, or
+`~/.config/tamsin/config.yaml` when `XDG_CONFIG_HOME` is unset. On macOS it is
+`~/Library/Application Support/tamsin/config.yaml`, and `XDG_CONFIG_HOME` is
+not read. Select another
 file with `--config PATH` or `TAMSIN_CONFIG`. An explicitly selected missing file
 is an error; an absent default file is not. Unknown or duplicate keys, wrong
 types and multiple YAML documents fail before source resolution or mutation.
@@ -127,10 +130,15 @@ output. Keep the mode and source revision unchanged for a retry; see
 ## Inputs
 
 Repeat `--input` for a batch. It accepts a file, directory, line-oriented
-manifest, HTTP(S) URL, S3 URI, or `-` for standard input. A positional input is
-equivalent to one `--input`; `--stdin-name` selects stdin only when no other
-input was supplied. `--source-id` and `--flow-id` require exactly one resolved
-input; otherwise identifiers are generated deterministically.
+manifest, HTTP(S) URL, S3 URI, or `-` for standard input. A local file whose
+name ends in `.txt`, in any letter case, is read as a manifest; a `.txt` file
+found by expanding a directory is treated as media. A positional input is
+equivalent to one `--input`. The `--stdin-name` flag selects stdin when no
+`--input` or configured input is present, and a positional argument given with
+it is read as the endpoint. The YAML key and environment variable set the
+filename hint without selecting stdin. `--source-id` and `--flow-id` require
+exactly one resolved input; otherwise identifiers are generated
+deterministically.
 
 Directories expand recursively in lexical order, including regular files only
 and never following symlinks. Manifest lines are trimmed; blanks and `#`
@@ -205,7 +213,7 @@ Use `--config` or `TAMSIN_CONFIG` to select the configuration file.
 | Flag | YAML key | Environment | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `-o`, `--endpoint` | `endpoint` | `TAMSIN_ENDPOINT` | — | TAMS API endpoint |
-| `--config` | — | `TAMSIN_CONFIG` | `$XDG_CONFIG_HOME/tamsin/config.yaml` | Configuration file |
+| `--config` | — | `TAMSIN_CONFIG` | `tamsin/config.yaml` in the platform configuration directory | Configuration file |
 | `--format` | `format` | `TAMSIN_FORMAT` | `human` | Result format: `human` or NDJSON `json` |
 | `--progress` | `progress` | `TAMSIN_PROGRESS` | `auto` | Progress reporting: `auto` or `none`. `plain` is an alias for `auto` |
 | `--log-level` | `log.level` | `TAMSIN_LOG_LEVEL` | `info` | Diagnostic level: `debug`, `info`, `warn` or `error` |
@@ -228,7 +236,7 @@ Use `--config` or `TAMSIN_CONFIG` to select the configuration file.
 | `--redirect-url` | `auth.redirect_url` | `TAMSIN_AUTH_REDIRECT_URL` | `http://127.0.0.1:53682/callback` | Redirect URL used when obtaining the code |
 | `--scope` | `auth.scopes` | `TAMSIN_AUTH_SCOPES` | — | OAuth scope. Repeat or comma-separate |
 | `--timeout` | `http.timeout` | `TAMSIN_HTTP_TIMEOUT` | `30s` | Timeout for each attempt of a TAMS metadata request |
-| `--deletion-timeout` | `http.deletion_timeout` | `TAMSIN_HTTP_DELETION_TIMEOUT` | `5m0s` | Deadline for one Segment deletion, including the service's deletion request and confirmation that the Segment is gone |
+| `--deletion-timeout` | `http.deletion_timeout` | `TAMSIN_HTTP_DELETION_TIMEOUT` | `5m0s` | Deadline for one Segment deletion, including the service's deletion request and confirmation that the Segment is gone. Must be positive |
 | `--transfer-idle-timeout` | `http.transfer_idle_timeout` | `TAMSIN_HTTP_TRANSFER_IDLE_TIMEOUT` | `1m0s` | Maximum time a media transfer may make no progress |
 | `--transfer-timeout` | `http.transfer_timeout` | `TAMSIN_HTTP_TRANSFER_TIMEOUT` | `0` (disabled) | Deadline for a complete media transfer |
 | `--retries` | `http.retries` | `TAMSIN_HTTP_RETRIES` | `3` | Retries for safe HTTP operations (0 to 20) |
@@ -261,7 +269,7 @@ Use `--config` or `TAMSIN_CONFIG` to select the configuration file.
 | `--staging-byte-budget` | `ingest.staging_byte_budget` | `TAMSIN_INGEST_STAGING_BYTE_BUDGET` | `auto` | Global temporary-media budget: `auto` or a byte size such as `80GiB` |
 | `--temp-dir` | `ingest.temp_directory` | `TAMSIN_INGEST_TEMP_DIRECTORY` | system temporary directory | Staging directory |
 | `--max-inputs` | `ingest.max_inputs` | `TAMSIN_INGEST_MAX_INPUTS` | `10000` | Maximum unique inputs after directory, manifest and S3 prefix expansion |
-| `--stdin-name` | `source.stdin_name` | `TAMSIN_SOURCE_STDIN_NAME` | `stdin.bin` | Filename hint for stdin. Selects stdin when no other input is given |
+| `--stdin-name` | `source.stdin_name` | `TAMSIN_SOURCE_STDIN_NAME` | `stdin.bin` | Filename hint for stdin. The flag, not the key or variable, selects stdin when no input is configured or given with `--input` |
 | `--input-header` | `source.http_headers` | `TAMSIN_SOURCE_HTTP_HEADERS` | — | HTTP input header as `Name: value`. Repeat as required |
 | `--s3-endpoint` | `source.s3_endpoint` | `TAMSIN_SOURCE_S3_ENDPOINT` | — | S3-compatible endpoint URL |
 | `--s3-region` | `source.s3_region` | `TAMSIN_SOURCE_S3_REGION` | — | AWS region override for S3 inputs |

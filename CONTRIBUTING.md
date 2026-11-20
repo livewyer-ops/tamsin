@@ -23,6 +23,19 @@ TAMS 8.1 and 8.2 TAMOSS implementations.
 For a focused rerun, use `make e2e TAMSIN_E2E_VERSION=8.2` (or 8.1).
 Both versions must pass before release.
 
+`make coverage` runs the tests with a coverage profile, writes it to
+`coverage.out` and prints the total. `make verify` does not run it.
+
+Benchmarks are not part of `make verify`. Run them by hand when a change may
+affect the number of TAMS requests, transfer concurrency or staging:
+
+```sh
+go test ./internal/ingest -run '^$' -bench . -benchtime 1x
+```
+
+`BenchmarkRemoteInput` runs FFmpeg over a generated three-minute input. Set
+`TAMSIN_BENCH_INPUT` to measure a file of your own.
+
 Changes to source resolution, authentication, Flow/Object identity, mutation,
 verification, output events or exit codes need an observable behaviour test.
 Tests must be deterministic and safe to run with the complete suite. Keep

@@ -10,13 +10,15 @@ is inferred from the other.
 
 ## Named profiles
 
-| Profile | Essence storage | Segment target | Stored container | Intended use |
+| Profile | Essence storage | Segment target | Stored container | Codecs |
 | --- | --- | --- | --- | --- |
-| `preserve@1` | muxed | whole file | source bytes | compliance, archive, and source reprocessing |
-| `demux@1` | independent | whole essence | source-family remux | transcription, analysis, and downstream proxy generation |
-| `muxed-segments@1` | muxed | 10 seconds | source-family remux | time-range access when consumers normally need the complete multiplex |
-| `essence-segments@1` | independent | 10 seconds | source-family remux | independent essence and time-range access for TAMS production workflows |
-| `mpegts-segments@1` | independent | 2 seconds | MPEG-TS | downstream systems that explicitly require short MPEG-TS Objects |
+| `preserve@1` | muxed | whole file | source bytes: the original MP4 or MPEG-TS | existing describable codecs; no remux compatibility restriction |
+| `demux@1` | independent | whole essence | MP4 or MPEG-TS, matching the input | stream copy with the [render rules](#supported-media-and-packaging) |
+| `muxed-segments@1` | muxed | 10 seconds | MP4 or MPEG-TS, matching the input | stream copy with the render rules |
+| `essence-segments@1` | independent | 10 seconds | MP4 or MPEG-TS, matching the input | stream copy with the render rules |
+| `mpegts-segments@1` | independent | 2 seconds | MPEG-TS from either accepted input container | stream copy with the render rules |
+
+`tamsin profiles` prints the intended use of each profile.
 
 Use `--profile NAME` or pin the contract as `--profile NAME@1`. An individual
 media flag is applied after the profile. If it changes a profile setting, or if
@@ -92,13 +94,8 @@ QuickTime, 3GP/3G2 and image brands are refused even though FFmpeg shares their
 demuxer with MP4. Playlists, manifests and nested resources remain refused.
 Metadata overrides and custom FFmpeg arguments cannot bypass this boundary.
 
-| Output policy | Containers | Codecs | Storage | Segments |
-| --- | --- | --- | --- | --- |
-| source bytes (`preserve@1`) | original MP4 or MPEG-TS | existing describable codecs; no remux compatibility restriction | muxed | one Object containing the whole input |
-| whole source-family essence (`demux@1`) | MP4 or MPEG-TS, matching the input | stream copy with the render rules below | independent | one complete Object per essence |
-| source-family multiplex (`muxed-segments@1`) | MP4 or MPEG-TS, matching the input | stream copy with the render rules below | muxed | keyframe-aligned, nominally 10 seconds |
-| source-family essence (`essence-segments@1`) | MP4 or MPEG-TS, matching the input | stream copy with the render rules below | independent | keyframe-aligned, nominally 10 seconds |
-| MPEG-TS (`mpegts-segments@1`) | MPEG-TS from either accepted input container | stream copy with the render rules below | independent | keyframe-aligned, nominally 2 seconds |
+The [named profiles](#named-profiles) table gives each profile's container
+and codec policy. The render rules follow.
 
 MP4 retains the existing codec mappings below; this is not an H.264/AAC-only
 policy. The output muxer must be able to carry each codec. MPEG-TS stream copy
@@ -139,11 +136,61 @@ the source timeline and covers the span of the stream it was cut on (the first
 video stream, otherwise the first stream), so a multiplex keeps the source
 clock: interior cuts follow the video. A muxed programme includes audio that
 starts before the first video key frame or continues after the last picture.
-An independent video Flow starts at its first copied key frame. Rendered
+An independent video Flow starts at its first copied key frame. TAMSin reads
+up to five minutes of the video to find that frame. Without one, MP4 output
+is refused with `media.unsupported`, and MPEG-TS output is placed by its own
+clock. Rendered
 MPEG-TS timestamps follow the Flow clock modulo 2^33 at 90 kHz. Its
-`ts_offset` identifies the rollover epoch. An open GOP presents its leading pictures
-before the frame it was cut on; they travel in the same Object and the Segment
-begins with them, so long-GOP MPEG-2 and open-GOP HEVC place without holes.
+`ts_offset` identifies the rollover epoch. A Segment begins on its Object's
+first sample and ends on the tick its stream's next sample is due on, which
+the rate the stream's samples keep names. That keeps Segments together at
+rates whose sample period the clock rounds, such as 23.976 fps and 44.1 kHz,
+and a gap in the source stays a gap. At such a rate, until the stream has
+kept its rate for a whole cycle, 15015 ticks at 23.976 fps and 102400 at
+44.1 kHz, a gap of one tick can be mistaken for the clock's rounding, and its
+size or position may be reported inaccurately. Where the samples keep a steady
+step that is no rate the stream states, a Segment ends on the next Object's
+first sample if that follows at the same step. Otherwise it ends where FFprobe
+takes its last sample to end. An open GOP presents its leading pictures
+before the frame it was cut on. In MPEG-TS they travel in the same Object and
+the Segment begins with them, so long-GOP MPEG-2 and open-GOP HEVC place
+without holes. A decoder that starts at such an Object needs the Segment
+before it to show those pictures, which TAMS allows for open GOPs (ADR 0013);
+use `preserve` where every Object must decode whole on its own.
+H.264 copied from MP4 into MPEG-TS has the parameter sets of its sample
+description written before every key frame, so each Object decodes from its
+own first key frame. Those sets are the right ones only while the stream
+does not replace one of them, so video that gives a parameter set new content
+in the stream is refused with `media.unsupported` where the change arrives.
+Sets with new identifiers are followed as long as every picture has them. An
+MPEG-TS source is rendered without this automatic insertion and `--ffmpeg-arg`
+bypasses it, and an Object that would hold a picture without the parameter
+sets it refers to is refused in the same way. Both refusals keep the Segments
+before them. Use `preserve` for that video. The check covers the AVC base
+layer and auxiliary pictures. Scalable layers and additional views are not
+checked, and `preserve` keeps them as supplied.
+An MP4 Object does not show open-GOP leading pictures, which would leave a hole
+before every such cut, so TAMSin refuses to cut MP4 Segments on an open GOP
+with `media.unsupported`. Video whose cuts all land on closed GOPs is kept.
+A multiplex of several video streams is cut on the first one's key frames. A
+cut that falls between another video stream's key frames would leave that
+stream undecodable in the Object, so it is refused in the same way, in MP4
+and in MPEG-TS. Every cut of such a multiplex is checked before anything is
+written, so a remote input is staged, and `--input-mode=stream` is refused
+with `source.stream_unavailable`. A multiplex is cut exactly only on its
+first video stream: sound and further pictures stored either side of a cut
+stay in the Object they were stored in, so a few of their samples can present
+just outside that Object's Segment. Continuous playback of a muxed MP4 Flow
+can skip audio at a cut or end its audio early. When the video has B-frames,
+the next Object can contain audio from just before the cut. A player may skip
+those samples because their timestamps precede the Object's playback start.
+Use `essence-segments` or `mpegts-segments` where each stream must be cut on
+its own timeline, or `mpegts-segments --essence-storage muxed` to keep audio
+and video together in MPEG-TS.
+A staged input is refused before anything is written, unless it is rendered
+with custom FFmpeg arguments. That render, like a streamed input, is refused
+at the first such cut and keeps the Segments before it. Use `mpegts-segments`
+or `preserve` for that video.
 Adjacent Segments abut exactly; a gap in the source stays a gap on the Flow; a
 cut whose pictures present before the previous Segment ends is refused. A fixed-rate video reference stream is
 regularised to its nominal period when the container rounds its timestamps
@@ -154,7 +201,10 @@ Object, is kept as measured. Each measured Segment also carries
 (how long its last sample presents). A correction to placement changes the
 renderer epoch, so a retry creates new Flows rather than reusing Flows written
 under the earlier rule; existing Flows are never rewritten. The
-[changelog](../CHANGELOG.md) records each such change.
+[changelog](../CHANGELOG.md) records each such change. The upgrade from
+8.2.0-in2 renews the renderer epoch to 6: generated Source IDs stay the same,
+and a Flow ID given explicitly for an earlier render needs replacing with a
+fresh one.
 
 TAMSin owns the output muxer through `--segment-format`. An explicit FFmpeg
 `-f`, `-format`, or `-segment_format` is accepted only when it repeats the
