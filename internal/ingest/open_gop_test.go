@@ -216,10 +216,7 @@ func ingestVideoSpans(t *testing.T, config Config, item source.Item) (BatchResul
 	t.Helper()
 	client := newFakeClient()
 	config.TempDirectory = t.TempDir()
-	pipeline, err := New(config, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, config, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
 	batch, err := pipeline.Run(t.Context(), []source.Item{item})
 	if err != nil {
 		t.Fatal(err)
@@ -609,11 +606,8 @@ func TestStreamedLeadingPicturesKeepCadenceEvidence(t *testing.T) {
 						item, _ = serveStreamFixture(t, input, 0)
 					}
 					client := newFakeClient()
-					pipeline, err := New(Config{InputMode: mode, SegmentDuration: 2 * time.Second, SegmentFormat: media.SegmentFormatMPEGTS,
+					pipeline := mustNew(t, Config{InputMode: mode, SegmentDuration: 2 * time.Second, SegmentFormat: media.SegmentFormatMPEGTS,
 						EssenceStorage: media.EssenceStorageIndependent, TempDirectory: t.TempDir()}, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-					if err != nil {
-						t.Fatal(err)
-					}
 					batch, err := pipeline.Run(t.Context(), []source.Item{item})
 					if err != nil {
 						t.Fatal(err)

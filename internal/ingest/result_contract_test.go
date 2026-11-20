@@ -25,10 +25,7 @@ func TestRunObservedFlushesEveryIndexOnGracefulInterruption(t *testing.T) {
 		}
 		items[index] = localSource(filename)
 	}
-	pipeline, err := New(Config{Concurrency: 1, DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1, DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	observed := make(map[int]Result, len(items))
@@ -76,10 +73,7 @@ func TestRunObservedReportsEveryInputWhenStorePreflightFails(t *testing.T) {
 	}
 	client := newFakeClient()
 	client.backends = nil
-	pipeline, err := New(Config{Concurrency: 2, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 2, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
 	var indexes []int
 	batch, runErr := pipeline.RunObserved(context.Background(), items, func(index int, result Result) error {
 		indexes = append(indexes, index)
@@ -112,12 +106,9 @@ func TestRunObservedReportsEveryInputWhenStagingSetupFails(t *testing.T) {
 		}
 		items[index] = localSource(filename)
 	}
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 2, DryRunMode: DryRunExact, VerificationMode: VerificationReadback, TempDirectory: filepath.Join(blocked, "staging"),
 	}, nil, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	var indexes []int
 	batch, runErr := pipeline.RunObserved(context.Background(), items, func(index int, result Result) error {
@@ -138,18 +129,12 @@ func TestRunObservedReportsEveryInputWhenStagingSetupFails(t *testing.T) {
 
 func TestBatchResultCarriesRunMetadata(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "input.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	pipeline, err := New(Config{
+	filename := writeFixture(t, "input.mp4", "media")
+	pipeline := mustNew(t, Config{
 		Profile: ProfilePreserve, ProfileVersion: "1",
 		Concurrency: 1, DryRunMode: DryRunExact, VerificationMode: VerificationReadback, SegmentFormat: media.SegmentFormatSource,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, nil, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -167,16 +152,10 @@ func TestBatchResultCarriesRunMetadata(t *testing.T) {
 
 func TestResultDropsAuthenticatedHTTPCredentialMaterialWithUppercaseScheme(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "input.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "input.mp4", "media")
 	item := localSource(filename)
 	item.URI = "HTTPS://alice:secret@example.test/programme.mp4?token=secret"
-	pipeline, err := New(Config{Concurrency: 1, DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1, DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{item})
 	if err != nil {
 		t.Fatal(err)
@@ -191,16 +170,10 @@ func TestResultDropsAuthenticatedHTTPCredentialMaterialWithUppercaseScheme(t *te
 
 func TestInvocationsGetDistinctRunIDs(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "input.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "input.mp4", "media")
 	previousID := ""
 	for range 2 {
-		pipeline, err := New(Config{Concurrency: 1, DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		pipeline := mustNew(t, Config{Concurrency: 1, DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
 		batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 		if err != nil {
 			t.Fatal(err)
@@ -254,19 +227,13 @@ func TestInvocationsRefreshMediaToolchain(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			filename := filepath.Join(t.TempDir(), "input.mp4")
-			if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			filename := writeFixture(t, "input.mp4", "media")
 			segmenter := &sequencedVersionSegmenter{versions: testCase.versions}
 			config := Config{
 				Concurrency: 1, DryRunMode: DryRunExact, SegmentDuration: time.Second,
 				EssenceStorage: media.EssenceStorageMuxed,
 			}
-			pipeline, err := New(config, nil, fakeProber{}, segmenter, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+			pipeline := mustNew(t, config, nil, fakeProber{}, segmenter, discardLogger(), nil)
 
 			first, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 			if err != nil {
@@ -304,10 +271,7 @@ func TestVerificationStatusUsesTypedVerificationErrorOnly(t *testing.T) {
 		// state-machine fixture as a dry run without changing verification policy.
 		t.Fatal("New unexpectedly accepted a missing client")
 	}
-	pipeline, err := New(Config{VerificationMode: VerificationReadback, DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{VerificationMode: VerificationReadback, DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
 	if got := pipeline.verificationFailureStatus(errors.New("registration cleanup failed")); got != VerificationNotReached {
 		t.Fatalf("non-verification cleanup produced verification %q", got)
 	}
@@ -330,10 +294,7 @@ func TestRunObservedStopsSchedulingButStillReportsEveryTerminalResultAfterOutput
 		}
 		items[index] = localSource(filename)
 	}
-	pipeline, err := New(Config{Concurrency: 1, DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1, DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
 	writes := 0
 	batch, runErr := pipeline.RunObserved(context.Background(), items, func(int, Result) error {
 		writes++

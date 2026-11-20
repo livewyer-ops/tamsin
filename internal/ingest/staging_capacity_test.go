@@ -316,10 +316,7 @@ func TestSegmentOutputsCannotGrowPastTheGlobalBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lease.release()
-	pipeline, err := New(config, newFakeClient(), fakeProber{}, sparseCapacitySegmenter{bytes: required + 16}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, config, newFakeClient(), fakeProber{}, sparseCapacitySegmenter{bytes: required + 16}, discardLogger(), nil)
 	staged := stagedFile{path: input, size: 1, lease: lease, cleanup: func() {}}
 	cleanup, err := pipeline.renderSegmentsTo(context.Background(), staged,
 		media.FlowInfo{Duration: int64(time.Second), SegmentContainer: media.SegmentContainer{Muxer: "mpegts", Extension: ".ts"}},
@@ -409,14 +406,11 @@ func TestRollingMultiOutputUsesOneGlobalPendingWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	segmenter := &rollingBoundSegmenter{objects: objectsPerFlow}
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 8, ProbeConcurrency: 1,
 		SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageIndependent,
 		TempDirectory: directory,
 	}, newFakeClient(), fourEssenceProber{}, segmenter, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(input)})
 	if err != nil || batch.Succeeded != 1 {
 		t.Fatalf("multi-output rolling ingest = %#v, %v", batch, err)
@@ -446,14 +440,11 @@ func TestRollingSegmentsKeepDiskAndTerminalMemoryBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	segmenter := &rollingBoundSegmenter{objects: objects}
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 8, ProbeConcurrency: 1,
 		SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed,
 		TempDirectory: directory,
 	}, newFakeClient(), fakeProber{}, segmenter, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(input)})
 	if err != nil || batch.Succeeded != 1 {
 		t.Fatalf("rolling ingest = %#v, %v", batch, err)

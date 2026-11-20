@@ -58,10 +58,7 @@ func TestContainerPolicyAcrossInputTransports(t *testing.T) {
 					}
 				}
 				client := newFakeClient()
-				pipeline, err := New(Config{InputMode: mode, SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed, TempDirectory: t.TempDir()}, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-				if err != nil {
-					t.Fatal(err)
-				}
+				pipeline := mustNew(t, Config{InputMode: mode, SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed, TempDirectory: t.TempDir()}, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
 				batch, err := pipeline.Run(t.Context(), []source.Item{item})
 				if err != nil {
 					t.Fatal(err)
@@ -86,15 +83,9 @@ func TestContainerPolicyAcrossInputTransports(t *testing.T) {
 func TestContainerOverridesMustMatchOutput(t *testing.T) {
 	for _, storage := range []media.EssenceStorage{media.EssenceStorageMuxed, media.EssenceStorageIndependent} {
 		for _, override := range []tams.Flow{{"container": "video/mp2t"}, {"container": "application/mxf"}, {"container": nil}} {
-			filename := filepath.Join(t.TempDir(), "fixture.ts")
-			if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			filename := writeFixture(t, "fixture.ts", "media")
 			client := newFakeClient()
-			pipeline, err := New(Config{EssenceStorage: storage, SegmentDuration: time.Second, FlowMetadata: override}, client, muxedProber{}, &recordingSegmenter{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+			pipeline := mustNew(t, Config{EssenceStorage: storage, SegmentDuration: time.Second, FlowMetadata: override}, client, muxedProber{}, &recordingSegmenter{}, discardLogger(), nil)
 			batch, err := pipeline.Run(t.Context(), []source.Item{localSource(filename)})
 			if err != nil {
 				t.Fatal(err)
@@ -146,10 +137,7 @@ func TestContainerOverridePrecedence(t *testing.T) {
 }
 
 func TestSparseMP4SubtitlesSurviveRendering(t *testing.T) {
-	subtitles := filepath.Join(t.TempDir(), "sparse.srt")
-	if err := os.WriteFile(subtitles, []byte("1\n00:00:00,100 --> 00:00:00,700\nFirst cue\n\n2\n00:00:05,100 --> 00:00:05,700\nLast cue\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	subtitles := writeFixture(t, "sparse.srt", "1\n00:00:00,100 --> 00:00:00,700\nFirst cue\n\n2\n00:00:05,100 --> 00:00:05,700\nLast cue\n")
 	filename := streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=7", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=7", "-i", subtitles,
 		"-map", "0:v", "-map", "1:a", "-map", "2:s", "-c:v", "libx264", "-g", "50", "-bf", "2", "-c:a", "aac", "-c:s", "mov_text")
 	for _, mode := range []InputMode{InputStage, InputStream} {
@@ -160,10 +148,7 @@ func TestSparseMP4SubtitlesSurviveRendering(t *testing.T) {
 					item, _ = serveStreamFixture(t, filename, 0)
 				}
 				client := newFakeClient()
-				pipeline, err := New(Config{InputMode: mode, SegmentDuration: 2 * time.Second, EssenceStorage: storage, TempDirectory: t.TempDir(), VerificationMode: VerificationReadback}, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-				if err != nil {
-					t.Fatal(err)
-				}
+				pipeline := mustNew(t, Config{InputMode: mode, SegmentDuration: 2 * time.Second, EssenceStorage: storage, TempDirectory: t.TempDir(), VerificationMode: VerificationReadback}, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
 				batch, err := pipeline.Run(t.Context(), []source.Item{item})
 				if err != nil || batch.Succeeded != 1 {
 					t.Fatalf("sparse subtitles: %v, %+v", err, batch.Results)

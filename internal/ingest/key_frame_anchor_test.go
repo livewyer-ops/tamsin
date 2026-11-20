@@ -181,11 +181,8 @@ func TestLongGOPCaptureIsAnchoredOnItsFirstKeyFrame(t *testing.T) {
 				startTolerance = transportTick
 			}
 			client := newFakeClient()
-			pipeline, err := New(Config{SegmentDuration: definition.SegmentDuration, SegmentFormat: definition.SegmentFormat,
+			pipeline := mustNew(t, Config{SegmentDuration: definition.SegmentDuration, SegmentFormat: definition.SegmentFormat,
 				EssenceStorage: definition.EssenceStorage, TempDirectory: t.TempDir()}, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			batch, err := pipeline.Run(t.Context(), []source.Item{localSource(input)})
 			if err != nil || batch.Succeeded != 1 {
 				t.Fatalf("run: %v, %+v: %s", err, batch.Results[0].Failure, batch.Results[0].Error)
@@ -338,10 +335,7 @@ func TestRunWithoutAKeyFrameWritesNothing(t *testing.T) {
 				code, message = FailureCodeInterrupted, FailureMessageInputInterrupt
 			}
 			client := newFakeClient()
-			pipeline, err := New(Config{SegmentDuration: time.Second}, client, prober, countingSegmenter{objects: 2}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+			pipeline := mustNew(t, Config{SegmentDuration: time.Second}, client, prober, countingSegmenter{objects: 2}, discardLogger(), nil)
 			batch, _ := pipeline.Run(ctx, []source.Item{localSource(writeFixture(t, "fixture.mp4", "media"))})
 			if len(batch.Results) != 1 || batch.Results[0].Failure == nil || batch.Results[0].Failure.Code != code || batch.Results[0].Failure.Message != message {
 				t.Fatalf("results = %+v, want %s", batch.Results, code)

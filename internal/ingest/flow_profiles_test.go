@@ -112,11 +112,8 @@ func TestProfileBackedFlowPlansExpandedReadsAndCompactWrites(t *testing.T) {
 	client.profiles[testVideoProfileID] = tams.Profile{
 		"id": testVideoProfileID, "label": "HD", "flow_metadata": metadata,
 	}
-	pipeline, err := New(Config{Concurrency: 1, DryRunMode: DryRunExact, TAMSFlowProfiles: []string{testVideoProfileID}},
+	pipeline := mustNew(t, Config{Concurrency: 1, DryRunMode: DryRunExact, TAMSFlowProfiles: []string{testVideoProfileID}},
 		client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	plans, err := pipeline.planFlowGraph(context.Background(), flowGraph{flows: []graphFlow{{
 		id: identity.FlowID, role: "single", flow: flow, ownsMedia: true,
 	}}})
@@ -379,13 +376,10 @@ func TestFlowProfileDryRunOnlyReadsServiceAndProfilesPerRun(t *testing.T) {
 		"id": testVideoProfileID, "label": "dry-run", "flow_metadata": metadata,
 	}
 	for run := range 2 {
-		pipeline, err := New(Config{
+		pipeline := mustNew(t, Config{
 			Concurrency: 1, Transfers: 2, DryRunMode: DryRunExact, EssenceStorage: media.EssenceStorageMuxed,
 			TAMSFlowProfiles: []string{testVideoProfileID},
 		}, client, fakeProber{}, nil, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
 		batch, runErr := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 		if runErr != nil || batch.Succeeded != 1 {
 			t.Fatalf("run %d = %#v, %v", run, batch, runErr)

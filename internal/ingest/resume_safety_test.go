@@ -24,10 +24,7 @@ func TestResumePreservesNewerMinorEssenceFields(t *testing.T) {
 	client.serviceDocument = map[string]any{"api_version": "8.7", "min_object_timeout": "300:0", "min_presigned_url_timeout": "30:0"}
 	config := Config{Concurrency: 1, VerificationMode: VerificationReadback}
 	run := func() Result {
-		p, err := New(config, client, fakeProber{}, nil, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		p := mustNew(t, config, client, fakeProber{}, nil, discardLogger(), nil)
 		b, err := p.Run(context.Background(), []source.Item{localSource(filename)})
 		if err != nil {
 			t.Fatal(err)
@@ -58,17 +55,11 @@ func TestMetadataOverridesRespectCollectedRoles(t *testing.T) {
 	for _, storage := range []media.EssenceStorage{media.EssenceStorageMuxed, media.EssenceStorageIndependent} {
 		for _, mode := range []string{"root-only", "collected-only", "both"} {
 			t.Run(string(storage)+"/"+mode, func(t *testing.T) {
-				filename := filepath.Join(t.TempDir(), "fixture.mp4")
-				if err := os.WriteFile(filename, []byte("muxed-media"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				filename := writeFixture(t, "fixture.mp4", "muxed-media")
 				client := newFakeClient()
 				config := Config{Concurrency: 1, EssenceStorage: storage, VerificationMode: VerificationReadback, SegmentDuration: time.Second}
 				run := func() Result {
-					p, err := New(config, client, muxedProber{}, fakeSegmenter{}, discardLogger(), nil)
-					if err != nil {
-						t.Fatal(err)
-					}
+					p := mustNew(t, config, client, muxedProber{}, fakeSegmenter{}, discardLogger(), nil)
 					batch, err := p.Run(t.Context(), []source.Item{localSource(filename)})
 					if err != nil {
 						t.Fatal(err)
@@ -121,10 +112,7 @@ func TestTransientResumeReadFailureKeepsStoredMedia(t *testing.T) {
 	}
 	client := newFakeClient()
 	run := func() Result {
-		p, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		p := mustNew(t, Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
 		b, err := p.Run(context.Background(), []source.Item{localSource(filename)})
 		if err != nil {
 			t.Fatal(err)
@@ -157,16 +145,10 @@ func TestResumeChecksExistingTiming(t *testing.T) {
 	for _, mode := range []VerificationMode{VerificationNone, VerificationReadback} {
 		for _, mismatch := range []string{"offset", "object-range", "equivalent"} {
 			t.Run(string(mode)+"/"+mismatch, func(t *testing.T) {
-				filename := filepath.Join(t.TempDir(), "fixture.mp4")
-				if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				filename := writeFixture(t, "fixture.mp4", "media")
 				client := newFakeClient()
 				run := func() Result {
-					p, err := New(Config{Concurrency: 1, VerificationMode: mode}, client, fakeProber{}, nil, discardLogger(), nil)
-					if err != nil {
-						t.Fatal(err)
-					}
+					p := mustNew(t, Config{Concurrency: 1, VerificationMode: mode}, client, fakeProber{}, nil, discardLogger(), nil)
 					batch, err := p.Run(t.Context(), []source.Item{localSource(filename)})
 					if err != nil {
 						t.Fatal(err)
@@ -211,16 +193,10 @@ func TestResumeChecksExistingTiming(t *testing.T) {
 // one, and its timing is checked on that listing too: the Segment can have
 // been replaced between the two.
 func TestResumeChecksTimingAgainAfterAnExpiredURL(t *testing.T) {
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	run := func() Result {
-		p, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		p := mustNew(t, Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
 		batch, err := p.Run(t.Context(), []source.Item{localSource(filename)})
 		if err != nil {
 			t.Fatal(err)
@@ -290,10 +266,7 @@ func TestUnusableResumeListingWritesNothing(t *testing.T) {
 	path := writeFixture(t, "clip.mp4", "media")
 	client := newFakeClient()
 	client.listSegmentsErr = errors.New("listing returned a response that is not a JSON array")
-	p, err := New(Config{Concurrency: 1}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := mustNew(t, Config{Concurrency: 1}, client, fakeProber{}, nil, discardLogger(), nil)
 	batch, err := p.Run(t.Context(), []source.Item{localSource(path)})
 	if err != nil {
 		t.Fatal(err)
@@ -314,10 +287,7 @@ func TestExplicitFlowRejectsChangedStagedContentBeforeWrites(t *testing.T) {
 	path := writeFixture(t, "clip.mp4", "media one")
 	client := newFakeClient()
 	run := func() Result {
-		p, err := New(Config{FlowID: "69aa64e4-0d55-4690-a7a7-07050d4ca493", SourceID: "046f3837-aaab-4335-83c7-a41f15ce522d"}, client, fakeProber{}, nil, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		p := mustNew(t, Config{FlowID: "69aa64e4-0d55-4690-a7a7-07050d4ca493", SourceID: "046f3837-aaab-4335-83c7-a41f15ce522d"}, client, fakeProber{}, nil, discardLogger(), nil)
 		b, err := p.Run(t.Context(), []source.Item{localSource(path)})
 		if err != nil {
 			t.Fatal(err)
@@ -351,12 +321,9 @@ func TestFlowOfAnEarlierRendererEpochIsRefusedBeforeWrites(t *testing.T) {
 			client := newFakeClient()
 			client.serviceDocument = map[string]any{"api_version": version, "min_object_timeout": "300:0", "min_presigned_url_timeout": "30:0"}
 			run := func() Result {
-				pipeline, err := New(Config{FlowID: flowID, SourceID: "046f3837-aaab-4335-83c7-a41f15ce522d", TempDirectory: t.TempDir(),
+				pipeline := mustNew(t, Config{FlowID: flowID, SourceID: "046f3837-aaab-4335-83c7-a41f15ce522d", TempDirectory: t.TempDir(),
 					SegmentDuration: time.Second, SegmentFormat: media.SegmentFormatSource, EssenceStorage: media.EssenceStorageMuxed},
 					client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-				if err != nil {
-					t.Fatal(err)
-				}
 				batch, err := pipeline.Run(t.Context(), []source.Item{localSource(input)})
 				if err != nil {
 					t.Fatal(err)
@@ -402,10 +369,7 @@ func TestReadOnlyResumePreservesReplicationStatus(t *testing.T) {
 	client := newFakeClient()
 	client.serviceDocument = map[string]any{"api_version": "8.2", "min_object_timeout": "300:0", "min_presigned_url_timeout": "30:0"}
 	run := func() Result {
-		p, err := New(Config{}, client, fakeProber{}, nil, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		p := mustNew(t, Config{}, client, fakeProber{}, nil, discardLogger(), nil)
 		b, err := p.Run(t.Context(), []source.Item{localSource(path)})
 		if err != nil {
 			t.Fatal(err)
@@ -474,12 +438,9 @@ func TestRetryAfterFailedRenderMatchesAnUninterruptedRun(t *testing.T) {
 			input, storage := render.input, render.storage
 			run := func(client *fakeClient, executable string) BatchResult {
 				t.Helper()
-				pipeline, err := New(Config{InputMode: InputStage, SegmentDuration: 2 * time.Second, SegmentFormat: render.format,
+				pipeline := mustNew(t, Config{InputMode: InputStage, SegmentDuration: 2 * time.Second, SegmentFormat: render.format,
 					EssenceStorage: storage, VerificationMode: VerificationReadback, TempDirectory: t.TempDir()},
 					client, media.FFprobe{}, media.FFmpeg{Executable: executable}, discardLogger(), nil)
-				if err != nil {
-					t.Fatal(err)
-				}
 				batch, err := pipeline.Run(t.Context(), []source.Item{localSource(input)})
 				if err != nil {
 					t.Fatal(err)

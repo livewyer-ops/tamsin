@@ -39,7 +39,7 @@ func TestAPICredentialsOnlyReachUnsignedSameOriginMedia(t *testing.T) {
 					Body: io.NopCloser(strings.NewReader("verified")),
 				}, nil
 			}
-			client, err := New(Config{
+			client := newTestClient(t, Config{
 				Endpoint: "https://tams.example.test", TransferIdleTimeout: time.Minute,
 				Transport: roundTripError(func(request *http.Request) (*http.Response, error) {
 					apiCalls.Add(1)
@@ -50,9 +50,6 @@ func TestAPICredentialsOnlyReachUnsignedSameOriginMedia(t *testing.T) {
 					return respond(request)
 				}),
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			location := PresignedURL{URL: test.url, Presigned: test.presigned}
 			if _, _, err := client.DownloadDigest(context.Background(), location, 8); err != nil {
 				t.Fatal(err)
@@ -90,10 +87,7 @@ func TestUploadFollowsHeaderInstructionsWithoutInventingAType(t *testing.T) {
 		writer.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
-	client, err := New(Config{Endpoint: "https://tams.example.test", TransferIdleTimeout: time.Minute})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: "https://tams.example.test", TransferIdleTimeout: time.Minute})
 	filename := filepath.Join(t.TempDir(), "object.mp4")
 	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
 		t.Fatal(err)

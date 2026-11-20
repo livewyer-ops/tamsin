@@ -6,8 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -17,19 +15,13 @@ import (
 
 func ingestFixture(t *testing.T) source.Item {
 	t.Helper()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media-object"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media-object")
 	return localSource(filename)
 }
 
 func runOnce(t *testing.T, client *fakeClient, item source.Item) Result {
 	t.Helper()
-	pipeline, err := New(Config{VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{item})
 	if err != nil {
 		t.Fatal(err)
@@ -112,10 +104,7 @@ func TestOccupiedTimerangeIsAConflictWithoutVerification(t *testing.T) {
 	client.objects["other-producer"] = client.objects[original]
 	client.lock.Unlock()
 
-	pipeline, err := New(Config{VerificationMode: VerificationNone}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{VerificationMode: VerificationNone}, client, fakeProber{}, nil, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{item})
 	if err != nil {
 		t.Fatal(err)
@@ -219,10 +208,7 @@ func TestAdoptionListsAgainOnlyForAnExpiredURL(t *testing.T) {
 			client.lock.Unlock()
 
 			// One transfer slot: taking a second for the retry would never return.
-			pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+			pipeline := mustNew(t, Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
 			batch, err := pipeline.Run(context.Background(), []source.Item{item})
 			if err != nil {
 				t.Fatal(err)

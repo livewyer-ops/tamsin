@@ -47,10 +47,7 @@ func TestDeleteSegmentsWaitsForTerminalAbsence(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL, Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Timeout: time.Second})
 	client.deletePollInterval = time.Millisecond
 	if err := client.DeleteSegments(context.Background(), flowID, SegmentDeleteOptions{
 		Timerange: timerange, ObjectID: objectID,
@@ -100,10 +97,7 @@ func TestDeleteSegmentsReconcilesCommittedRequestAfterLostResponse(t *testing.T)
 		_ = response.Body.Close()
 		return nil, errors.New("response lost after server committed deletion")
 	})
-	client, err := New(Config{Endpoint: server.URL, Transport: transport, Retries: 1, Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Transport: transport, Retries: 1, Timeout: time.Second})
 	client.deletePollInterval = time.Millisecond
 	if err := client.DeleteSegments(context.Background(), flowID, SegmentDeleteOptions{
 		Timerange: timerange, ObjectID: objectID,
@@ -206,10 +200,7 @@ func TestDeleteSegmentsMonitorsAcceptedRequest(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL + "/v8.1", Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL + "/v8.1", Timeout: time.Second})
 	client.deletePollInterval = time.Millisecond
 	if err := client.DeleteSegments(context.Background(), flowID, SegmentDeleteOptions{
 		Timerange: timerange, ObjectID: objectID,
@@ -265,11 +256,8 @@ func TestDeleteSegmentsConfirmsByAbsenceWhenTheRequestCannotBeFollowed(t *testin
 			}))
 			defer server.Close()
 			var logged bytes.Buffer
-			client, err := New(Config{Endpoint: server.URL + "/v8.1", Timeout: time.Second,
+			client := newTestClient(t, Config{Endpoint: server.URL + "/v8.1", Timeout: time.Second,
 				Logger: slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))})
-			if err != nil {
-				t.Fatal(err)
-			}
 			client.deletePollInterval = time.Millisecond
 			if err := client.DeleteSegments(context.Background(), flowID, SegmentDeleteOptions{
 				Timerange: timerange, ObjectID: objectID,
@@ -384,10 +372,7 @@ func TestDeleteSegmentsUsesAbsenceWhenMonitorExpired(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL + "/v8.1", Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL + "/v8.1", Timeout: time.Second})
 	client.deletePollInterval = time.Millisecond
 	if err := client.DeleteSegments(context.Background(), flowID, SegmentDeleteOptions{
 		Timerange: timerange, ObjectID: objectID,
@@ -398,10 +383,7 @@ func TestDeleteSegmentsUsesAbsenceWhenMonitorExpired(t *testing.T) {
 
 func TestDeletionLocationAcceptsSameOriginAbsoluteURL(t *testing.T) {
 	t.Parallel()
-	client, err := New(Config{Endpoint: "https://tams.example.test/v8.1"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: "https://tams.example.test/v8.1"})
 	requestURL, err := client.resolve("flows/flow/segments")
 	if err != nil {
 		t.Fatal(err)
@@ -422,10 +404,7 @@ func TestDeletionLocationAcceptsSameOriginAbsoluteURL(t *testing.T) {
 
 func TestAPIReferenceRejectsRecursivelyEncodedLocationPath(t *testing.T) {
 	t.Parallel()
-	client, err := New(Config{Endpoint: "https://tams.example.test/v8.1"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: "https://tams.example.test/v8.1"})
 	requestURL, err := client.resolve("flows/flow/segments")
 	if err != nil {
 		t.Fatal(err)

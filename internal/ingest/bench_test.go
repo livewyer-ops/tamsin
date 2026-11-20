@@ -23,11 +23,9 @@ type countingClient struct {
 
 	calls sync.Map // method name -> *atomic.Int64
 	total atomic.Int64
-	// peak records the maximum concurrent calls.
-	inFlight atomic.Int64
-	peak     atomic.Int64
-	// Transfers are tracked separately: the transfer budget bounds Media Object
-	// uploads and verification downloads, not the metadata calls around them.
+	// Only transfers are tracked in flight: the transfer budget bounds Media
+	// Object uploads and verification downloads, not the metadata calls around
+	// them.
 	transfersInFlight atomic.Int64
 	peakTransfers     atomic.Int64
 }
@@ -47,8 +45,6 @@ func (c *countingClient) record(method string) func() {
 	counter.(*atomic.Int64).Add(1)
 	c.total.Add(1)
 
-	current := c.inFlight.Add(1)
-	recordPeak(&c.peak, current)
 	transfer := isTransfer(method)
 	if transfer {
 		recordPeak(&c.peakTransfers, c.transfersInFlight.Add(1))
@@ -57,7 +53,6 @@ func (c *countingClient) record(method string) func() {
 		time.Sleep(c.latency)
 	}
 	return func() {
-		c.inFlight.Add(-1)
 		if transfer {
 			c.transfersInFlight.Add(-1)
 		}
@@ -160,28 +155,7 @@ func (c *countingClient) DownloadDigest(ctx context.Context, source tams.Presign
 type countingSegmenter struct{ objects int }
 
 func (s countingSegmenter) Segment(_ context.Context, request media.SegmentRequest, sink media.SegmentSink) error {
-	for _, streamIndex := range request.StreamIndices {
-		prefix := "segment-"
-		if streamIndex != media.AllStreams {
-			prefix = fmt.Sprintf("essence-%d-", streamIndex)
-		}
-		for index := range s.objects {
-			path := filepath.Join(request.Directory, fmt.Sprintf("%s%08d.mp4", prefix, index))
-			if err := os.WriteFile(path, []byte{byte(index + 1)}, 0o600); err != nil {
-				return err
-			}
-			record := media.SegmentRecord{StreamIndex: streamIndex, Path: path}
-			if request.Duration > 0 {
-				record.Timed = true
-				record.Start = int64(index) * int64(request.Duration)
-				record.End = record.Start + int64(request.Duration)
-			}
-			if err := sink(record); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return writeSegments(request, sink, s.objects, 1)
 }
 
 func (countingSegmenter) Version(context.Context) (string, error) {
@@ -284,13 +258,10 @@ func TestRoundTripsPerObject(t *testing.T) {
 	const objects = 8
 
 	client := newCountingClient(0)
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: objects}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{benchFixture(t)})
 	if err != nil {
 		t.Fatal(err)
@@ -322,13 +293,10 @@ func TestTransfersRunConcurrently(t *testing.T) {
 			// A per-call delay makes overlap observable: without it a transfer can
 			// finish before the next one starts and peak stays at 1 legitimately.
 			client := newCountingClient(2 * time.Millisecond)
-			pipeline, err := New(Config{
+			pipeline := mustNew(t, Config{
 				Concurrency: 1, Transfers: transfers, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 				EssenceStorage: media.EssenceStorageMuxed,
 			}, client, fakeProber{}, countingSegmenter{objects: objects}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			batch, err := pipeline.Run(context.Background(), []source.Item{benchFixture(t)})
 			if err != nil {
 				t.Fatal(err)
@@ -352,13 +320,10 @@ func TestTransfersRunConcurrently(t *testing.T) {
 func TestTransferBudgetIsGlobal(t *testing.T) {
 	t.Parallel()
 	client := newCountingClient(2 * time.Millisecond)
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 4, Transfers: 2, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: 8}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	items := []source.Item{benchFixture(t), benchFixture(t), benchFixture(t), benchFixture(t)}
 	if _, err := pipeline.Run(context.Background(), items); err != nil {
 		t.Fatal(err)
@@ -479,13 +444,10 @@ func TestMediaProcessBudgetIsGlobalAcrossInputs(t *testing.T) {
 	const mediaProcessBudget = 2
 	prober := &countingProber{delay: 2 * time.Millisecond}
 	client := newFakeClient()
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 4, Transfers: 4, ProbeConcurrency: 8, VerificationMode: VerificationNone,
 		SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed,
 	}, client, prober, countingSegmenter{objects: 8}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	items := []source.Item{benchFixture(t), benchFixture(t), benchFixture(t), benchFixture(t)}
 	if _, err := pipeline.Run(context.Background(), items); err != nil {
 		t.Fatal(err)
@@ -513,13 +475,10 @@ func TestRollingMediaProcessBudgetCannotDeadlockAcrossInputs(t *testing.T) {
 		items[index] = localSource(filename)
 	}
 	segmenter := &boundedRollingSegmenter{}
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 2, Transfers: 2, ProbeConcurrency: 2, VerificationMode: VerificationNone,
 		SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed,
 	}, newFakeClient(), &countingProber{}, segmenter, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	batch, err := pipeline.Run(ctx, items)
@@ -537,13 +496,10 @@ func TestRollingMediaProcessBudgetCannotDeadlockAcrossInputs(t *testing.T) {
 func TestEachOutputObjectIsMeasured(t *testing.T) {
 	t.Parallel()
 	prober := &countingProber{}
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 1, ProbeConcurrency: 8, VerificationMode: VerificationNone,
 		SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed,
 	}, newFakeClient(), prober, countingSegmenter{objects: 8}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := pipeline.Run(context.Background(), []source.Item{benchFixture(t)}); err != nil {
 		t.Fatal(err)
 	}
@@ -554,10 +510,7 @@ func TestEachOutputObjectIsMeasured(t *testing.T) {
 
 func TestCustomMediaProcessUsesTheCompleteLocalBudget(t *testing.T) {
 	t.Parallel()
-	pipeline, err := New(Config{Concurrency: 1, DryRunMode: DryRunExact}, nil, &countingProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1, DryRunMode: DryRunExact}, nil, &countingProber{}, nil, discardLogger(), nil)
 	releaseCustom, err := pipeline.acquireMediaProcess(context.Background(), 2)
 	if err != nil {
 		t.Fatal(err)

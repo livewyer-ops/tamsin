@@ -5,8 +5,6 @@ import (
 	"context"
 	"log/slog"
 	"maps"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -24,10 +22,7 @@ import (
 // untouched.
 func TestNewerMinorStoreFieldsDoNotFailPinnedSchemas(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	client.serviceDocument = map[string]any{"api_version": "8.7", "min_object_timeout": "300:0", "min_presigned_url_timeout": "30:0"}
 	client.decorateFlowReads = func(flow tams.Flow) tams.Flow {
@@ -43,10 +38,7 @@ func TestNewerMinorStoreFieldsDoNotFailPinnedSchemas(t *testing.T) {
 	}
 	config := Config{Concurrency: 1, Transfers: 2, SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed}
 	for run, want := range []ResultStatus{ResultStatusIngested, ResultStatusResumed} {
-		pipeline, err := New(config, client, fakeProber{}, countingSegmenter{objects: 2}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		pipeline := mustNew(t, config, client, fakeProber{}, countingSegmenter{objects: 2}, discardLogger(), nil)
 		batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 		if err != nil {
 			t.Fatalf("run %d: %v", run, err)
@@ -72,10 +64,7 @@ func TestNewerMinorStoreFieldsDoNotFailPinnedSchemas(t *testing.T) {
 // plan made at the close does not, and the ingest completes.
 func TestLateInitSegmentsFlagDoesNotFailTheClose(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	client.serviceDocument = map[string]any{"api_version": "8.7", "min_object_timeout": "300:0", "min_presigned_url_timeout": "30:0"}
 	var registered atomic.Bool
@@ -89,10 +78,7 @@ func TestLateInitSegmentsFlagDoesNotFailTheClose(t *testing.T) {
 		return flow
 	}
 	config := Config{Concurrency: 1, Transfers: 2, SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed}
-	pipeline, err := New(config, client, fakeProber{}, countingSegmenter{objects: 2}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, config, client, fakeProber{}, countingSegmenter{objects: 2}, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -108,18 +94,12 @@ func TestLateInitSegmentsFlagDoesNotFailTheClose(t *testing.T) {
 // and carry on.
 func TestPresignedLifetimeIsClampedToTheObjectLifetime(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	client.serviceDocument = map[string]any{"api_version": "8.1", "min_object_timeout": "300:0", "min_presigned_url_timeout": "301:0"}
 	var logged bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, logger, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, logger, nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -140,19 +120,13 @@ func TestPresignedLifetimeIsClampedToTheObjectLifetime(t *testing.T) {
 // the remainder rather than failing.
 func TestFreshAllocationFollowsTheServiceCap(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	client.rejectOccupiedIDs = true
 	client.allocationCap = 1
 	config := Config{Concurrency: 1, Transfers: 2, SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed, VerificationMode: VerificationReadback}
 	run := func() Result {
-		pipeline, err := New(config, client, fakeProber{}, countingSegmenter{objects: 3}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		pipeline := mustNew(t, config, client, fakeProber{}, countingSegmenter{objects: 3}, discardLogger(), nil)
 		batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 		if err != nil {
 			t.Fatal(err)

@@ -25,6 +25,17 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/observability"
 )
 
+// newTestClient builds a Client for a test that expects its configuration to
+// be accepted.
+func newTestClient(tb testing.TB, config Config) *Client {
+	tb.Helper()
+	client, err := New(config)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return client
+}
+
 func TestUploadStorageSHA256RecognizesOnlyStrongEvidence(t *testing.T) {
 	t.Parallel()
 	digest := bytes.Repeat([]byte{0x7f}, sha256.Size)
@@ -79,10 +90,7 @@ func TestUploadSendsContentDigestOnlyOnUnsignedURLs(t *testing.T) {
 	if err := os.WriteFile(filename, content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	client, err := New(Config{Endpoint: "https://tams.example.test", ExternalTransport: server.Client().Transport, TransferIdleTimeout: time.Minute})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: "https://tams.example.test", ExternalTransport: server.Client().Transport, TransferIdleTimeout: time.Minute})
 	for _, destination := range []PresignedURL{
 		{URL: server.URL, ContentSHA256: hex.EncodeToString(sum[:])},
 		{URL: server.URL, ContentSHA256: hex.EncodeToString(sum[:]), Presigned: true},
@@ -112,12 +120,9 @@ func TestUploadRequestChecksumDoesNotSuppressReadback(t *testing.T) {
 	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	client, err := New(Config{
+	client := newTestClient(t, Config{
 		Endpoint: "https://tams.example.test", ExternalTransport: server.Client().Transport, TransferIdleTimeout: time.Minute,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	receipt, err := client.UploadFile(context.Background(), PresignedURL{
 		URL: server.URL, Headers: map[string]string{"X-Amz-Checksum-Sha256": digest},
 	}, filename)
@@ -257,10 +262,7 @@ func TestClientProfilePreservesLargeJSONNumbers(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL, Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Timeout: time.Second})
 	profile, err := client.Profile(context.Background(), profileID)
 	if err != nil {
 		t.Fatal(err)
@@ -386,10 +388,7 @@ func TestClientIngestOperations(t *testing.T) {
 	baseURL = server.URL
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL + "/v8.1", Timeout: 5 * time.Second, TransferIdleTimeout: time.Minute, Retries: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL + "/v8.1", Timeout: 5 * time.Second, TransferIdleTimeout: time.Minute, Retries: 1})
 	ctx := context.Background()
 	if _, err := client.Service(ctx); err != nil {
 		t.Fatal(err)
@@ -465,10 +464,7 @@ func TestClientRetriesSafeOperations(t *testing.T) {
 		_, _ = io.WriteString(writer, `{}`)
 	}))
 	defer server.Close()
-	client, err := New(Config{Endpoint: server.URL, Retries: 1, Timeout: time.Second, Observability: run})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Retries: 1, Timeout: time.Second, Observability: run})
 	if _, err := client.Service(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -491,13 +487,10 @@ func TestClientRetriesObjectDownload(t *testing.T) {
 		_, _ = io.WriteString(writer, "verified")
 	}))
 	defer server.Close()
-	client, err := New(Config{
+	client := newTestClient(t, Config{
 		Endpoint: "https://tams.example.test", Retries: 1, Timeout: time.Second, Observability: run,
 		TransferIdleTimeout: time.Minute,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	size, digest, err := client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL}, 8)
 	if err != nil {
 		t.Fatal(err)
@@ -829,10 +822,7 @@ func TestCrossOriginStorageDoesNotReceiveTAMSCredentials(t *testing.T) {
 		clone.Header.Set("Authorization", "Bearer TAMS-secret")
 		return http.DefaultTransport.RoundTrip(clone)
 	})
-	client, err := New(Config{Endpoint: apiServer.URL, Transport: authenticated, TransferIdleTimeout: time.Minute})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: apiServer.URL, Transport: authenticated, TransferIdleTimeout: time.Minute})
 	filename := filepath.Join(t.TempDir(), "object.bin")
 	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
 		t.Fatal(err)
@@ -863,10 +853,7 @@ func TestClientsDoNotFollowCredentialedRedirects(t *testing.T) {
 		clone.Header.Set("Authorization", "Bearer TAMS-secret")
 		return http.DefaultTransport.RoundTrip(clone)
 	})
-	client, err := New(Config{Endpoint: redirector.URL, Transport: authenticated})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: redirector.URL, Transport: authenticated})
 	if _, err := client.Service(context.Background()); err == nil {
 		t.Fatal("TAMS redirect unexpectedly succeeded")
 	}
@@ -913,13 +900,10 @@ func TestTransfersOutliveTheMetadataTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{
+	client := newTestClient(t, Config{
 		Endpoint: server.URL, Timeout: 150 * time.Millisecond,
 		TransferIdleTimeout: 100 * time.Millisecond, Retries: 0,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	size, _, err := client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL}, 100)
 	if err != nil {
 		t.Fatalf("a healthy transfer outliving the metadata timeout must still complete: %v", err)
@@ -945,13 +929,10 @@ func TestTransferTimeoutIsHonouredWhenSet(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{
+	client := newTestClient(t, Config{
 		Endpoint: server.URL, Timeout: time.Minute,
 		TransferTimeout: 100 * time.Millisecond, Retries: 0,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, _, err := client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL}, 100); err == nil {
 		t.Fatal("an explicit transfer timeout must still bound a transfer")
 	}
@@ -1038,10 +1019,7 @@ func TestMetadataStillHasADeadline(t *testing.T) {
 	defer server.Close()
 	defer close(release)
 
-	client, err := New(Config{Endpoint: server.URL, Timeout: 100 * time.Millisecond, Retries: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Timeout: 100 * time.Millisecond, Retries: 0})
 	started := time.Now()
 	if _, err := client.Service(context.Background()); err == nil {
 		t.Fatal("a metadata request against an unresponsive service must time out")
@@ -1115,10 +1093,7 @@ func TestUploadReusesConnections(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL, Timeout: 5 * time.Second, TransferIdleTimeout: time.Minute, Retries: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Timeout: 5 * time.Second, TransferIdleTimeout: time.Minute, Retries: 1})
 	filename := filepath.Join(t.TempDir(), "object")
 	if err := os.WriteFile(filename, []byte("media bytes"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1348,10 +1323,7 @@ func TestMetadataTimeoutBoundsEachAttempt(t *testing.T) {
 		_, _ = io.WriteString(writer, `{"id":"flow"}`)
 	}))
 	defer server.Close()
-	client, err := New(Config{Endpoint: server.URL, Timeout: 300 * time.Millisecond, Retries: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Timeout: 300 * time.Millisecond, Retries: 1})
 	flow, err := client.Flow(context.Background(), "flow")
 	if err != nil {
 		t.Fatalf("a slow first attempt left no time for the retry: %v", err)

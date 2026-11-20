@@ -32,10 +32,7 @@ func TestFailedResumeLeavesCompletedFlowsAlone(t *testing.T) {
 	client.serviceDocument = map[string]any{"api_version": "8.2", "min_object_timeout": "300:0", "min_presigned_url_timeout": "30:0"}
 	config := Config{Concurrency: 1, VerificationMode: VerificationReadback}
 	run := func() Result {
-		pipeline, err := New(config, client, muxedProber{}, nil, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		pipeline := mustNew(t, config, client, muxedProber{}, nil, discardLogger(), nil)
 		batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 		if err != nil {
 			t.Fatal(err)
@@ -85,10 +82,7 @@ func TestFailedDuplicateInputLeavesCompletedGraphAlone(t *testing.T) {
 	t.Parallel()
 	client := failSecondListing{newFakeClient()}
 	client.serviceDocument = map[string]any{"api_version": "8.2", "min_object_timeout": "300:0", "min_presigned_url_timeout": "30:0"}
-	pipeline, err := New(Config{Concurrency: 1}, client, muxedProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1}, client, muxedProber{}, nil, discardLogger(), nil)
 	inputs := []source.Item{localSource(writeFixture(t, "first.ts", "same bytes")), localSource(writeFixture(t, "second.ts", "same bytes"))}
 	batch, err := pipeline.Run(t.Context(), inputs)
 	if err != nil {
@@ -109,10 +103,7 @@ func TestFailedDuplicateInputLeavesCompletedGraphAlone(t *testing.T) {
 // could not read: alerting on the verification status must see it.
 func TestRetractedCorruptionOutranksPreservedSegments(t *testing.T) {
 	t.Parallel()
-	pipeline, err := New(Config{VerificationMode: VerificationReadback}, newFakeClient(), fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{VerificationMode: VerificationReadback}, newFakeClient(), fakeProber{}, nil, discardLogger(), nil)
 	for _, testCase := range []struct {
 		err  *VerificationError
 		want VerificationStatus
@@ -168,10 +159,7 @@ func TestResumeReplacesStaleGeneratedEssenceParameters(t *testing.T) {
 	client := newFakeClient()
 	config := Config{Concurrency: 1, VerificationMode: VerificationReadback}
 	run := func() Result {
-		pipeline, err := New(config, client, fakeProber{}, nil, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		pipeline := mustNew(t, config, client, fakeProber{}, nil, discardLogger(), nil)
 		batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 		if err != nil || batch.Succeeded != 1 {
 			t.Fatalf("run: %#v, %v", batch, err)
@@ -199,10 +187,7 @@ func TestVerificationRefreshesAnExpiredDownloadURL(t *testing.T) {
 	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	client.expireFirstDownloads = true
-	pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -234,13 +219,10 @@ func TestRollingIngestKeepsEditsMadeWhileItRan(t *testing.T) {
 			flow["label"] = "Curated during ingest"
 		}
 	}
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 2, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: 4}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil || batch.Succeeded != 1 {
 		t.Fatalf("run: %#v, %v", batch, err)

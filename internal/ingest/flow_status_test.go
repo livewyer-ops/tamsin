@@ -2,8 +2,6 @@ package ingest
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -12,18 +10,12 @@ import (
 
 func TestTAMS82FlowStatusWrapsMutationAndAvoidsResumeChurn(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	client.serviceDocument = map[string]any{
 		"api_version": "8.2", "min_object_timeout": "300:0", "min_presigned_url_timeout": "30:0",
 	}
-	pipeline, err := New(Config{Concurrency: 1}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1}, client, fakeProber{}, nil, discardLogger(), nil)
 	items := []source.Item{localSource(filename)}
 	first, err := pipeline.Run(context.Background(), items)
 	if err != nil {
@@ -61,19 +53,13 @@ func TestTAMS82FlowStatusWrapsMutationAndAvoidsResumeChurn(t *testing.T) {
 
 func TestTAMS82FailedWrittenGraphReturnsToAwaitingContent(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	client.serviceDocument = map[string]any{
 		"api_version": "8.2", "min_object_timeout": "300:0", "min_presigned_url_timeout": "30:0",
 	}
 	client.listSegmentsErr = context.DeadlineExceeded
-	pipeline, err := New(Config{Concurrency: 1}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1}, client, fakeProber{}, nil, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil || batch.Failed != 1 {
 		t.Fatalf("failed batch = %#v, %v", batch, err)
@@ -86,20 +72,14 @@ func TestTAMS82FailedWrittenGraphReturnsToAwaitingContent(t *testing.T) {
 
 func TestTAMS82FailedCloseReturnsCompletedMediaToAwaitingContent(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	client.serviceDocument = map[string]any{
 		"api_version": "8.2", "min_object_timeout": "300:0", "min_presigned_url_timeout": "30:0",
 	}
 	// Initial Flow creation and the ingesting transition succeed; closing fails.
 	client.putFlowErrAt = 3
-	pipeline, err := New(Config{Concurrency: 1}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1}, client, fakeProber{}, nil, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil || batch.Failed != 1 {
 		t.Fatalf("failed batch = %#v, %v", batch, err)

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/livewyer-ops/tamsin/internal/media"
+	"github.com/livewyer-ops/tamsin/internal/progress"
 	"github.com/livewyer-ops/tamsin/internal/source"
 	"github.com/livewyer-ops/tamsin/internal/tams"
 	"github.com/livewyer-ops/tamsin/internal/tamstime"
@@ -58,7 +59,40 @@ func (*presentationCountingProber) ProbeFirstKeyFrame(context.Context, string, m
 	return new(big.Rat), true, nil
 }
 
+// mustNew builds a Pipeline for a test that expects its configuration to be
+// accepted.
+func mustNew(tb testing.TB, config Config, client TAMSClient, prober media.Prober, segmenter media.Segmenter, logger *slog.Logger, reporter progress.Reporter) *Pipeline {
+	tb.Helper()
+	pipeline, err := New(config, client, prober, segmenter, logger, reporter)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return pipeline
+}
+
+// proberDefaults answers the Prober questions that most test probers do not
+// vary: a supported FFprobe, nothing to add to a presentation, no leading
+// pictures, and a key frame at the start of each stream.
+type proberDefaults struct{}
+
+func (proberDefaults) Version(context.Context) (string, error) {
+	return "ffprobe version 5.1 test", nil
+}
+
+func (proberDefaults) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
+}
+
+func (proberDefaults) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (proberDefaults) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
+}
+
 type fakeProber struct {
+	proberDefaults
 	failSuffix string
 }
 
@@ -76,7 +110,7 @@ func (p fakeProber) Probe(_ context.Context, filename string) (media.Probe, erro
 
 // muxedProber reports a container holding two elementary streams, which is what
 // drives the multi-essence Flow path.
-type muxedProber struct{}
+type muxedProber struct{ proberDefaults }
 
 func (muxedProber) Probe(context.Context, string) (media.Probe, error) {
 	return media.Probe{
@@ -88,27 +122,11 @@ func (muxedProber) Probe(context.Context, string) (media.Probe, error) {
 	}, nil
 }
 
-func (muxedProber) Version(context.Context) (string, error) {
-	return "ffprobe version 5.1 test", nil
-}
-
 func (p muxedProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
 }
 
-func (muxedProber) ProbePresentation(context.Context, string, *media.Probe) error {
-	return nil
-}
-
-func (muxedProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
-	return false, nil
-}
-
-func (muxedProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
-	return new(big.Rat), true, nil
-}
-
-type multiAudioProber struct{}
+type multiAudioProber struct{ proberDefaults }
 
 func (multiAudioProber) Probe(context.Context, string) (media.Probe, error) {
 	return media.Probe{
@@ -121,27 +139,11 @@ func (multiAudioProber) Probe(context.Context, string) (media.Probe, error) {
 	}, nil
 }
 
-func (multiAudioProber) Version(context.Context) (string, error) {
-	return "ffprobe version 5.1 test", nil
-}
-
 func (p multiAudioProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
 }
 
-func (multiAudioProber) ProbePresentation(context.Context, string, *media.Probe) error {
-	return nil
-}
-
-func (multiAudioProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
-	return false, nil
-}
-
-func (multiAudioProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
-	return new(big.Rat), true, nil
-}
-
-type fourEssenceProber struct{}
+type fourEssenceProber struct{ proberDefaults }
 
 func (fourEssenceProber) Probe(context.Context, string) (media.Probe, error) {
 	return media.Probe{
@@ -155,42 +157,12 @@ func (fourEssenceProber) Probe(context.Context, string) (media.Probe, error) {
 	}, nil
 }
 
-func (fourEssenceProber) Version(context.Context) (string, error) {
-	return "ffprobe version 5.1 test", nil
-}
-
 func (p fourEssenceProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
 }
 
-func (fourEssenceProber) ProbePresentation(context.Context, string, *media.Probe) error {
-	return nil
-}
-
-func (fourEssenceProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
-	return false, nil
-}
-
-func (fourEssenceProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
-	return new(big.Rat), true, nil
-}
-
-func (fakeProber) Version(context.Context) (string, error) {
-	return "ffprobe version 5.1 test", nil
-}
-
 func (p fakeProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
-}
-
-func (fakeProber) ProbePresentation(context.Context, string, *media.Probe) error {
-	return nil
-}
-
-func (fakeProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) { return false, nil }
-
-func (fakeProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
-	return new(big.Rat), true, nil
 }
 
 type oldVersionProber struct{ fakeProber }
@@ -199,7 +171,7 @@ func (oldVersionProber) Version(context.Context) (string, error) {
 	return "ffprobe version 4.4 unsupported", nil
 }
 
-type unknownContainerProber struct{}
+type unknownContainerProber struct{ proberDefaults }
 
 func (unknownContainerProber) Probe(context.Context, string) (media.Probe, error) {
 	return media.Probe{
@@ -210,40 +182,27 @@ func (unknownContainerProber) Probe(context.Context, string) (media.Probe, error
 	}, nil
 }
 
-func (unknownContainerProber) Version(context.Context) (string, error) {
-	return "ffprobe version 5.1 test", nil
-}
-
 func (p unknownContainerProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
-}
-
-func (unknownContainerProber) ProbePresentation(context.Context, string, *media.Probe) error {
-	return nil
-}
-
-func (unknownContainerProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
-	return false, nil
-}
-
-func (unknownContainerProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
-	return new(big.Rat), true, nil
 }
 
 type fakeSegmenter struct{}
 
 func (fakeSegmenter) Segment(_ context.Context, request media.SegmentRequest, sink media.SegmentSink) error {
+	return writeSegments(request, sink, 2, 1)
+}
+
+// writeSegments stands in for a render: for each requested stream it writes
+// that many files of that many bytes and reports each to the sink.
+func writeSegments(request media.SegmentRequest, sink media.SegmentSink, objects, size int) error {
 	for _, streamIndex := range request.StreamIndices {
 		prefix := "segment-"
 		if streamIndex != media.AllStreams {
-			prefix = "essence-" + strconv.Itoa(streamIndex) + "-"
+			prefix = fmt.Sprintf("essence-%d-", streamIndex)
 		}
-		paths := []string{
-			filepath.Join(request.Directory, prefix+"00000000.mp4"),
-			filepath.Join(request.Directory, prefix+"00000001.mp4"),
-		}
-		for index, path := range paths {
-			if err := os.WriteFile(path, []byte{byte(index + 1)}, 0o600); err != nil {
+		for index := range objects {
+			path := filepath.Join(request.Directory, fmt.Sprintf("%s%08d.mp4", prefix, index))
+			if err := os.WriteFile(path, bytes.Repeat([]byte{byte(index + 1)}, size), 0o600); err != nil {
 				return err
 			}
 			record := media.SegmentRecord{StreamIndex: streamIndex, Path: path}
@@ -885,28 +844,7 @@ type sizedSegmenter struct {
 }
 
 func (s sizedSegmenter) Segment(_ context.Context, request media.SegmentRequest, sink media.SegmentSink) error {
-	for _, streamIndex := range request.StreamIndices {
-		prefix := "segment-"
-		if streamIndex != media.AllStreams {
-			prefix = fmt.Sprintf("essence-%d-", streamIndex)
-		}
-		for index := range s.objects {
-			path := filepath.Join(request.Directory, fmt.Sprintf("%s%08d.mp4", prefix, index))
-			if err := os.WriteFile(path, bytes.Repeat([]byte{byte(index + 1)}, s.bytes), 0o600); err != nil {
-				return err
-			}
-			record := media.SegmentRecord{StreamIndex: streamIndex, Path: path}
-			if request.Duration > 0 {
-				record.Timed = true
-				record.Start = int64(index) * int64(request.Duration)
-				record.End = record.Start + int64(request.Duration)
-			}
-			if err := sink(record); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return writeSegments(request, sink, s.objects, s.bytes)
 }
 
 func (sizedSegmenter) Version(context.Context) (string, error) {
@@ -915,7 +853,7 @@ func (sizedSegmenter) Version(context.Context) (string, error) {
 
 // essenceBitRateProber reports an essence bit rate that does not match what the
 // Segments will imply, so a test can tell which of the two was written.
-type essenceBitRateProber struct{}
+type essenceBitRateProber struct{ proberDefaults }
 
 func (essenceBitRateProber) Probe(context.Context, string) (media.Probe, error) {
 	return media.Probe{
@@ -934,18 +872,6 @@ func (essenceBitRateProber) Version(context.Context) (string, error) {
 
 func (p essenceBitRateProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
-}
-
-func (essenceBitRateProber) ProbePresentation(context.Context, string, *media.Probe) error {
-	return nil
-}
-
-func (essenceBitRateProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
-	return false, nil
-}
-
-func (essenceBitRateProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
-	return new(big.Rat), true, nil
 }
 
 type versionedCountingSegmenter struct {

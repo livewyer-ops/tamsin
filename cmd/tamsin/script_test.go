@@ -29,14 +29,40 @@ func TestMain(m *testing.M) {
 	})
 }
 
+// ffprobeStub answers as FFprobe would for one H.264 video stream in an MP4
+// container. Scripts reach it as $FFPROBE_STUB.
+const ffprobeStub = `#!/bin/sh
+if [ "$1" = "-version" ]; then echo "ffprobe version 5.1 stub"; exit 0; fi
+for arg in "$@"; do
+  if [ "$arg" = "-show_frames" ]; then
+    printf '%s\n' \
+      'stream_index=0|best_effort_timestamp=0' \
+      'stream_index=0|best_effort_timestamp=40' \
+      'stream_index=0|best_effort_timestamp=80'
+    exit 0
+  fi
+done
+cat <<'JSON'
+{"streams":[{"index":0,"codec_name":"h264","codec_type":"video","width":64,"height":64,"avg_frame_rate":"25/1","r_frame_rate":"25/1","start_time":"0.000000","duration":"1.000000"}],"format":{"tags":{"major_brand":"isom"},"format_name":"mov,mp4,m4a,3gp,3g2,mj2","start_time":"0.000000","duration":"1.000000"}}
+JSON
+`
+
 // Run `go test ./cmd/tamsin -update` to refresh golden output after an
 // intentional change.
 func TestScript(t *testing.T) {
+	// The stub is written once, before the scripts start in parallel: a
+	// script that forked while another's executable was still open for
+	// writing could leave that one unable to run it.
+	stub := filepath.Join(t.TempDir(), "ffprobe")
+	if err := os.WriteFile(stub, []byte(ffprobeStub), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	testscript.Run(t, testscript.Params{
 		Dir:                 filepath.Join("testdata", "script"),
 		UpdateScripts:       *update,
 		RequireExplicitExec: true,
 		Setup: func(env *testscript.Env) error {
+			env.Setenv("FFPROBE_STUB", stub)
 			// Isolate scripts from the operator's configuration and credentials.
 			env.Setenv("HOME", env.WorkDir)
 			env.Setenv("XDG_CONFIG_HOME", filepath.Join(env.WorkDir, "config"))

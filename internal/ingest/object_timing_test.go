@@ -78,11 +78,8 @@ func TestEmittedObjectPresentationTiming(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-				pipeline, err := New(Config{Concurrency: 1, SegmentDuration: 3 * time.Second, Start: start},
+				pipeline := mustNew(t, Config{Concurrency: 1, SegmentDuration: 3 * time.Second, Start: start},
 					newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-				if err != nil {
-					t.Fatal(err)
-				}
 				rolling := newRollingObjectPreparer(pipeline, "test-flow", stream, start, start)
 				streamed := newRollingObjectPreparer(pipeline, "test-flow", stream, start, start)
 				var previous *preparedObject
@@ -189,11 +186,8 @@ func TestMP4SegmentsFollowTheNominalRate(t *testing.T) {
 				t.Fatalf("expected four 3 s segments, got %d", len(records))
 			}
 			const start = int64(5 * time.Second)
-			pipeline, err := New(Config{Concurrency: 1, SegmentDuration: 3 * time.Second, Start: start},
+			pipeline := mustNew(t, Config{Concurrency: 1, SegmentDuration: 3 * time.Second, Start: start},
 				newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			objects, err := placeRendered(ctx, pipeline, media.FlowInfo{}, stream, start, records)
 			if err != nil {
 				t.Fatal(err)
@@ -284,11 +278,8 @@ func TestOpenGOPSegmentsAbut(t *testing.T) {
 				t.Skip("this FFmpeg build wrote no leading-frame gaps into the manifest")
 			}
 			const start = int64(time.Minute)
-			pipeline, err := New(Config{Concurrency: 1, SegmentDuration: 2 * time.Second, Start: start},
+			pipeline := mustNew(t, Config{Concurrency: 1, SegmentDuration: 2 * time.Second, Start: start},
 				newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			probe, err := pipeline.probePreparedInput(ctx, stagedFile{path: input})
 			if err != nil {
 				t.Fatal(err)
@@ -334,11 +325,8 @@ func TestOpenGOPSegmentsAbut(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			pipeline, err := New(Config{Concurrency: 1, SegmentDuration: 2 * time.Second},
+			pipeline := mustNew(t, Config{Concurrency: 1, SegmentDuration: 2 * time.Second},
 				newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			probe, err := pipeline.probePreparedInput(ctx, stagedFile{path: mp4})
 			if err != nil {
 				t.Fatal(err)
@@ -382,11 +370,8 @@ func TestMidGOPCaptureIsAnchoredOnItsFirstKeyFrame(t *testing.T) {
 		t.Fatalf("fixture: %v: %s", err, output)
 	}
 	const start = int64(time.Minute)
-	pipeline, err := New(Config{Concurrency: 1, SegmentDuration: 2 * time.Second, Start: start},
+	pipeline := mustNew(t, Config{Concurrency: 1, SegmentDuration: 2 * time.Second, Start: start},
 		newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	probe, err := pipeline.probePreparedInput(ctx, stagedFile{path: input})
 	if err != nil {
 		t.Fatal(err)
@@ -671,12 +656,9 @@ func TestMPEGTSSegmentsFollowTheTransportClock(t *testing.T) {
 				if fixture.format == "urn:x-nmos:format:audio" {
 					stream = "a:0"
 				}
-				pipeline, err := New(Config{Start: start, TempDirectory: t.TempDir(), SegmentDuration: fixture.cut,
+				pipeline := mustNew(t, Config{Start: start, TempDirectory: t.TempDir(), SegmentDuration: fixture.cut,
 					SegmentFormat: media.SegmentFormatMPEGTS, EssenceStorage: storage, FFmpegArgs: fixture.arguments, FlowMetadata: fixture.metadata},
 					client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-				if err != nil {
-					t.Fatal(err)
-				}
 				batch, err := pipeline.Run(t.Context(), []source.Item{localSource(fixture.filename)})
 				if err != nil {
 					t.Fatal(err)

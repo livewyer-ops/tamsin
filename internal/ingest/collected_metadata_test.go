@@ -3,9 +3,6 @@ package ingest
 import (
 	"bytes"
 	"context"
-	"math/big"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -34,16 +31,10 @@ func (p measuredProber) ProbeObject(ctx context.Context, filename string) (media
 
 func TestSegmentRegistrationCarriesKeyFramesAndLastDuration(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.ts")
-	if err := os.WriteFile(filename, []byte("muxed-media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.ts", "muxed-media")
 	client := newFakeClient()
-	pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback, SegmentDuration: time.Second},
+	pipeline := mustNew(t, Config{Concurrency: 1, VerificationMode: VerificationReadback, SegmentDuration: time.Second},
 		client, measuredProber{}, fakeSegmenter{}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -69,20 +60,14 @@ func TestCollectedFlowMetadataTargetsOneEssence(t *testing.T) {
 	for _, storage := range []media.EssenceStorage{media.EssenceStorageMuxed, media.EssenceStorageIndependent} {
 		t.Run(string(storage), func(t *testing.T) {
 			t.Parallel()
-			filename := filepath.Join(t.TempDir(), "fixture.ts")
-			if err := os.WriteFile(filename, []byte("muxed-media"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			filename := writeFixture(t, "fixture.ts", "muxed-media")
 			client := newFakeClient()
-			pipeline, err := New(Config{
+			pipeline := mustNew(t, Config{
 				Concurrency: 1, VerificationMode: VerificationReadback, SegmentDuration: time.Second, EssenceStorage: storage,
 				CollectedFlowMetadata: map[string]tams.Flow{
 					"audio": {"codec": "audio/x-smpte302m", "tags": map[string]any{"note": "operator"}},
 				},
 			}, client, muxedProber{}, fakeSegmenter{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 			if err != nil {
 				t.Fatal(err)
@@ -121,18 +106,12 @@ func TestCollectedFlowMetadataRejectsUnknownRolesAndIdentityFields(t *testing.T)
 	if err == nil || !strings.Contains(err.Error(), "--collected-flow-metadata /audio /id") {
 		t.Fatalf("identity override accepted: %v", err)
 	}
-	filename := filepath.Join(t.TempDir(), "fixture.ts")
-	if err := os.WriteFile(filename, []byte("muxed-media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.ts", "muxed-media")
 	client := newFakeClient()
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, SegmentDuration: time.Second,
 		CollectedFlowMetadata: map[string]tams.Flow{"audio 1": {"codec": "audio/x-smpte302m"}},
 	}, client, muxedProber{}, fakeSegmenter{}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +127,7 @@ func TestCollectedFlowMetadataRejectsUnknownRolesAndIdentityFields(t *testing.T)
 }
 
 // timecodeProber reports an MP4 file whose last track is timecode.
-type timecodeProber struct{}
+type timecodeProber struct{ proberDefaults }
 
 func (timecodeProber) Probe(context.Context, string) (media.Probe, error) {
 	return media.Probe{
@@ -161,22 +140,8 @@ func (timecodeProber) Probe(context.Context, string) (media.Probe, error) {
 	}, nil
 }
 
-func (timecodeProber) Version(context.Context) (string, error) {
-	return "ffprobe version 5.1 test", nil
-}
-
 func (p timecodeProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
-}
-
-func (timecodeProber) ProbePresentation(context.Context, string, *media.Probe) error { return nil }
-
-func (timecodeProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
-	return false, nil
-}
-
-func (timecodeProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
-	return new(big.Rat), true, nil
 }
 
 func TestEssenceCountIgnoresUndescribableDataTracks(t *testing.T) {
@@ -198,7 +163,7 @@ func TestEssenceCountIgnoresUndescribableDataTracks(t *testing.T) {
 
 // offAirProber reports a transport stream as recorded off air: video, two
 // audio services, SCTE-35 cues and teletext.
-type offAirProber struct{}
+type offAirProber struct{ proberDefaults }
 
 func (offAirProber) Probe(context.Context, string) (media.Probe, error) {
 	return media.Probe{
@@ -213,42 +178,24 @@ func (offAirProber) Probe(context.Context, string) (media.Probe, error) {
 	}, nil
 }
 
-func (offAirProber) Version(context.Context) (string, error) { return "ffprobe version 5.1 test", nil }
-
 func (p offAirProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
-}
-
-func (offAirProber) ProbePresentation(context.Context, string, *media.Probe) error { return nil }
-
-func (offAirProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
-	return false, nil
-}
-
-func (offAirProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
-	return new(big.Rat), true, nil
 }
 
 func TestUnqualifiedTracksRequirePreserve(t *testing.T) {
 	for name, prober := range map[string]media.Prober{"timecode": timecodeProber{}, "off-air": offAirProber{}} {
 		for _, profileName := range []string{"preserve", "essence-segments", "muxed-segments", "mpegts-segments"} {
 			t.Run(name+"/"+profileName, func(t *testing.T) {
-				filename := filepath.Join(t.TempDir(), "fixture.bin")
-				if err := os.WriteFile(filename, []byte("original bytes including ancillary tracks"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				filename := writeFixture(t, "fixture.bin", "original bytes including ancillary tracks")
 				client := newFakeClient()
 				segmenter := &recordingSegmenter{}
 				profile, err := ResolveProfile(profileName, ProfileOverrides{})
 				if err != nil {
 					t.Fatal(err)
 				}
-				pipeline, err := New(Config{Concurrency: 1, SegmentDuration: profile.SegmentDuration,
+				pipeline := mustNew(t, Config{Concurrency: 1, SegmentDuration: profile.SegmentDuration,
 					SegmentFormat: profile.SegmentFormat, EssenceStorage: profile.EssenceStorage, VerificationMode: VerificationReadback},
 					client, prober, segmenter, discardLogger(), nil)
-				if err != nil {
-					t.Fatal(err)
-				}
 				batch, err := pipeline.Run(t.Context(), []source.Item{localSource(filename)})
 				if err != nil {
 					t.Fatal(err)

@@ -3,8 +3,6 @@ package ingest
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -36,20 +34,14 @@ func TestNoCorruptSegmentSurvivesVerification(t *testing.T) {
 	for _, transfers := range []int{1, 4, 16} {
 		t.Run("transfers="+strconv.Itoa(transfers), func(t *testing.T) {
 			t.Parallel()
-			filename := filepath.Join(t.TempDir(), "fixture.mp4")
-			if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			filename := writeFixture(t, "fixture.mp4", "media")
 			client := newFakeClient()
 			client.corruptOnUpload = true
 
-			pipeline, err := New(Config{
+			pipeline := mustNew(t, Config{
 				Concurrency: 1, Transfers: transfers, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 				EssenceStorage: media.EssenceStorageMuxed,
 			}, client, fakeProber{}, countingSegmenter{objects: 16}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 			if err != nil {
 				t.Fatalf("run: %v", err)
@@ -74,20 +66,14 @@ func TestNoCorruptSegmentSurvivesVerification(t *testing.T) {
 
 func TestRollingResultRetainsActionRequiredObjectWithoutOptIn(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	client.corruptOnUpload = true
 	client.deleteSegmentsErr = errors.New("flow is read-only")
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 1, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: 2}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -104,10 +90,7 @@ func TestRollingResultRetainsActionRequiredObjectWithoutOptIn(t *testing.T) {
 // Cancellation must not be a route to leaving media in the store unverified.
 func TestCancellationRetractsRegisteredSegments(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	// The uploads are corrupt, so any Segment still registered at the end is one
 	// nobody verified. With healthy bytes a surviving Segment would be correct,
@@ -118,13 +101,10 @@ func TestCancellationRetractsRegisteredSegments(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	client.onDownload = func() { cancel() }
 
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 1, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: 8}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	_, _ = pipeline.Run(ctx, []source.Item{localSource(filename)})
 
 	if stranded := strandedSegments(client); stranded != 0 {
@@ -175,10 +155,7 @@ func TestVerificationCleanupUsesOneSharedDeadline(t *testing.T) {
 // could collectively exceed it.
 func TestResumeVerificationUsesTransferBudget(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	// Latency makes overlap observable; without it a check can finish before the
 	// next begins and a peak of one would be legitimate.
 	client := newCountingClient(2 * time.Millisecond)
@@ -186,10 +163,7 @@ func TestResumeVerificationUsesTransferBudget(t *testing.T) {
 		Concurrency: 1, Transfers: 4, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}
-	pipeline, err := New(config, client, fakeProber{}, countingSegmenter{objects: 16}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, config, client, fakeProber{}, countingSegmenter{objects: 16}, discardLogger(), nil)
 	item := localSource(filename)
 	if _, err := pipeline.Run(context.Background(), []source.Item{item}); err != nil {
 		t.Fatal(err)
@@ -197,10 +171,7 @@ func TestResumeVerificationUsesTransferBudget(t *testing.T) {
 
 	// Everything is stored now, so the second run is a pure resume.
 	client.peakTransfers.Store(0)
-	resumePipeline, err := New(config, client, fakeProber{}, countingSegmenter{objects: 16}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resumePipeline := mustNew(t, config, client, fakeProber{}, countingSegmenter{objects: 16}, discardLogger(), nil)
 	batch, err := resumePipeline.Run(context.Background(), []source.Item{item})
 	if err != nil {
 		t.Fatal(err)
@@ -221,17 +192,11 @@ func TestResumeVerificationUsesTransferBudget(t *testing.T) {
 
 func TestFailedResumeVerificationUpdatesObjectTerminalState(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	config := Config{Concurrency: 1, Transfers: 1, VerificationMode: VerificationReadback}
 	item := localSource(filename)
-	first, err := New(config, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := mustNew(t, config, client, fakeProber{}, nil, discardLogger(), nil)
 	if batch, runErr := first.Run(context.Background(), []source.Item{item}); runErr != nil || batch.Failed != 0 {
 		t.Fatalf("initial ingest: batch=%#v error=%v", batch, runErr)
 	}
@@ -242,10 +207,7 @@ func TestFailedResumeVerificationUpdatesObjectTerminalState(t *testing.T) {
 	}
 	client.lock.Unlock()
 
-	resume, err := New(config, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resume := mustNew(t, config, client, fakeProber{}, nil, discardLogger(), nil)
 	batch, runErr := resume.Run(context.Background(), []source.Item{item})
 	if runErr != nil {
 		t.Fatal(runErr)
@@ -259,39 +221,6 @@ func TestFailedResumeVerificationUpdatesObjectTerminalState(t *testing.T) {
 		t.Fatalf("resumed Object retained a stale status after retraction: %#v", root)
 	}
 	assertBatchResultSchema(t, batch)
-}
-
-// TestFailedRetractionIsReportedDistinctly keeps the operator-actionable case
-// separable: a Segment that could not be withdrawn needs manual cleanup, and
-// must not read the same as one that was.
-func TestFailedRetractionIsReportedDistinctly(t *testing.T) {
-	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	client := newFakeClient()
-	client.corruptOnUpload = true
-	client.deleteSegmentsErr = errors.New("flow is read-only")
-
-	pipeline, err := New(Config{
-		Concurrency: 1, Transfers: 2, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
-		EssenceStorage: media.EssenceStorageMuxed,
-	}, client, fakeProber{}, countingSegmenter{objects: 4}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
-	if err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	message := batch.Results[0].Error
-	if !strings.Contains(message, "could not be retracted") {
-		t.Fatalf("a failed retraction must be reported as such, got %q", message)
-	}
-	if !strings.Contains(message, "SHA-256 mismatch") {
-		t.Fatalf("the integrity failure must survive a failed retraction, got %q", message)
-	}
 }
 
 // A partial bulk response names failed Segments despite its success status.
@@ -312,21 +241,15 @@ func TestPartialBulkRegistrationLeavesNothingUnchecked(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			filename := filepath.Join(t.TempDir(), "fixture.mp4")
-			if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			filename := writeFixture(t, "fixture.mp4", "media")
 			client := newFakeClient()
 			client.registerSegmentsErr = errors.New("2 of 8 segments failed to register")
 			client.registerSegmentsCommit = testCase.committed
 
-			pipeline, err := New(Config{
+			pipeline := mustNew(t, Config{
 				Concurrency: 1, Transfers: 8, VerificationMode: testCase.verify, SegmentDuration: time.Second,
 				EssenceStorage: media.EssenceStorageMuxed,
 			}, client, fakeProber{}, countingSegmenter{objects: 8}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 			if err != nil {
 				t.Fatalf("run: %v", err)
@@ -387,21 +310,15 @@ func TestPartialBulkRegistrationLeavesNothingUnchecked(t *testing.T) {
 // discarding correct work.
 func TestFullBulkCommitWithALostResponseIsNotTreatedAsFailure(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	client.registerSegmentsErr = errors.New("connection reset before the response arrived")
 	client.registerSegmentsCommit = -1 // the whole batch commits
 
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 4, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: 4}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -424,10 +341,7 @@ func TestVerificationGoroutinesFollowTheBudgetNotTheWork(t *testing.T) {
 		// Allow scheduling noise while rejecting one goroutine per Object.
 		headroom = 250
 	)
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 
 	client := newFakeClient()
 	var peak atomic.Int64
@@ -438,13 +352,10 @@ func TestVerificationGoroutinesFollowTheBudgetNotTheWork(t *testing.T) {
 	}
 
 	baseline := runtime.NumGoroutine()
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: transfers, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: objects}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)}); err != nil {
 		t.Fatal(err)
 	}

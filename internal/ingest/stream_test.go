@@ -106,10 +106,7 @@ func TestStreamedContainersAndEssenceLayouts(t *testing.T) {
 			item, _ := serveStreamFixture(t, filename, 0)
 			client := newFakeClient()
 			config := Config{InputMode: InputStream, SegmentDuration: 2 * time.Second, SegmentFormat: tc.format, EssenceStorage: tc.storage, TempDirectory: t.TempDir(), VerificationMode: VerificationReadback}
-			pipeline, err := New(config, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+			pipeline := mustNew(t, config, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
 			batch, err := pipeline.Run(t.Context(), []source.Item{item})
 			if err != nil || batch.Succeeded != 1 {
 				t.Fatalf("run: %v, results: %+v", err, batch.Results)
@@ -165,10 +162,7 @@ func TestStreamingRegistersBeforeReadingWholeInputLargerThanBudget(t *testing.T)
 			client.onRegisterSegments = func() { firstRead.CompareAndSwap(0, read.Load()) }
 			config := Config{InputMode: InputStream, SegmentDuration: 10 * time.Second, EssenceStorage: media.EssenceStorageMuxed,
 				StagingByteBudget: 4 << 20, TempDirectory: t.TempDir()}
-			pipeline, err := New(config, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+			pipeline := mustNew(t, config, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
 			batch, err := pipeline.Run(t.Context(), []source.Item{item})
 			if err != nil || batch.Succeeded != 1 {
 				t.Fatalf("run: %v, results: %+v", err, batch.Results)
@@ -190,10 +184,7 @@ func TestStreamModeFallbackAndPassthrough(t *testing.T) {
 	}
 	for _, mode := range []InputMode{InputAuto, InputStream, InputStage} {
 		client := newFakeClient()
-		pipeline, err := New(Config{InputMode: mode, SegmentDuration: time.Second}, client, fakeProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		pipeline := mustNew(t, Config{InputMode: mode, SegmentDuration: time.Second}, client, fakeProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
 		batch, err := pipeline.Run(t.Context(), items)
 		if err != nil || (batch.Failed == 1) != (mode == InputStream) {
 			t.Fatalf("mode=%s: %v, %+v", mode, err, batch.Results)
@@ -228,11 +219,8 @@ func TestStreamedVariableCadenceKeepsOnlyAValidPrefix(t *testing.T) {
 			item, _ := serveStreamFixture(t, filename, 0)
 			client := newFakeClient()
 			client.serviceDocument = map[string]any{"api_version": "8.2", "min_object_timeout": "300:0", "min_presigned_url_timeout": "30:0"}
-			pipeline, err := New(Config{InputMode: InputStream, SegmentDuration: 2 * time.Second, EssenceStorage: media.EssenceStorageMuxed, TempDirectory: t.TempDir()},
+			pipeline := mustNew(t, Config{InputMode: InputStream, SegmentDuration: 2 * time.Second, EssenceStorage: media.EssenceStorageMuxed, TempDirectory: t.TempDir()},
 				client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			batch, err := pipeline.Run(t.Context(), []source.Item{item})
 			if err != nil || (batch.Failed == 1) != tc.fail {
 				t.Fatalf("run=%v, results=%+v", err, batch.Results)
@@ -311,10 +299,7 @@ func TestStreamingFallsBackBeforeMutationWhenInitialCadenceIsUnknown(t *testing.
 	for _, mode := range []InputMode{InputStream, InputAuto} {
 		client := newFakeClient()
 		config := Config{InputMode: mode, SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed, TempDirectory: t.TempDir()}
-		pipeline, err := New(config, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		pipeline := mustNew(t, config, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
 		batch, err := pipeline.Run(t.Context(), []source.Item{item})
 		if err != nil || (batch.Failed == 1) != (mode == InputStream) {
 			t.Fatalf("mode=%s run=%v results=%+v", mode, err, batch.Results)
@@ -360,11 +345,8 @@ func TestStreamFallbackCannotHideAnUpstreamFailure(t *testing.T) {
 		},
 	}
 	client := newFakeClient()
-	pipeline, err := New(Config{InputMode: InputAuto, SegmentDuration: time.Second, TempDirectory: t.TempDir()},
+	pipeline := mustNew(t, Config{InputMode: InputAuto, SegmentDuration: time.Second, TempDirectory: t.TempDir()},
 		client, unavailableAfterReadProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(t.Context(), []source.Item{item})
 	if err != nil || batch.Failed != 1 || staged.Load() || client.putFlowCalls != 0 {
 		t.Fatalf("run=%v staged=%v writes=%d results=%+v", err, staged.Load(), client.putFlowCalls, batch.Results)
@@ -387,11 +369,8 @@ func TestExplicitStreamRefusalReportsStableCode(t *testing.T) {
 			},
 		}
 		client := newFakeClient()
-		pipeline, err := New(Config{InputMode: mode, SegmentDuration: time.Second, TempDirectory: t.TempDir()},
+		pipeline := mustNew(t, Config{InputMode: mode, SegmentDuration: time.Second, TempDirectory: t.TempDir()},
 			client, fakeProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
 		batch, err := pipeline.Run(t.Context(), []source.Item{item})
 		if err != nil {
 			t.Fatal(err)
@@ -448,11 +427,8 @@ func TestStreamedSegmentWithoutCadenceEvidenceKeepsTheDeclaredPlan(t *testing.T)
 		},
 	}
 	client := newFakeClient()
-	pipeline, err := New(Config{InputMode: InputStream, SegmentDuration: time.Second, TempDirectory: t.TempDir()},
+	pipeline := mustNew(t, Config{InputMode: InputStream, SegmentDuration: time.Second, TempDirectory: t.TempDir()},
 		client, cadenceGapProber{gap: "segment-00000002.mp4"}, countingSegmenter{objects: 4}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(t.Context(), []source.Item{item})
 	if err != nil || batch.Failed != 0 || client.uploads != 4 {
 		t.Fatalf("run=%v uploads=%d results=%+v", err, client.uploads, batch.Results)
@@ -464,12 +440,9 @@ func TestStagedFlowStreamRefusalAndAutomaticFallback(t *testing.T) {
 	item, _ := serveStreamFixture(t, filename, 0)
 	client := newFakeClient()
 	for _, mode := range []InputMode{InputStage, InputStream, InputAuto} {
-		pipeline, err := New(Config{FlowID: "2233e4e2-796e-4c40-990a-2b23bb7dce32", InputMode: mode,
+		pipeline := mustNew(t, Config{FlowID: "2233e4e2-796e-4c40-990a-2b23bb7dce32", InputMode: mode,
 			SegmentDuration: time.Second, TempDirectory: t.TempDir()},
 			client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
 		writes, uploads := client.putFlowCalls, client.uploads
 		batch, err := pipeline.Run(t.Context(), []source.Item{item})
 		if err != nil {
@@ -520,12 +493,9 @@ func TestStreamedSegmentsAcceptOperatorSuppliedCodec(t *testing.T) {
 		},
 	}
 	client := newFakeClient()
-	pipeline, err := New(Config{InputMode: InputStream, SegmentDuration: time.Second, TempDirectory: t.TempDir(),
+	pipeline := mustNew(t, Config{InputMode: InputStream, SegmentDuration: time.Second, TempDirectory: t.TempDir(),
 		FlowMetadata: map[string]any{"codec": "video/x-dnxhd"}},
 		client, unsupportedCodecProber{}, countingSegmenter{objects: 2}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(t.Context(), []source.Item{item})
 	if err != nil || batch.Failed != 0 || client.uploads != 2 {
 		t.Fatalf("run=%v uploads=%d results=%+v", err, client.uploads, batch.Results)
@@ -544,10 +514,7 @@ func TestGeneratedLabelUsesTheSameDigestFormForEveryInputKind(t *testing.T) {
 func TestStreamedMP4RetainsFixedCadence(t *testing.T) {
 	filename := streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=7", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=7", "-c:v", "libx264", "-g", "50", "-bf", "0", "-c:a", "aac")
 	item, _ := serveStreamFixture(t, filename, 0)
-	pipeline, err := New(Config{InputMode: InputStream, SegmentDuration: 2 * time.Second, EssenceStorage: media.EssenceStorageMuxed, TempDirectory: t.TempDir()}, newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{InputMode: InputStream, SegmentDuration: 2 * time.Second, EssenceStorage: media.EssenceStorageMuxed, TempDirectory: t.TempDir()}, newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
 	batch, err := pipeline.Run(t.Context(), []source.Item{item})
 	if err != nil || batch.Succeeded != 1 {
 		t.Fatalf("MP4 cadence: %v, %+v", err, batch.Results)
@@ -559,10 +526,7 @@ func TestStreamedCollectedAudioOverrideMustMatchRenderedChannels(t *testing.T) {
 	item, _ := serveStreamFixture(t, path, 0)
 	for _, layout := range []media.EssenceStorage{media.EssenceStorageMuxed, media.EssenceStorageIndependent} {
 		c := newFakeClient()
-		p, err := New(Config{InputMode: InputStream, SegmentDuration: time.Second, EssenceStorage: layout, CollectedFlowMetadata: map[string]tams.Flow{"audio": {"essence_parameters": map[string]any{"channels": 2, "sample_rate": 48000}}}}, c, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		p := mustNew(t, Config{InputMode: InputStream, SegmentDuration: time.Second, EssenceStorage: layout, CollectedFlowMetadata: map[string]tams.Flow{"audio": {"essence_parameters": map[string]any{"channels": 2, "sample_rate": 48000}}}}, c, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
 		b, err := p.Run(t.Context(), []source.Item{item})
 		if err != nil || b.Failed != 1 || !strings.Contains(b.Results[0].Error, "/essence_parameters/channels") || len(c.flows) != 0 || c.allocations != 0 {
 			t.Fatalf("%s accepted contradicted audio metadata or mutated the graph: %v %+v", layout, err, b.Results)

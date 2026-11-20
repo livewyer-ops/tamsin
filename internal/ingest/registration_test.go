@@ -23,11 +23,8 @@ func registrationFixture(t *testing.T, client *fakeClient, objects, transfers in
 	if verify {
 		verification = VerificationReadback
 	}
-	pipeline, err := New(Config{Concurrency: 1, Transfers: transfers, VerificationMode: verification},
+	pipeline := mustNew(t, Config{Concurrency: 1, Transfers: transfers, VerificationMode: verification},
 		client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	directory := t.TempDir()
 	prepared := make([]preparedObject, objects)
 	results := make([]ObjectResult, objects)
@@ -415,10 +412,7 @@ func TestRegistrationFailureKeepsItsCodeWhereverItHappens(t *testing.T) {
 					config.SegmentDuration, config.EssenceStorage = time.Second, media.EssenceStorageMuxed
 					segmenter = &rollingBoundSegmenter{objects: path.objects}
 				}
-				pipeline, err := New(config, client, fakeProber{}, segmenter, discardLogger(), nil)
-				if err != nil {
-					t.Fatal(err)
-				}
+				pipeline := mustNew(t, config, client, fakeProber{}, segmenter, discardLogger(), nil)
 				batch, err := pipeline.Run(t.Context(), []source.Item{localSource(input)})
 				if err != nil {
 					t.Fatal(err)

@@ -3,9 +3,7 @@ package ingest
 import (
 	"context"
 	"errors"
-	"math/big"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,30 +12,17 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/source"
 )
 
-type profilePolicyProber struct{ probe media.Probe }
+type profilePolicyProber struct {
+	proberDefaults
+	probe media.Probe
+}
 
 func (p profilePolicyProber) Probe(context.Context, string) (media.Probe, error) {
 	return p.probe, nil
 }
 
-func (profilePolicyProber) Version(context.Context) (string, error) {
-	return "ffprobe version 5.1 test", nil
-}
-
 func (p profilePolicyProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
-}
-
-func (profilePolicyProber) ProbePresentation(context.Context, string, *media.Probe) error {
-	return nil
-}
-
-func (profilePolicyProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
-	return false, nil
-}
-
-func (profilePolicyProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
-	return new(big.Rat), true, nil
 }
 
 func TestNamedProfilesAreVersionedMediaContracts(t *testing.T) {
@@ -71,22 +56,16 @@ func TestNamedProfilesAreVersionedMediaContracts(t *testing.T) {
 
 func TestAllBuiltInProfilesCompleteExactDryRuns(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("fixture"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "fixture")
 	for _, definition := range BuiltInProfiles() {
 		t.Run(definition.Name, func(t *testing.T) {
 			t.Parallel()
-			pipeline, err := New(Config{
+			pipeline := mustNew(t, Config{
 				Profile: definition.Name, ProfileVersion: definition.Version,
 				SegmentDuration: definition.SegmentDuration, SegmentFormat: definition.SegmentFormat,
 				EssenceStorage: definition.EssenceStorage, DryRunMode: DryRunExact,
 				Concurrency: 1, Transfers: 1, ProbeConcurrency: 1,
 			}, nil, fakeProber{}, fakeSegmenter{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 			if err != nil {
 				t.Fatalf("Pipeline.Run() = _, %v, want nil", err)
@@ -267,14 +246,11 @@ func TestMPEGTSSegmentPolicyFailsBeforeInvokingFFmpeg(t *testing.T) {
 		if format == media.SegmentFormatSource {
 			prober.probe.Format.Name = "mpegts"
 		}
-		pipeline, err := New(Config{
+		pipeline := mustNew(t, Config{
 			Profile: ProfileCustom, ProfileVersion: "1",
 			Concurrency: 1, DryRunMode: DryRunExact, SegmentDuration: 2 * time.Second,
 			SegmentFormat: format, EssenceStorage: media.EssenceStorageIndependent,
 		}, nil, prober, versionedCountingSegmenter{err: errors.New("FFmpeg must not run")}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
 		batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 		if err != nil {
 			t.Fatal(err)
@@ -340,12 +316,9 @@ func TestWholeFileProfileIsPartOfGeneratedIdentity(t *testing.T) {
 
 func TestMachineResultReportsTheToolchainThatWroteMedia(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.ts")
-	if err := os.WriteFile(filename, []byte("muxed-media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.ts", "muxed-media")
 	const report = "ffmpeg version 7.0\nconfiguration: --enable-example\nlibavformat 61.0"
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Profile: ProfileEssenceSegments, ProfileVersion: "1",
 		Concurrency: 1, Transfers: 2, DryRunMode: DryRunExact,
 		SegmentDuration: 10 * time.Second, SegmentFormat: media.SegmentFormatSource,
@@ -353,9 +326,6 @@ func TestMachineResultReportsTheToolchainThatWroteMedia(t *testing.T) {
 	}, nil, fakeProber{}, versionedCountingSegmenter{
 		countingSegmenter: countingSegmenter{objects: 2}, version: report,
 	}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)

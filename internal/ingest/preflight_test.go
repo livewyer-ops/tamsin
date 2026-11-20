@@ -139,10 +139,7 @@ func TestStartupPreflightAdoptsTheResolvedDefaultBackend(t *testing.T) {
 		{ID: "other"},
 		{ID: "chosen", DefaultStorage: true},
 	}
-	pipeline, err := New(Config{Concurrency: 1}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1}, client, fakeProber{}, nil, discardLogger(), nil)
 	storageID, err := pipeline.runStartupPreflight(context.Background())
 	if err != nil {
 		t.Fatal(err)

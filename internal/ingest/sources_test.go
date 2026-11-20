@@ -5,8 +5,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,16 +18,10 @@ import (
 // identity from their Flows, and an operator's later edits survive a resume.
 func TestSourcesReceiveLabelDescriptionAndProvenance(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.ts")
-	if err := os.WriteFile(filename, []byte("muxed-media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.ts", "muxed-media")
 	client := newFakeClient()
 	config := Config{Concurrency: 1, VerificationMode: VerificationReadback, SegmentDuration: time.Second}
-	pipeline, err := New(config, client, muxedProber{}, fakeSegmenter{}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, config, client, muxedProber{}, fakeSegmenter{}, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -54,10 +46,7 @@ func TestSourcesReceiveLabelDescriptionAndProvenance(t *testing.T) {
 	writes := client.sourceWrites
 	client.lock.Unlock()
 
-	resume, err := New(config, client, muxedProber{}, fakeSegmenter{}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resume := mustNew(t, config, client, muxedProber{}, fakeSegmenter{}, discardLogger(), nil)
 	if _, err := resume.Run(context.Background(), []source.Item{localSource(filename)}); err != nil {
 		t.Fatal(err)
 	}
@@ -76,16 +65,10 @@ func TestSourcesReceiveLabelDescriptionAndProvenance(t *testing.T) {
 // given up.
 func TestSourceNotYetDerivedIsReadOnceMore(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	client.sourceMissingReads = 1
-	pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -103,10 +86,7 @@ func TestSourceNotYetDerivedIsReadOnceMore(t *testing.T) {
 
 func TestSourcePopulationFailureIsAWarningNotAFailure(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	for name, configure := range map[string]func(*fakeClient){
 		"forbidden writes": func(client *fakeClient) { client.sourceWriteErr = errors.New("403 Forbidden") },
 		"unreadable":       func(client *fakeClient) { client.sourceReadErr = errors.New("503 Service Unavailable") },
@@ -117,10 +97,7 @@ func TestSourcePopulationFailureIsAWarningNotAFailure(t *testing.T) {
 			configure(client)
 			var logged bytes.Buffer
 			logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
-			pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, logger, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+			pipeline := mustNew(t, Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, logger, nil)
 			batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 			if err != nil {
 				t.Fatal(err)

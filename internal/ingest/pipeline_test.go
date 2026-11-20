@@ -30,16 +30,10 @@ import (
 // has to be retracted or the Flow keeps a Segment pointing at bad bytes.
 func TestPipelineRetractsSegmentWhenVerificationFails(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media-object"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media-object")
 	client := newFakeClient()
 	client.corruptOnUpload = true
-	pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
 	// Run records per-input outcomes in the batch; the CLI turns a non-zero
 	// Failed count into its exit status.
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
@@ -74,16 +68,10 @@ func TestPipelineRetractsSegmentWhenVerificationFails(t *testing.T) {
 
 func TestPipelineDoesNotRegisterBytesThatChangedBeforeUpload(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media-object"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media-object")
 	store := newFakeClient()
 	client := &changedUploadClient{fakeClient: store}
-	pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationNone}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1, VerificationMode: VerificationNone}, client, fakeProber{}, nil, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -106,10 +94,7 @@ func TestPipelineDoesNotRegisterBytesThatChangedBeforeUpload(t *testing.T) {
 // stops the input before anything is uploaded and is left exactly as it was.
 func TestPipelineNeverRegistersOverAnotherProducersSegment(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media-object"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media-object")
 	const (
 		flowID           = "00000000-0000-4000-8000-000000000001"
 		collateralObject = "00000000-0000-4000-8000-000000000002"
@@ -120,10 +105,7 @@ func TestPipelineNeverRegistersOverAnotherProducersSegment(t *testing.T) {
 		collateralObject: {ObjectID: collateralObject, Timerange: timerange, GetURLs: []tams.PresignedURL{{URL: "mem://" + collateralObject}}},
 	}
 	client.objects[collateralObject] = []byte("somebody else's media")
-	pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback, FlowID: flowID}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1, VerificationMode: VerificationReadback, FlowID: flowID}, client, fakeProber{}, nil, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -148,38 +130,50 @@ func TestPipelineNeverRegistersOverAnotherProducersSegment(t *testing.T) {
 
 // TestPipelineReportsFailedRetraction keeps the integrity failure visible when
 // the retraction itself cannot be completed, since that is the case an operator
-// must clean up by hand.
+// must clean up by hand. A Segment that could not be withdrawn must not read
+// the same as one that was.
 func TestPipelineReportsFailedRetraction(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media-object"), 0o600); err != nil {
-		t.Fatal(err)
+	for name, test := range map[string]struct {
+		config    Config
+		segmenter media.Segmenter
+	}{
+		"whole file": {config: Config{Concurrency: 1, VerificationMode: VerificationReadback}},
+		"segmented": {
+			config: Config{
+				Concurrency: 1, Transfers: 2, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
+				EssenceStorage: media.EssenceStorageMuxed,
+			},
+			segmenter: countingSegmenter{objects: 4},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			filename := writeFixture(t, "fixture.mp4", "media-object")
+			client := newFakeClient()
+			client.corruptOnUpload = true
+			client.deleteSegmentsErr = errors.New("flow is read-only")
+			pipeline := mustNew(t, test.config, client, fakeProber{}, test.segmenter, discardLogger(), nil)
+			batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if batch.Failed != 1 {
+				t.Fatalf("corrupted upload should fail the ingest: %#v", batch)
+			}
+			message := batch.Results[0].Error
+			if !strings.Contains(message, "SHA-256 mismatch") {
+				t.Fatalf("integrity failure should survive a failed retraction, got %q", message)
+			}
+			if !strings.Contains(message, "could not be retracted") {
+				t.Fatalf("failed retraction should be reported, got %q", message)
+			}
+			if batch.Results[0].Verification != VerificationFailedStranded {
+				t.Fatalf("verification = %q, want %q", batch.Results[0].Verification, VerificationFailedStranded)
+			}
+			assertBatchResultSchema(t, batch)
+		})
 	}
-	client := newFakeClient()
-	client.corruptOnUpload = true
-	client.deleteSegmentsErr = errors.New("flow is read-only")
-	pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
-	if err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if batch.Failed != 1 {
-		t.Fatalf("corrupted upload should fail the ingest: %#v", batch)
-	}
-	message := batch.Results[0].Error
-	if !strings.Contains(message, "SHA-256 mismatch") {
-		t.Fatalf("integrity failure should survive a failed retraction, got %q", message)
-	}
-	if !strings.Contains(message, "could not be retracted") {
-		t.Fatalf("failed retraction should be reported, got %q", message)
-	}
-	if batch.Results[0].Verification != VerificationFailedStranded {
-		t.Fatalf("verification = %q, want %q", batch.Results[0].Verification, VerificationFailedStranded)
-	}
-	assertBatchResultSchema(t, batch)
 }
 
 // TestPipelineRegistersCollectedFlowsBeforeCollector covers the TAMS rule that
@@ -188,15 +182,9 @@ func TestPipelineReportsFailedRetraction(t *testing.T) {
 // multi-essence Flow whose flow_collection names them.
 func TestPipelineRegistersCollectedFlowsBeforeCollector(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.ts")
-	if err := os.WriteFile(filename, []byte("muxed-media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.ts", "muxed-media")
 	client := newFakeClient()
-	pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, muxedProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, muxedProber{}, nil, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -295,15 +283,9 @@ func TestPipelineRegistersCollectedFlowsBeforeCollector(t *testing.T) {
 // essence format and increments across multiple audio tracks.
 func TestCollectionItemsCarryExactMultiAudioTrackIndices(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.ts")
-	if err := os.WriteFile(filename, []byte("video plus two audio tracks"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.ts", "video plus two audio tracks")
 	client := newFakeClient()
-	pipeline, err := New(Config{Concurrency: 1}, client, multiAudioProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1}, client, multiAudioProber{}, nil, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil || batch.Failed != 0 {
 		t.Fatalf("ingest: batch=%#v error=%v", batch, err)
@@ -338,16 +320,10 @@ func TestCollectionItemsCarryExactMultiAudioTrackIndices(t *testing.T) {
 // Media Objects were allocated behind that incomplete graph.
 func TestPartialFlowGraphMutationIsExplicit(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.ts")
-	if err := os.WriteFile(filename, []byte("muxed media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.ts", "muxed media")
 	client := newFakeClient()
 	client.putFlowErrAt = 2
-	pipeline, err := New(Config{Concurrency: 1}, client, muxedProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1}, client, muxedProber{}, nil, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -386,10 +362,7 @@ func TestPipelineDoesNotInventGeneration(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			filename := filepath.Join(t.TempDir(), "fixture.mp4")
-			if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			filename := writeFixture(t, "fixture.mp4", "media")
 			client := newFakeClient()
 			config := Config{Concurrency: 1, VerificationMode: VerificationReadback, FFmpegArgs: testCase.ffmpegArgs}
 			var segmenter media.Segmenter
@@ -404,10 +377,7 @@ func TestPipelineDoesNotInventGeneration(t *testing.T) {
 				}
 				segmenter = fakeSegmenter{}
 			}
-			pipeline, err := New(config, client, fakeProber{}, segmenter, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+			pipeline := mustNew(t, config, client, fakeProber{}, segmenter, discardLogger(), nil)
 			batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 			if err != nil {
 				t.Fatal(err)
@@ -465,22 +435,16 @@ func TestCustomTreatmentRequiresTruthfulOutputMetadata(t *testing.T) {
 
 func TestInvalidCustomTreatmentStopsBeforeRendererOrTAMSMutation(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.ts")
-	if err := os.WriteFile(filename, []byte("muxed media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.ts", "muxed media")
 	client := newFakeClient()
 	segmenter := &recordingSegmenter{}
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, SegmentDuration: time.Second,
 		FFmpegArgs: []string{"-c:v", "libx264"},
 		FlowMetadata: tams.Flow{
 			"codec": "video/h264", "essence_parameters": map[string]any{"frame_width": 64, "frame_height": 64},
 		},
 	}, client, muxedProber{}, segmenter, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -519,11 +483,8 @@ func TestExplicitEssenceParametersSkipUnusedPresentationDecode(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			prober := &presentationCountingProber{}
-			pipeline, err := New(Config{Concurrency: 1, FlowMetadata: testCase.metadata},
+			pipeline := mustNew(t, Config{Concurrency: 1, FlowMetadata: testCase.metadata},
 				newFakeClient(), prober, nil, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			if _, err := pipeline.probeInput(context.Background(), "input"); err != nil {
 				t.Fatal(err)
 			}
@@ -551,17 +512,11 @@ func TestPipelineContainerFollowsSegmentFormat(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			filename := filepath.Join(t.TempDir(), "fixture.mp4")
-			if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			filename := writeFixture(t, "fixture.mp4", "media")
 			client := newFakeClient()
-			pipeline, err := New(Config{
+			pipeline := mustNew(t, Config{
 				Concurrency: 1, VerificationMode: VerificationReadback, SegmentDuration: time.Second, SegmentFormat: testCase.format,
 			}, client, fakeProber{}, fakeSegmenter{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 			if err != nil {
 				t.Fatal(err)
@@ -607,17 +562,11 @@ func TestFlowMetadataRejectsIdentityAndOwnershipPathsAsUsage(t *testing.T) {
 // errors must be found before a Flow PUT or Object allocation.
 func TestInvalidFinalFlowMetadataCausesZeroMutation(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, FlowMetadata: tams.Flow{"generation": "not-an-integer"},
 	}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -637,16 +586,10 @@ func TestUnsupportedContainerCannotBeOverridden(t *testing.T) {
 	t.Parallel()
 	for _, metadata := range []tams.Flow{nil, {"container": "video/mp4"}} {
 		for _, arguments := range [][]string{nil, {"-f", "matroska"}} {
-			filename := filepath.Join(t.TempDir(), "misleading.mp4")
-			if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			filename := writeFixture(t, "misleading.mp4", "media")
 			client := newFakeClient()
-			pipeline, err := New(Config{Concurrency: 1, EssenceStorage: media.EssenceStorageMuxed, FlowMetadata: metadata, FFmpegArgs: arguments, SegmentDuration: time.Second},
+			pipeline := mustNew(t, Config{Concurrency: 1, EssenceStorage: media.EssenceStorageMuxed, FlowMetadata: metadata, FFmpegArgs: arguments, SegmentDuration: time.Second},
 				client, unknownContainerProber{}, &recordingSegmenter{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			batch, err := pipeline.Run(t.Context(), []source.Item{localSource(filename)})
 			if err != nil || batch.Failed != 1 || batch.Results[0].Failure.Code != FailureCodeMediaUnsupported {
 				t.Fatalf("run: %v, results: %+v", err, batch.Results)
@@ -695,18 +638,12 @@ func TestPipelineRejectsUnknownSegmentFormat(t *testing.T) {
 // container, because its media is reached through the essences it collects.
 func TestPipelineStoresEssencesIndependently(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.ts")
-	if err := os.WriteFile(filename, []byte("muxed-media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.ts", "muxed-media")
 	client := newFakeClient()
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageIndependent,
 	}, client, muxedProber{}, fakeSegmenter{}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -815,19 +752,13 @@ func TestPipelineStoresEssencesIndependently(t *testing.T) {
 
 func TestIndependentDryRunPlansEssencesAndCollector(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "first-ingest.ts")
-	if err := os.WriteFile(filename, []byte("muxed-media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	pipeline, err := New(Config{
+	filename := writeFixture(t, "first-ingest.ts", "muxed-media")
+	pipeline := mustNew(t, Config{
 		Profile: ProfileEssenceSegments, ProfileVersion: "1",
 		Concurrency: 1, Transfers: 1, ProbeConcurrency: 1, DryRunMode: DryRunExact,
 		SegmentDuration: 10 * time.Second, SegmentFormat: media.SegmentFormatSource,
 		EssenceStorage: media.EssenceStorageIndependent,
 	}, nil, muxedProber{}, fakeSegmenter{}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -859,10 +790,7 @@ func TestIndependentDryRunPlansEssencesAndCollector(t *testing.T) {
 
 func TestDryRunFastSkipsRendererWhileExactBuildsObjects(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "dry-run.ts")
-	if err := os.WriteFile(filename, []byte("muxed-media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "dry-run.ts", "muxed-media")
 	for _, testCase := range []struct {
 		name        string
 		mode        DryRunMode
@@ -874,15 +802,12 @@ func TestDryRunFastSkipsRendererWhileExactBuildsObjects(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			segmenter := &recordingSegmenter{}
-			pipeline, err := New(Config{
+			pipeline := mustNew(t, Config{
 				Profile: ProfileEssenceSegments, ProfileVersion: "1",
 				Concurrency: 1, Transfers: 1, ProbeConcurrency: 1, DryRunMode: testCase.mode,
 				SegmentDuration: 10 * time.Second, SegmentFormat: media.SegmentFormatSource,
 				EssenceStorage: media.EssenceStorageIndependent,
 			}, nil, muxedProber{}, segmenter, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 			if err != nil {
 				t.Fatal(err)
@@ -908,17 +833,11 @@ func TestDryRunFastSkipsRendererWhileExactBuildsObjects(t *testing.T) {
 // unassociated owner or pretending the audio completed.
 func TestLateEssenceFailureKeepsAResumableRegisteredPrefix(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.ts")
-	if err := os.WriteFile(filename, []byte("muxed media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.ts", "muxed media")
 	client := newFakeClient()
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageIndependent,
 	}, client, muxedProber{}, &failSecondEssenceSegmenter{}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -954,10 +873,7 @@ func TestPipelineIngestsVerifiesAndResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := newFakeClient()
-	pipeline, err := New(Config{Concurrency: 2, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 2, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
 	item := localSource(filename)
 	batch, err := pipeline.Run(context.Background(), []source.Item{item})
 	if err != nil {
@@ -996,15 +912,9 @@ func TestPipelineIngestsVerifiesAndResumes(t *testing.T) {
 }
 func TestPipelineAllocatesAndUploadsEverySegment(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
-	pipeline, err := New(Config{SegmentDuration: time.Second, VerificationMode: VerificationReadback}, client, fakeProber{}, fakeSegmenter{}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{SegmentDuration: time.Second, VerificationMode: VerificationReadback}, client, fakeProber{}, fakeSegmenter{}, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -1028,10 +938,7 @@ func TestPipelineAllocatesAndUploadsEverySegment(t *testing.T) {
 
 func TestPipelineProgressKeepsStoreAndVerificationSeparate(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	var (
 		progressLock sync.Mutex
 		snapshots    []progress.Snapshot
@@ -1042,11 +949,8 @@ func TestPipelineProgressKeepsStoreAndVerificationSeparate(t *testing.T) {
 		snapshots = append(snapshots, snapshot)
 	})
 	client := newFakeClient()
-	pipeline, err := New(Config{SegmentDuration: time.Second, VerificationMode: VerificationReadback},
+	pipeline := mustNew(t, Config{SegmentDuration: time.Second, VerificationMode: VerificationReadback},
 		client, fakeProber{}, fakeSegmenter{}, discardLogger(), reporter)
-	if err != nil {
-		t.Fatal(err)
-	}
 	item := localSource(filename)
 	batch, err := pipeline.Run(context.Background(), []source.Item{item})
 	if err != nil || batch.Succeeded != 1 {
@@ -1088,17 +992,11 @@ func TestPipelineProgressKeepsStoreAndVerificationSeparate(t *testing.T) {
 
 func TestPipelineMetricsDescribeEachInvocationAcrossResume(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	firstRun := observability.New("aee7d238-c8da-4d44-a0d1-70ece72f0999", nil)
-	pipeline, err := New(Config{Observability: firstRun, SegmentDuration: time.Second, VerificationMode: VerificationReadback},
+	pipeline := mustNew(t, Config{Observability: firstRun, SegmentDuration: time.Second, VerificationMode: VerificationReadback},
 		client, fakeProber{}, fakeSegmenter{}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	item := localSource(filename)
 	first, err := pipeline.Run(context.Background(), []source.Item{item})
 	if err != nil || first.Succeeded != 1 || first.RunID != firstRun.RunID() {
@@ -1110,11 +1008,8 @@ func TestPipelineMetricsDescribeEachInvocationAcrossResume(t *testing.T) {
 	}
 
 	resumeRun := observability.New("bc012fa0-1c9b-4a1e-9d4a-ad872f246bd1", nil)
-	resume, err := New(Config{Observability: resumeRun, SegmentDuration: time.Second, VerificationMode: VerificationReadback},
+	resume := mustNew(t, Config{Observability: resumeRun, SegmentDuration: time.Second, VerificationMode: VerificationReadback},
 		client, fakeProber{}, fakeSegmenter{}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	second, err := resume.Run(context.Background(), []source.Item{item})
 	if err != nil || second.Succeeded != 1 || second.Results[0].Status != ResultStatusResumed {
 		t.Fatalf("resume = %#v, %v", second, err)
@@ -1128,14 +1023,8 @@ func TestPipelineMetricsDescribeEachInvocationAcrossResume(t *testing.T) {
 
 func TestPipelineDryRunDoesNotRequireClient(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	pipeline, err := New(Config{DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
+	pipeline := mustNew(t, Config{DryRunMode: DryRunExact}, nil, fakeProber{}, nil, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -1148,16 +1037,10 @@ func TestPipelineDryRunDoesNotRequireClient(t *testing.T) {
 }
 func TestPipelineRequiresDefaultOrExplicitStorage(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	client.backends = []tams.StorageBackend{{ID: "storage"}}
-	pipeline, err := New(Config{}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{}, client, fakeProber{}, nil, discardLogger(), nil)
 	if _, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)}); err == nil ||
 		!strings.Contains(err.Error(), "no default storage backend") {
 		t.Fatalf("Run() error = %v, want missing default storage error", err)
@@ -1166,15 +1049,9 @@ func TestPipelineRequiresDefaultOrExplicitStorage(t *testing.T) {
 
 func TestPipelineValidatesExplicitStorageBeforeMutation(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
-	pipeline, err := New(Config{StorageID: "6ba7b811-9dad-11d1-80b4-00c04fd430c8"}, client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{StorageID: "6ba7b811-9dad-11d1-80b4-00c04fd430c8"}, client, fakeProber{}, nil, discardLogger(), nil)
 	if _, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)}); err == nil ||
 		!strings.Contains(err.Error(), "not available") {
 		t.Fatalf("Run() error = %v, want unavailable explicit storage error", err)
@@ -1198,10 +1075,7 @@ func TestPipelinePreservesBatchOrderAndReportsPartialFailure(t *testing.T) {
 	if err := os.WriteFile(bad, []byte("bad"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	pipeline, err := New(Config{Concurrency: 2, DryRunMode: DryRunExact}, nil, fakeProber{failSuffix: "b.mp4"}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 2, DryRunMode: DryRunExact}, nil, fakeProber{failSuffix: "b.mp4"}, nil, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(good), localSource(bad)})
 	if err != nil {
 		t.Fatal(err)
@@ -1219,18 +1093,12 @@ func TestIndependentHighTrackInputUsesOneRenderProcess(t *testing.T) {
 	for name, duration := range map[string]time.Duration{"segmented": time.Second, "whole essences": 0} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			filename := filepath.Join(t.TempDir(), "fixture.ts")
-			if err := os.WriteFile(filename, []byte("four essences"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			filename := writeFixture(t, "fixture.ts", "four essences")
 			segmenter := &recordingSegmenter{}
-			pipeline, err := New(Config{
+			pipeline := mustNew(t, Config{
 				Concurrency: 1, Transfers: 2, VerificationMode: VerificationNone, SegmentDuration: duration,
 				EssenceStorage: media.EssenceStorageIndependent,
 			}, newFakeClient(), fourEssenceProber{}, segmenter, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 			if err != nil || batch.Succeeded != 1 {
 				t.Fatalf("Run() = %#v, %v", batch, err)
@@ -1262,18 +1130,12 @@ func (p sharedIndexProber) ProbeObject(ctx context.Context, filename string) (me
 // of essences that share one renders each essence on its own.
 func TestEssencesSharingAStreamIndexRenderSeparately(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.ts")
-	if err := os.WriteFile(filename, []byte("four essences"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.ts", "four essences")
 	segmenter := &recordingSegmenter{}
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 2, VerificationMode: VerificationNone, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageIndependent,
 	}, newFakeClient(), sharedIndexProber{}, segmenter, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil || batch.Succeeded != 1 {
 		t.Fatalf("Run() = %#v, %v", batch, err)
@@ -1309,19 +1171,13 @@ func (s *omittingSegmenter) Segment(ctx context.Context, request media.SegmentRe
 // stream is not rendered again on its own, and nothing is uploaded.
 func TestRenderThatOmitsAStreamFailsTheInput(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.ts")
-	if err := os.WriteFile(filename, []byte("four essences"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.ts", "four essences")
 	client := newFakeClient()
 	segmenter := &omittingSegmenter{omit: 2}
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 2, VerificationMode: VerificationNone,
 		EssenceStorage: media.EssenceStorageIndependent,
 	}, client, fourEssenceProber{}, segmenter, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -1348,29 +1204,20 @@ func TestRenderThatOmitsAStreamFailsTheInput(t *testing.T) {
 // response "could be substantially faster" without them.
 func TestListingsOnlyRequestDownloadURLsWhenRead(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	config := Config{
 		Concurrency: 1, Transfers: 2, VerificationMode: VerificationNone, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}
-	pipeline, err := New(config, client, fakeProber{}, countingSegmenter{objects: 8}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, config, client, fakeProber{}, countingSegmenter{objects: 8}, discardLogger(), nil)
 	item := localSource(filename)
 	if _, err := pipeline.Run(context.Background(), []source.Item{item}); err != nil {
 		t.Fatal(err)
 	}
 	// A resume lists a Flow that is now full, which is the case where signing a
 	// URL per Segment costs the most.
-	resumePipeline, err := New(config, client, fakeProber{}, countingSegmenter{objects: 8}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resumePipeline := mustNew(t, config, client, fakeProber{}, countingSegmenter{objects: 8}, discardLogger(), nil)
 	if _, err := resumePipeline.Run(context.Background(), []source.Item{item}); err != nil {
 		t.Fatal(err)
 	}
@@ -1422,13 +1269,10 @@ func TestStagedDigestIsReusedForOwnedFilesOnly(t *testing.T) {
 			if err := os.WriteFile(filename, contents, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			pipeline, err := New(Config{
+			pipeline := mustNew(t, Config{
 				Concurrency: 1, Transfers: 1, SegmentDuration: 0,
 				EssenceStorage: media.EssenceStorageMuxed,
 			}, newFakeClient(), fakeProber{}, nil, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			staged := stagedFile{
 				path: filename, size: int64(len(contents)), sha256: fabricated,
 				owned: testCase.owned, cleanup: func() {},
@@ -1463,23 +1307,17 @@ func TestStagedDigestIsReusedForOwnedFilesOnly(t *testing.T) {
 // where fixed cost dominates.
 func TestStartupCallsOverlap(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := &concurrentStartupClient{
 		fakeClient:      newFakeClient(),
 		serviceEntered:  make(chan struct{}),
 		backendsEntered: make(chan struct{}),
 		timeout:         10 * time.Second,
 	}
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 2, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: 2}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -1494,18 +1332,12 @@ func TestStartupCallsOverlap(t *testing.T) {
 // the write had not, at the cost of a round trip per Flow.
 func TestFlowIsReadBeforeWritingAndNotAfter(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 2, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: 4}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -1555,18 +1387,12 @@ func TestFlowIsReadBeforeWritingAndNotAfter(t *testing.T) {
 // container overhead. Readers need these rates to size buffers.
 func TestFlowCarriesSegmentBitRates(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 2, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, essenceBitRateProber{}, sizedSegmenter{objects: 4, bytes: 1_000_000}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -1630,10 +1456,7 @@ func TestIngestChecksTheStoreAPIVersion(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			filename := filepath.Join(t.TempDir(), "fixture.mp4")
-			if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			filename := writeFixture(t, "fixture.mp4", "media")
 			client := newFakeClient()
 			client.serviceDocument = make(map[string]any, len(testCase.document)+2)
 			for key, value := range testCase.document {
@@ -1664,15 +1487,9 @@ func TestIngestChecksTheStoreAPIVersion(t *testing.T) {
 
 func TestIngestRejectsUnsupportedFFprobeBeforeTAMSMutation(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
-	pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, oldVersionProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, oldVersionProber{}, nil, discardLogger(), nil)
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err == nil || !strings.Contains(err.Error(), "version 5.1 or newer") {
 		t.Fatalf("Run() error = %v, want unsupported FFprobe rejection", err)
@@ -1697,10 +1514,7 @@ func flowIDsFrom(t *testing.T, config Config, prober media.Prober, filename stri
 func flowIDsFromSegmenter(t *testing.T, config Config, prober media.Prober, segmenter media.Segmenter, filename string) map[string]bool {
 	t.Helper()
 	client := newFakeClient()
-	pipeline, err := New(config, client, prober, segmenter, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, config, client, prober, segmenter, discardLogger(), nil)
 	if _, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)}); err != nil {
 		t.Fatal(err)
 	}
@@ -1723,10 +1537,7 @@ func flowIDsFromSegmenter(t *testing.T, config Config, prober media.Prober, segm
 // describing the placement that was asked for.
 func TestGeneratedIdentityCoversWhatChangesTheResult(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.ts")
-	if err := os.WriteFile(filename, []byte("muxed-media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.ts", "muxed-media")
 	base := Config{
 		Concurrency: 1, Transfers: 2, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
@@ -1833,10 +1644,7 @@ func TestInvalidServiceLifetimesFailBeforeMutation(t *testing.T) {
 		}, want: "requires at least 300:0"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			filename := filepath.Join(t.TempDir(), "fixture.mp4")
-			if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			filename := writeFixture(t, "fixture.mp4", "media")
 			client := newFakeClient()
 			client.serviceDocument = testCase.document
 			pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
@@ -1865,19 +1673,13 @@ func TestInvalidServiceLifetimesFailBeforeMutation(t *testing.T) {
 // URLs that were valid when they were issued.
 func TestResumedObjectsAreVerifiedBeforeUploadsBegin(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	config := Config{
 		Concurrency: 1, Transfers: 2, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}
-	first, err := New(config, client, fakeProber{}, countingSegmenter{objects: 4}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := mustNew(t, config, client, fakeProber{}, countingSegmenter{objects: 4}, discardLogger(), nil)
 	item := localSource(filename)
 	if _, err := first.Run(context.Background(), []source.Item{item}); err != nil {
 		t.Fatal(err)
@@ -1898,10 +1700,7 @@ func TestResumedObjectsAreVerifiedBeforeUploadsBegin(t *testing.T) {
 	client.callLog = nil
 	client.lock.Unlock()
 
-	second, err := New(config, client, fakeProber{}, countingSegmenter{objects: 4}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	second := mustNew(t, config, client, fakeProber{}, countingSegmenter{objects: 4}, discardLogger(), nil)
 	if _, err := second.Run(context.Background(), []source.Item{item}); err != nil {
 		t.Fatal(err)
 	}
@@ -1935,13 +1734,10 @@ func TestQueuedUploadsRequestURLsOnlyAfterWorkerIsReady(t *testing.T) {
 	const objects = 4
 	lifetime := 30 * time.Second
 	client := newExpiringURLClient(lifetime)
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 1, VerificationMode: VerificationNone, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: objects}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := pipeline.Run(context.Background(), []source.Item{benchFixture(t)}); err != nil {
 		t.Fatal(err)
 	}
@@ -1972,19 +1768,13 @@ func TestQueuedVerificationRefreshesURLsOnlyAfterWorkerIsReady(t *testing.T) {
 		Concurrency: 1, Transfers: 1, VerificationMode: VerificationNone, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}
-	first, err := New(base, client, fakeProber{}, countingSegmenter{objects: objects}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := mustNew(t, base, client, fakeProber{}, countingSegmenter{objects: objects}, discardLogger(), nil)
 	if _, err := first.Run(context.Background(), []source.Item{item}); err != nil {
 		t.Fatal(err)
 	}
 
 	base.VerificationMode = VerificationReadback
-	resume, err := New(base, client, fakeProber{}, countingSegmenter{objects: objects}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resume := mustNew(t, base, client, fakeProber{}, countingSegmenter{objects: objects}, discardLogger(), nil)
 	batch, err := resume.Run(context.Background(), []source.Item{item})
 	if err != nil {
 		t.Fatal(err)
@@ -2086,10 +1876,7 @@ func TestWholeFileIngestRefusesOptionsItCannotHonour(t *testing.T) {
 				config := base
 				config.EssenceStorage = storage
 				testCase.mutate(&config)
-				pipeline, err := New(config, newFakeClient(), fakeProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
-				if err != nil {
-					t.Fatal(err)
-				}
+				pipeline := mustNew(t, config, newFakeClient(), fakeProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
 				batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 				if err != nil {
 					t.Fatalf("run: %v", err)
@@ -2112,10 +1899,7 @@ func TestWholeFileIngestRefusesOptionsItCannotHonour(t *testing.T) {
 		config := base
 		config.EssenceStorage = media.EssenceStorageMuxed
 		client := newFakeClient()
-		pipeline, err := New(config, client, fakeProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		pipeline := mustNew(t, config, client, fakeProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
 		batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 		if err != nil {
 			t.Fatal(err)
@@ -2142,10 +1926,7 @@ func TestWholeFileIngestRefusesOptionsItCannotHonour(t *testing.T) {
 func sourcesByRole(t *testing.T, config Config, prober media.Prober, filename string) map[string]string {
 	t.Helper()
 	client := newFakeClient()
-	pipeline, err := New(config, client, prober, countingSegmenter{objects: 2}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, config, client, prober, countingSegmenter{objects: 2}, discardLogger(), nil)
 	if _, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)}); err != nil {
 		t.Fatal(err)
 	}
@@ -2196,10 +1977,7 @@ func TestSourceIdentityFollowsContentNotLocation(t *testing.T) {
 	})
 
 	t.Run("the same content segmented differently shares one Source", func(t *testing.T) {
-		shared := filepath.Join(t.TempDir(), "programme.ts")
-		if err := os.WriteFile(shared, []byte("one programme, two renditions"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		shared := writeFixture(t, "programme.ts", "one programme, two renditions")
 		tenSeconds := base
 		tenSeconds.SegmentDuration = 10 * time.Second
 		if a, b := sourcesByRole(t, base, fakeProber{}, shared), sourcesByRole(t, tenSeconds, fakeProber{}, shared); a[""] != b[""] {
@@ -2210,10 +1988,7 @@ func TestSourceIdentityFollowsContentNotLocation(t *testing.T) {
 	// A video track is the same content whether it was left inside the
 	// multiplex or demultiplexed out of it, so it keeps one Source across both.
 	t.Run("an essence keeps its Source across storage arrangements", func(t *testing.T) {
-		muxedFile := filepath.Join(t.TempDir(), "muxed.ts")
-		if err := os.WriteFile(muxedFile, []byte("video and audio together"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		muxedFile := writeFixture(t, "muxed.ts", "video and audio together")
 		independent := base
 		independent.EssenceStorage = media.EssenceStorageIndependent
 		muxed := sourcesByRole(t, base, muxedProber{}, muxedFile)
@@ -2234,10 +2009,7 @@ func TestSourceIdentityFollowsContentNotLocation(t *testing.T) {
 // when combining it with generated fields.
 func TestFlowMetadataWrittenElsewhereSurvivesAnIngest(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	config := Config{
 		Concurrency: 1, Transfers: 2, VerificationMode: VerificationReadback, SegmentDuration: time.Second,
@@ -2245,10 +2017,7 @@ func TestFlowMetadataWrittenElsewhereSurvivesAnIngest(t *testing.T) {
 	}
 	run := func(t *testing.T, config Config) Result {
 		t.Helper()
-		pipeline, err := New(config, client, fakeProber{}, countingSegmenter{objects: 2}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		pipeline := mustNew(t, config, client, fakeProber{}, countingSegmenter{objects: 2}, discardLogger(), nil)
 		batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 		if err != nil {
 			t.Fatal(err)
@@ -2343,18 +2112,12 @@ func TestCuratedMetadataSurvivesAcrossTheWholeFlowGraph(t *testing.T) {
 		storage := storage
 		t.Run(string(storage), func(t *testing.T) {
 			t.Parallel()
-			filename := filepath.Join(t.TempDir(), "fixture.ts")
-			if err := os.WriteFile(filename, []byte("muxed media"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			filename := writeFixture(t, "fixture.ts", "muxed media")
 			client := newFakeClient()
 			run := func() {
-				pipeline, err := New(Config{
+				pipeline := mustNew(t, Config{
 					Concurrency: 1, VerificationMode: VerificationReadback, SegmentDuration: time.Second, EssenceStorage: storage,
 				}, client, muxedProber{}, fakeSegmenter{}, discardLogger(), nil)
-				if err != nil {
-					t.Fatal(err)
-				}
 				batch, runErr := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 				if runErr != nil || batch.Failed != 0 {
 					t.Fatalf("run: batch=%#v error=%v", batch, runErr)
@@ -2400,22 +2163,16 @@ func TestCuratedMetadataSurvivesAcrossTheWholeFlowGraph(t *testing.T) {
 // already spent its own retries.
 func TestFlowIsNotOverwrittenWhenItCannotBeRead(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "media")
 	client := newFakeClient()
 	client.flowReadErr = &tams.HTTPError{
 		Method: http.MethodGet, URL: "flows/x", StatusCode: http.StatusServiceUnavailable,
 		Status: "503 Service Unavailable",
 	}
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 2, SegmentDuration: time.Second,
 		EssenceStorage: media.EssenceStorageMuxed,
 	}, client, fakeProber{}, countingSegmenter{objects: 2}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatalf("run: %v", err)

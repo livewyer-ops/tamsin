@@ -51,10 +51,7 @@ func TestSegmentsFollowsPaging(t *testing.T) {
 	baseURL = server.URL
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL, Timeout: 5 * time.Second, Retries: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Timeout: 5 * time.Second, Retries: 1})
 	segments, err := client.ListSegments(context.Background(), "flow", SegmentListOptions{IncludeDownloadURLs: true})
 	if err != nil {
 		t.Fatalf("Segments() = %v", err)
@@ -85,10 +82,7 @@ func TestStorageBackendsFollowsPagingAndIgnoresUnusedTags(t *testing.T) {
 		_, _ = io.WriteString(w, `[{"id":"`+first+`","tags":{"location":"local"}}]`)
 	}))
 	defer server.Close()
-	client, err := New(Config{Endpoint: server.URL})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL})
 	backends, err := client.StorageBackends(context.Background())
 	if err != nil || len(backends) != 2 || backends[1].ID != second || !backends[1].DefaultStorage || requests.Load() != 2 {
 		t.Fatalf("StorageBackends() = %#v, %v; requests=%d", backends, err, requests.Load())
@@ -105,10 +99,7 @@ func TestStorageBackendsRejectsUnsafePagingWithoutPartialResults(t *testing.T) {
 				_, _ = io.WriteString(w, `[{"id":"9cb30d91-e456-41f3-9398-bf726c749e96"}]`)
 			}))
 			defer server.Close()
-			client, err := New(Config{Endpoint: server.URL})
-			if err != nil {
-				t.Fatal(err)
-			}
+			client := newTestClient(t, Config{Endpoint: server.URL})
 			if backends, err := client.StorageBackends(context.Background()); err == nil || backends != nil {
 				t.Fatalf("unsafe listing returned %#v, %v", backends, err)
 			}
@@ -161,10 +152,7 @@ func TestSegmentsResolvesPagingAgainstThePreviousPage(t *testing.T) {
 			baseURL = server.URL
 			defer server.Close()
 
-			client, err := New(Config{Endpoint: server.URL + "/api/v8.1", Timeout: time.Second})
-			if err != nil {
-				t.Fatal(err)
-			}
+			client := newTestClient(t, Config{Endpoint: server.URL + "/api/v8.1", Timeout: time.Second})
 			segments, err := client.ListSegments(context.Background(), "flow", SegmentListOptions{})
 			if err != nil {
 				t.Fatalf("ListSegments() = %v", err)
@@ -204,10 +192,7 @@ func TestSegmentsParsesAllRFCLinkFieldValues(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL + "/api/v8.1", Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL + "/api/v8.1", Timeout: time.Second})
 	segments, err := client.ListSegments(context.Background(), "flow", SegmentListOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -233,10 +218,7 @@ func TestSegmentListingAsksForTheObjectTimerange(t *testing.T) {
 		_, _ = io.WriteString(writer, "[]")
 	}))
 	defer server.Close()
-	client, err := New(Config{Endpoint: server.URL, Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Timeout: time.Second})
 	for _, options := range []SegmentListOptions{{}, {IncludeObjectTimerange: true}} {
 		if _, err := client.ListSegments(context.Background(), "flow", options); err != nil {
 			t.Fatal(err)
@@ -297,10 +279,7 @@ func TestSegmentsRejectsMalformedOrAmbiguousNextLinks(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client, err := New(Config{Endpoint: server.URL, Timeout: time.Second})
-			if err != nil {
-				t.Fatal(err)
-			}
+			client := newTestClient(t, Config{Endpoint: server.URL, Timeout: time.Second})
 			if _, err := client.ListSegments(context.Background(), "flow", SegmentListOptions{}); err == nil ||
 				!strings.Contains(err.Error(), "paging Link header") {
 				t.Fatalf("ListSegments() error = %v, want malformed/ambiguous Link rejection", err)
@@ -337,10 +316,7 @@ func TestSegmentsRejectsOffOriginPaging(t *testing.T) {
 		clone.Header.Set("Authorization", "Bearer TAMS-secret")
 		return http.DefaultTransport.RoundTrip(clone)
 	})
-	client, err := New(Config{Endpoint: server.URL, Transport: authenticated, Timeout: 5 * time.Second, Retries: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Transport: authenticated, Timeout: 5 * time.Second, Retries: 1})
 	if _, err := client.ListSegments(context.Background(), "flow", SegmentListOptions{IncludeDownloadURLs: true}); err == nil ||
 		!strings.Contains(err.Error(), "not the configured endpoint") {
 		t.Fatalf("Segments() error = %v, want an off-origin cursor to be rejected", err)
@@ -368,10 +344,7 @@ func TestSegmentsRejectsPagingOutsideAPIBasePath(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client, err := New(Config{Endpoint: server.URL + "/api/v8.1", Timeout: time.Second})
-			if err != nil {
-				t.Fatal(err)
-			}
+			client := newTestClient(t, Config{Endpoint: server.URL + "/api/v8.1", Timeout: time.Second})
 			if _, err := client.ListSegments(context.Background(), "flow", SegmentListOptions{}); err == nil ||
 				!strings.Contains(err.Error(), "outside the configured API path") {
 				t.Fatalf("ListSegments() error = %v, want API base-path escape rejection", err)
@@ -403,10 +376,7 @@ func TestSegmentsRejectsRecursivelyEncodedPagingTraversal(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client, err := New(Config{Endpoint: server.URL + "/api/v8.1", Timeout: time.Second})
-			if err != nil {
-				t.Fatal(err)
-			}
+			client := newTestClient(t, Config{Endpoint: server.URL + "/api/v8.1", Timeout: time.Second})
 			if _, err := client.ListSegments(context.Background(), "flow", SegmentListOptions{}); err == nil ||
 				!strings.Contains(err.Error(), "ambiguous encoded traversal or separator") {
 				t.Fatalf("ListSegments() error = %v, want recursively encoded path rejection", err)
@@ -426,10 +396,7 @@ func TestSegmentsRejectsMalformedPagingCursor(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL, Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Timeout: time.Second})
 	if _, err := client.ListSegments(context.Background(), "flow", SegmentListOptions{}); err == nil ||
 		!strings.Contains(err.Error(), "paging cursor") || !strings.Contains(err.Error(), "not a valid URL") {
 		t.Fatalf("ListSegments() error = %v, want malformed paging cursor rejection", err)
@@ -446,10 +413,7 @@ func TestSegmentsRejectsPagingCursorCycle(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL, Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Timeout: time.Second})
 	if _, err := client.ListSegments(context.Background(), "flow", SegmentListOptions{}); err == nil ||
 		!strings.Contains(err.Error(), "cursor cycle") {
 		t.Fatalf("ListSegments() error = %v, want cursor cycle rejection", err)
@@ -500,10 +464,7 @@ func TestSegmentsEnforcesAtomicCollectionLimits(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client, err := New(Config{Endpoint: server.URL, Timeout: time.Second})
-			if err != nil {
-				t.Fatal(err)
-			}
+			client := newTestClient(t, Config{Endpoint: server.URL, Timeout: time.Second})
 			client.segmentPageLimit = testCase.pageLimit
 			client.segmentCountLimit = testCase.segmentLimit
 			client.segmentByteLimit = testCase.byteLimit
@@ -534,10 +495,7 @@ func pagedListing(t *testing.T, pages []string) *Client {
 		_, _ = io.WriteString(writer, pages[index])
 	}))
 	t.Cleanup(server.Close)
-	client, err := New(Config{Endpoint: server.URL, Timeout: 5 * time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Timeout: 5 * time.Second})
 	return client
 }
 

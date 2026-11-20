@@ -4,22 +4,20 @@
 
 [!unix] skip 'needs a POSIX shell for the ffprobe stub'
 
-chmod 0755 ffprobe
-
 # YAML beats the built-in default (human). Ingest JSON is a complete NDJSON
 # process stream, not a final-only BatchResult document.
-exec tamsin --config config.yaml --ffprobe $WORK/ffprobe --log-level error -d 0 --dry-run=exact -i input.mp4
+exec tamsin --config config.yaml --ffprobe $FFPROBE_STUB --log-level error -d 0 --dry-run=exact -i input.mp4
 cp stdout yaml.ndjson
 checkevents yaml.ndjson succeeded 1 0 planned
 
 # Environment beats YAML.
 env TAMSIN_FORMAT=human
-exec tamsin --config config.yaml --ffprobe $WORK/ffprobe --log-level error -d 0 --dry-run=exact -i input.mp4
+exec tamsin --config config.yaml --ffprobe $FFPROBE_STUB --log-level error -d 0 --dry-run=exact -i input.mp4
 stdout '^PLANNED - NO CHANGES MADE  input.mp4'
 ! stdout '\t|root=|objects='
 
 # Flag beats environment.
-exec tamsin --config config.yaml --ffprobe $WORK/ffprobe --log-level error --format json -d 0 --dry-run=exact -i input.mp4
+exec tamsin --config config.yaml --ffprobe $FFPROBE_STUB --log-level error --format json -d 0 --dry-run=exact -i input.mp4
 cp stdout flag.ndjson
 checkevents flag.ndjson succeeded 1 0 planned
 env TAMSIN_FORMAT=
@@ -31,7 +29,7 @@ stderr 'read configuration'
 
 # Nested keys map to underscore-separated environment names.
 env TAMSIN_INGEST_DRY_RUN=exact
-exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error -d 0 -i input.mp4
+exec tamsin --profile essence-segments --ffprobe $FFPROBE_STUB --format json --log-level error -d 0 -i input.mp4
 cp stdout environment.ndjson
 checkevents environment.ndjson succeeded 1 0 planned
 env TAMSIN_INGEST_DRY_RUN=
@@ -43,18 +41,3 @@ ingest:
   dry_run: exact
 -- input.mp4 --
 pretend media bytes
--- ffprobe --
-#!/bin/sh
-if [ "$1" = "-version" ]; then echo "ffprobe version 5.1 stub"; exit 0; fi
-for arg in "$@"; do
-  if [ "$arg" = "-show_frames" ]; then
-    printf '%s\n' \
-      'stream_index=0|best_effort_timestamp=0' \
-      'stream_index=0|best_effort_timestamp=40' \
-      'stream_index=0|best_effort_timestamp=80'
-    exit 0
-  fi
-done
-cat <<'JSON'
-{"streams":[{"index":0,"codec_name":"h264","codec_type":"video","width":64,"height":64,"avg_frame_rate":"25/1","r_frame_rate":"25/1","start_time":"0.000000","duration":"1.000000"}],"format":{"tags":{"major_brand":"isom"},"format_name":"mov,mp4,m4a,3gp,3g2,mj2","start_time":"0.000000","duration":"1.000000"}}
-JSON
