@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,6 +134,124 @@ func TestOccupiedTimerangeIsAConflictWithoutVerification(t *testing.T) {
 	client.lock.Lock()
 	if adopted.Status != ResultStatusResumed || adopted.rootFlow().Objects[0].ObjectID != "other-producer" {
 		t.Fatalf("matching bytes were not adopted under readback: %#v", adopted.rootFlow().Objects)
+	}
+}
+
+// TestAdoptionListsAgainOnlyForAnExpiredURL covers the readback that decides
+// an adoption. A URL whose window closed is replaced once, by a listing whose
+// Segment is checked again from the start. Whatever the outcome, the Segment
+// already at the timerange stays and nothing is allocated or uploaded for it.
+func TestAdoptionListsAgainOnlyForAnExpiredURL(t *testing.T) {
+	t.Parallel()
+	const occupant = "other-producer"
+	expired := fmt.Errorf("%w: download URL window closed", tams.ErrPresignedURLExpired)
+	unreadable := errors.New("connection reset by peer")
+	retime := func(client *fakeClient, flowID string) {
+		segment := client.segments[flowID][occupant]
+		segment.TSOffset = "1:0"
+		client.segments[flowID][occupant] = segment
+	}
+	for _, testCase := range []struct {
+		name            string
+		arrange         func(client *fakeClient, flowID string)
+		listings, reads int
+		adopted         bool
+		conflict        bool
+	}{
+		{name: "the URL expires once", listings: 2, reads: 2, adopted: true,
+			arrange: func(client *fakeClient, _ string) { client.expireFirstDownloads = true }},
+		{name: "the URL expires on both reads", listings: 2, reads: 2,
+			arrange: func(client *fakeClient, _ string) { client.downloadErrors["mem://"+occupant] = expired }},
+		{name: "the URL expires and the next read fails", listings: 2, reads: 2,
+			arrange: func(client *fakeClient, _ string) {
+				client.expireFirstDownloads = true
+				client.downloadErrors["mem://"+occupant] = unreadable
+			}},
+		{name: "the read fails", listings: 1, reads: 1,
+			arrange: func(client *fakeClient, _ string) { client.downloadErrors["mem://"+occupant] = unreadable }},
+		{name: "the bytes differ", listings: 1, reads: 1, conflict: true,
+			arrange: func(client *fakeClient, _ string) { client.objects[occupant] = []byte("other-object") }},
+		{name: "the URL expires and the bytes then differ", listings: 2, reads: 2, conflict: true,
+			arrange: func(client *fakeClient, _ string) {
+				client.expireFirstDownloads = true
+				client.onExpiredDownload = func() {
+					client.lock.Lock()
+					defer client.lock.Unlock()
+					client.objects[occupant] = []byte("other-object")
+				}
+			}},
+		{name: "the timing differs", listings: 1, conflict: true, arrange: retime},
+		{name: "the URL expires and the timing then differs", listings: 2, reads: 1, conflict: true,
+			arrange: func(client *fakeClient, flowID string) {
+				client.expireFirstDownloads = true
+				client.onExpiredDownload = func() {
+					client.lock.Lock()
+					defer client.lock.Unlock()
+					retime(client, flowID)
+				}
+			}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			item := ingestFixture(t)
+			client := newFakeClient()
+			first := runOnce(t, client, item)
+			flow := first.rootFlow()
+			original := flow.Objects[0].ObjectID
+			// Re-register the same bytes under another identifier at the same timerange.
+			client.lock.Lock()
+			segment := client.segments[flow.FlowID][original]
+			delete(client.segments[flow.FlowID], original)
+			segment.ObjectID = occupant
+			segment.GetURLs = []tams.PresignedURL{{URL: "mem://" + occupant}}
+			client.segments[flow.FlowID][occupant] = segment
+			client.objects[occupant] = client.objects[original]
+			testCase.arrange(client, flow.FlowID)
+			calls, listed := len(client.callLog), len(client.listings)
+			client.lock.Unlock()
+
+			// One transfer slot: taking a second for the retry would never return.
+			pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			batch, err := pipeline.Run(context.Background(), []source.Item{item})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := batch.Results[0]
+
+			client.lock.Lock()
+			defer client.lock.Unlock()
+			var listings, reads int
+			for _, listing := range client.listings[listed:] {
+				if listing.ObjectID == occupant && listing.IncludeDownloadURLs {
+					listings++
+				}
+			}
+			for _, call := range client.callLog[calls:] {
+				if call == "verify" {
+					reads++
+				}
+			}
+			if listings != testCase.listings || reads != testCase.reads {
+				t.Errorf("listings = %d, reads = %d; want %d and %d", listings, reads, testCase.listings, testCase.reads)
+			}
+			if testCase.adopted {
+				if result.Status != ResultStatusResumed || result.rootFlow().Objects[0].ObjectID != occupant ||
+					result.rootFlow().Objects[0].Verification != ObjectVerificationVerified {
+					t.Errorf("the Segment was not adopted: %s %s %#v", result.Status, result.Error, result.rootFlow().Objects)
+				}
+			} else if result.Status != ResultStatusFailed || result.Failure == nil ||
+				(result.Failure.Code == FailureCodeSegmentConflict) != testCase.conflict {
+				t.Errorf("status %s, failure %#v, %s; want a conflict: %t", result.Status, result.Failure, result.Error, testCase.conflict)
+			}
+			if _, registered := client.segments[flow.FlowID][occupant]; !registered || len(client.segments[flow.FlowID]) != 1 ||
+				len(client.deletedSegments) != 0 || client.allocations != 1 || client.freshAllocations != 0 || client.uploads != 1 {
+				t.Errorf("the occupying Segment was disturbed: segments=%d deletions=%d allocations=%d fresh=%d uploads=%d",
+					len(client.segments[flow.FlowID]), len(client.deletedSegments), client.allocations, client.freshAllocations, client.uploads)
+			}
+		})
 	}
 }
 

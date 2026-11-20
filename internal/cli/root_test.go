@@ -343,6 +343,10 @@ func TestCLINumericFlowProfileMatchesByJSONSemanticsBeforeMutation(t *testing.T)
 	if code := Execute(context.Background(), base, strings.NewReader(""), &stdout, &stderr); code != ExitPartial {
 		t.Fatalf("mismatching Profile exit = %d, want %d; stdout=%s stderr=%s", code, ExitPartial, stdout.String(), stderr.String())
 	}
+	// No request failed here, so the run's failure record must not blame one.
+	if !strings.Contains(stderr.String(), `msg="ingest run failed"`) || !strings.Contains(stderr.String(), "error_class=unclassified") {
+		t.Fatalf("failure record of a refused input: %s", stderr.String())
+	}
 	state = decodeCLIIngestEventStream(t, stdout.Bytes()).state
 	inputState = state.Inputs[0]
 	if inputState.Finished == nil || inputState.Finished.ErrorCode != ingest.FailureCodeFlowPlanFailed ||
@@ -453,7 +457,8 @@ func TestReadFlowMetadataPreservesNumbersAndRejectsTrailingData(t *testing.T) {
 	}{
 		{"large nested integer", `{"essence_parameters":{"sample_rate":9007199254740993}}`, true},
 		{"trailing whitespace", "{}\n ", true},
-		{"null", "null", true},
+		{"empty object", "{}", true},
+		{"null", "null", false},
 		{"two objects", "{} {}", false},
 		{"trailing garbage", "{} garbage", false},
 		{"array", "[]", false},
@@ -474,6 +479,60 @@ func TestReadFlowMetadataPreservesNumbersAndRejectsTrailingData(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A metadata file holding null is refused with the other arguments, before
+// the store is asked for anything. An empty object overrides nothing and stays
+// valid.
+func TestCLIRejectsAMetadataFileHoldingNull(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		http.NotFound(writer, request)
+	}))
+	// The parallel subtests run after this function returns.
+	t.Cleanup(server.Close)
+	directory := t.TempDir()
+	input := filepath.Join(directory, "fixture.mp4")
+	if err := os.WriteFile(input, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ffprobe := fakeMediaTool(t, directory)
+	for _, flag := range []string{"--flow-metadata", "--collected-flow-metadata"} {
+		for _, content := range []string{"null", "{}"} {
+			t.Run(flag+" "+content, func(t *testing.T) {
+				t.Parallel()
+				metadata := filepath.Join(t.TempDir(), "metadata.json")
+				if err := os.WriteFile(metadata, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				args := []string{
+					"--format", "json", "--progress", "none", "--log-level", "error", "--profile", "preserve",
+					"--segment-duration", "0", "--ffprobe", ffprobe, flag, metadata, "--input", input,
+				}
+				var stdout, stderr bytes.Buffer
+				if content == "{}" {
+					code := Execute(context.Background(), append(args, "--dry-run=fast"), strings.NewReader(""), &stdout, &stderr)
+					if code != ExitOK {
+						t.Fatalf("an empty object was refused: exit = %d; stdout = %s; stderr = %s", code, stdout.String(), stderr.String())
+					}
+					return
+				}
+				code := Execute(context.Background(), append(args, "--endpoint", server.URL, "--auth", "none", "--retries", "0"),
+					strings.NewReader(""), &stdout, &stderr)
+				state := decodeCLIIngestEventStream(t, stdout.Bytes()).state
+				if code != ExitUsage || state.Finished == nil || state.Finished.ExitCode != ExitUsage ||
+					len(state.Diagnostics) != 1 || state.Diagnostics[0].Code != ingest.FailureCodeConfigInvalid {
+					t.Fatalf("exit = %d, want %d with one config.invalid diagnostic; stdout = %s; stderr = %s",
+						code, ExitUsage, stdout.String(), stderr.String())
+				}
+				if requests.Load() != 0 {
+					t.Fatalf("the store received %d requests before the file was refused", requests.Load())
+				}
+			})
+		}
 	}
 }
 

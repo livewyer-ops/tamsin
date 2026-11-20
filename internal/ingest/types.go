@@ -118,9 +118,10 @@ type Config struct {
 
 type Pipeline struct {
 	config Config
-	// reporter presents progress to an operator. It is Discard unless the CLI
-	// decided a terminal is watching, so the pipeline itself stays unaware of
-	// whether anything is being rendered.
+	// reporter presents progress to an operator. The CLI supplies the event
+	// stream for JSON output, plain lines on stderr otherwise and Discard when
+	// progress is off, so the pipeline itself stays unaware of what is
+	// rendered.
 	reporter progress.Reporter
 	// transfers is the global budget. Acquiring a slot is what bounds
 	// concurrency; goroutines are cheap, waiting on the network is not.

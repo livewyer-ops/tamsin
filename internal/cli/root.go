@@ -212,7 +212,7 @@ func (a *application) ingestCommand() *cobra.Command {
 
 func addPersistentFlags(command *cobra.Command) {
 	flags := command.PersistentFlags()
-	flags.String("config", "", "configuration file (default: $XDG_CONFIG_HOME/tamsin/config.yaml)")
+	flags.String("config", "", "configuration file (default: tamsin/config.yaml in the platform configuration directory)")
 	flags.StringP("endpoint", "o", "", "TAMS API endpoint")
 	flags.String("format", "human", "result format: human or json")
 	flags.String("progress", "auto", "progress reporting: auto or none (plain is the same as auto)")
@@ -835,6 +835,9 @@ func readFlowMetadata(filename string) (tams.Flow, error) {
 	if err := readMetadataDocument(filename, &metadata); err != nil {
 		return nil, err
 	}
+	if metadata == nil {
+		return nil, errors.New("flow metadata must be a JSON object")
+	}
 	return metadata, nil
 }
 
@@ -848,6 +851,9 @@ func readCollectedFlowMetadata(filename string) (map[string]tams.Flow, error) {
 	var metadata map[string]tams.Flow
 	if err := readMetadataDocument(filename, &metadata); err != nil {
 		return nil, err
+	}
+	if metadata == nil {
+		return nil, errors.New("collected Flow metadata must be a JSON object")
 	}
 	for role, override := range metadata {
 		if override == nil {

@@ -380,8 +380,10 @@ type fakeClient struct {
 	downloadErrors map[string]error
 	// expireFirstDownloads reports the first read of every URL as a
 	// presigned URL whose window closed, as a large readback can.
+	// onExpiredDownload fires as it does, before the Segment is listed again.
 	expireFirstDownloads bool
 	expiredDownloads     map[string]bool
+	onExpiredDownload    func()
 }
 
 func newFakeClient() *fakeClient {
@@ -784,14 +786,19 @@ func (c *fakeClient) DownloadDigest(_ context.Context, source tams.PresignedURL,
 	c.record("verify")
 	c.lock.Lock()
 	downloadErr := c.downloadErrors[source.URL]
+	var expired func()
 	if c.expireFirstDownloads && !c.expiredDownloads[source.URL] {
 		if c.expiredDownloads == nil {
 			c.expiredDownloads = make(map[string]bool)
 		}
 		c.expiredDownloads[source.URL] = true
 		downloadErr = fmt.Errorf("%w: download URL window closed", tams.ErrPresignedURLExpired)
+		expired = c.onExpiredDownload
 	}
 	c.lock.Unlock()
+	if expired != nil {
+		expired()
+	}
 	if downloadErr != nil {
 		return 0, "", downloadErr
 	}

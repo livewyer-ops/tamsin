@@ -15,6 +15,10 @@ import (
 // byte-level progress without being treated as stalled.
 const DefaultIdleTimeout = time.Minute
 
+// ErrRequestFailed stands in for a transport error whose own text is withheld
+// because it can carry a signed URL or credentials.
+var ErrRequestFailed = errors.New("request failed")
+
 // IdleTimeoutError reports that a transfer stopped moving bytes. It is
 // distinct from an absolute deadline: a transfer may run for hours as long as
 // it continues to make progress.

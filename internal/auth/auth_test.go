@@ -3,13 +3,18 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/livewyer-ops/tamsin/internal/netio"
 	"golang.org/x/oauth2"
 )
 
@@ -147,6 +152,46 @@ func TestOAuthTokenErrorsDoNotLeakCredentialsOrResponseBodies(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "401") {
 		t.Fatalf("OAuth error omitted response status: %q", err)
+	}
+}
+
+// A token request that got no response is marked as a failed request. An
+// answer the client could not use reads the same but is not the transport's.
+func TestOAuthTokenErrorMarksOnlyARequestThatGotNoResponse(t *testing.T) {
+	t.Parallel()
+	answer := func(status int, body string) roundTripFunc {
+		return func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}},
+				Body: io.NopCloser(strings.NewReader(body)),
+			}, nil
+		}
+	}
+	for _, testCase := range []struct {
+		name     string
+		endpoint roundTripFunc
+		marked   bool
+		text     string
+	}{
+		{name: "no response", marked: true, text: "token endpoint request failed",
+			endpoint: func(*http.Request) (*http.Response, error) {
+				return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+			}},
+		{name: "rejected", endpoint: answer(http.StatusBadRequest, `{"error":"invalid_client"}`), text: "token endpoint returned 400 Bad Request"},
+		{name: "malformed", endpoint: answer(http.StatusOK, `{"access_token":`), text: "token endpoint request failed"},
+		{name: "no token", endpoint: answer(http.StatusOK, `{"token_type":"Bearer"}`), text: "token endpoint request failed"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := NewRoundTripper(context.Background(), Config{
+				Mode: ModeOAuthClient, Endpoint: "https://tams.example",
+				TokenURL: "https://issuer.example/token", ClientID: "client", ClientSecret: "secret",
+			}, testCase.endpoint)
+			if err == nil || errors.Is(err, netio.ErrRequestFailed) != testCase.marked || !strings.HasSuffix(err.Error(), testCase.text) {
+				t.Fatalf("error = %v, marked = %t; want %q and marked = %t",
+					err, errors.Is(err, netio.ErrRequestFailed), testCase.text, testCase.marked)
+			}
+		})
 	}
 }
 
@@ -689,5 +734,96 @@ func TestOAuthRefreshOutlivesTheRunContext(t *testing.T) {
 	_ = response.Body.Close()
 	if issued.Load() < 2 {
 		t.Fatalf("token issued %d times; the request did not exercise a refresh", issued.Load())
+	}
+}
+
+// A run that is cancelled while it waits for its first token stops waiting.
+// The request timeout is far longer than the test allows, so only the
+// cancellation can end the request.
+func TestFirstOAuthTokenRequestStopsWithTheRun(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{})
+	// The token client tries a second way of sending its credentials when
+	// the first fails.
+	var once sync.Once
+	blocked := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		once.Do(func() { close(started) })
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() {
+		_, _, err := NewRoundTripper(runCtx, Config{
+			Mode: ModeOAuthClient, Endpoint: "https://tams.example",
+			TokenURL: "https://issuer.example/token", ClientID: "client", ClientSecret: "secret",
+			Timeout: time.Hour,
+		}, blocked)
+		finished <- err
+	}()
+	select {
+	case <-started:
+	case err := <-finished:
+		t.Fatalf("no token was requested: %v", err)
+	}
+	cancel()
+	select {
+	case err := <-finished:
+		if err == nil {
+			t.Fatal("a cancelled token request produced a transport")
+		}
+		if errors.Is(err, netio.ErrRequestFailed) {
+			t.Fatalf("a cancelled token request was marked as a failed one: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first token request outlived the cancelled run")
+	}
+}
+
+// The authorization-code transport refreshes its token during the cleanup
+// that follows a cancelled run, as the client-credentials one does.
+func TestOAuthCodeRefreshOutlivesTheRunContext(t *testing.T) {
+	t.Parallel()
+	var refreshed atomic.Int32
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if err := request.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		if request.Form.Get("grant_type") == "refresh_token" {
+			refreshed.Add(1)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		// Shorter than the refresh margin, so every use needs a refresh.
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"access_token": "short-lived", "token_type": "Bearer", "expires_in": 1, "refresh_token": "again"})
+	}))
+	defer tokenServer.Close()
+	apiServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer apiServer.Close()
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	transport, _, err := NewRoundTripper(runCtx, Config{
+		Mode: ModeOAuthCode, Endpoint: apiServer.URL, TokenURL: tokenServer.URL,
+		ClientID: "client", RedirectURL: "https://app.example/callback", OAuthCode: "one-time-code",
+		AllowInsecureLoopback: true,
+	}, isolatedTransport())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	request, err := http.NewRequestWithContext(context.WithoutCancel(runCtx), http.MethodGet, apiServer.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := (&http.Client{Transport: transport}).Do(request)
+	if err != nil {
+		t.Fatalf("refresh after the run was cancelled: %v", err)
+	}
+	_ = response.Body.Close()
+	if refreshed.Load() == 0 {
+		t.Fatal("the request did not exercise a refresh")
 	}
 }

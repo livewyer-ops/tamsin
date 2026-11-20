@@ -265,8 +265,10 @@ func (e *rollingExecution) flush(state *rollingFlowState) error {
 					objectResults[index].Disposition = ObjectDispositionUnattempted
 				}
 			}
-			operationErr = errors.Join(operationErr,
-				e.pipeline.observeObjectBatch(e.ctx, state.flowID, objectResults, objectIDs))
+			// The failure is the registration's whether this flush is the
+			// render's last or one in the middle of it.
+			operationErr = withFailure(FailureCodeTAMSRegistrationFailed, FailureMessageTAMSRegistrationFailed, true, errors.Join(operationErr,
+				e.pipeline.observeObjectBatch(e.ctx, state.flowID, objectResults, objectIDs)))
 		}
 	}
 

@@ -320,30 +320,14 @@ func (p *Pipeline) adoptOccupyingSegment(ctx context.Context, flowID string, obj
 		return false, err
 	}
 	defer release()
-	segments, err := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{
-		ObjectID: candidate.ObjectID, Timerange: object.timerange,
-		IncludeDownloadURLs: true, IncludeObjectTimerange: true,
-	})
-	if err != nil {
-		return false, fmt.Errorf("read segment %s for adoption: %w", candidate.ObjectID, err)
-	}
-	segment := matchingSegment(segments, candidate.ObjectID, object.timerange)
-	if segment == nil {
-		return false, fmt.Errorf("read segment %s for adoption: it was listed but not returned with download URLs", candidate.ObjectID)
-	}
 	// Same bytes at a different offset is what a Flow written by an earlier
 	// placement looks like; adopting it would keep the wrong timing.
-	if err := checkSegmentTiming(flowID, *object, *segment); err != nil {
-		return false, err
-	}
-	startBefore := time.Now().Add(p.limits.PresignedURL)
-	for index := range segment.GetURLs {
-		if segment.GetURLs[index].Presigned {
-			segment.GetURLs[index].StartBefore = startBefore
-		}
-	}
-	if err := p.verifyObject(ctx, *object, *segment); err != nil {
-		if errors.Is(err, errObjectIntegrity) {
+	if err := p.readBackSegment(ctx, flowID, candidate.ObjectID, *object); err != nil {
+		var classified *classifiedFailure
+		switch {
+		case errors.As(err, &classified):
+			return false, err
+		case errors.Is(err, errObjectIntegrity):
 			return false, conflict("its bytes differ from this input's; re-ingest into a new Flow ID (" + err.Error() + ")")
 		}
 		// A readback that did not complete says nothing about the bytes; the

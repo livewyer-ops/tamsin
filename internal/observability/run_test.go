@@ -2,13 +2,22 @@ package observability
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
+	"net"
+	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/livewyer-ops/tamsin/internal/netio"
 )
 
 func TestRetryEventHasOnlySafeFixedClasses(t *testing.T) {
@@ -85,8 +94,52 @@ func TestFailureEventIsCorrelatedAndSecretSafe(t *testing.T) {
 		}
 	}
 	record := decodeRecord(t, strings.TrimSpace(text))
-	if record["msg"] != "ingest run failed" || record["run_id"] != run.RunID() || record["error_class"] != "transport" {
+	if record["msg"] != "ingest run failed" || record["run_id"] != run.RunID() || record["error_class"] != "unclassified" {
 		t.Fatalf("failure record = %#v", record)
+	}
+}
+
+// A run can end for a reason no request had a part in, so its failure record
+// names the transport only where a request or the network failed.
+func TestFailureClassNamesTheTransportOnlyForAFailedRequest(t *testing.T) {
+	t.Parallel()
+	refused := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	for _, testCase := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"a cause with no class", errors.New("2 of 3 inputs failed"), "unclassified"},
+		{"a missing local file", fmt.Errorf("open input: %w", &fs.PathError{Op: "open", Path: "input.mp4", Err: syscall.ENOENT}), "unclassified"},
+		{"a request whose transport error was withheld", fmt.Errorf("GET https://example.test/service: %w", netio.ErrRequestFailed), "transport"},
+		{"a network error", fmt.Errorf("read input: %w", refused), "transport"},
+		{"a request that got no response", fmt.Errorf("read input: %w", &url.Error{Op: "Get", URL: "https://example.test", Err: errors.New("EOF before headers")}), "transport"},
+		{"a name that did not resolve", fmt.Errorf("read input: %w", &net.DNSError{Err: "no such host", Name: "example.test", IsNotFound: true}), "transport"},
+		{"a network timeout", fmt.Errorf("read input: %w", &netio.IdleTimeoutError{Duration: time.Second}), "idle_timeout"},
+		{"a truncated stream", fmt.Errorf("read input: %w", io.ErrUnexpectedEOF), "truncated_stream"},
+		{"a cancelled run", fmt.Errorf("ingest: %w", context.Canceled), "canceled"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			var output bytes.Buffer
+			New("96322033-c15c-4945-82f9-12bb6cfe281e", slog.New(slog.NewJSONHandler(&output, nil))).Failure(testCase.err)
+			if got := decodeRecord(t, strings.TrimSpace(output.String()))["error_class"]; got != testCase.want {
+				t.Errorf("error_class = %v, want %s", got, testCase.want)
+			}
+		})
+	}
+}
+
+// A retry is only ever scheduled for a request, so its cause keeps the
+// transport class where the same error ending a run would be unclassified.
+func TestRetryOfAnUnclassifiedCauseIsTheTransports(t *testing.T) {
+	t.Parallel()
+	run := New("96322033-c15c-4945-82f9-12bb6cfe281e", nil)
+	var received []RetryEvent
+	run.SetRetryObserver(func(event RetryEvent) { received = append(received, event) })
+	run.Retry(OperationSourceRequest, 2, 3, 0, errors.New("source transport failure"), time.Second)
+	if len(received) != 1 || received[0].ErrorClass != "transport" {
+		t.Fatalf("retry events = %+v", received)
 	}
 }
 

@@ -184,25 +184,35 @@ func (p *Pipeline) verifyOneWithRetraction(ctx context.Context, recovery func() 
 
 	// A whole-Flow listing generates every GET URL before bounded verification
 	// workers can consume them. Hold this worker's global slot first, then ask
-	// for only this exact registered Segment. Nothing queues between issuance
-	// and DownloadDigest. A large Object can outlive its URL's window; when
-	// the window closes under a retry, the Segment is listed once more for a
-	// fresh URL rather than the upload being given up.
-	for attempt := range 2 {
-		segments, listErr := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{
-			ObjectID: object.id, Timerange: object.timerange, IncludeDownloadURLs: true, IncludeObjectTimerange: true,
+	// for only this exact registered Segment.
+	if err := p.readBackSegment(ctx, flowID, object.id, object); err != nil {
+		return fail(err)
+	}
+	p.observability.Verification(object.size, observability.OutcomeVerified)
+	p.advanceProgress(ctx, progress.PhaseVerify, 1, object.size)
+	return outcomeVerified, nil
+}
+
+// readBackSegment lists the Segment registered under objectID at the
+// Object's timerange and compares its timing and bytes with the Object's. The
+// caller holds a transfer slot, so nothing queues between the URL's issuance
+// and DownloadDigest. A large Object can outlive its URL's window; when the
+// window closes under a retry, the Segment is listed once more for a fresh
+// URL and checked again from the start.
+func (p *Pipeline) readBackSegment(ctx context.Context, flowID, objectID string, object preparedObject) error {
+	for attempt := 0; ; attempt++ {
+		segments, err := p.client.ListSegments(ctx, flowID, tams.SegmentListOptions{
+			ObjectID: objectID, Timerange: object.timerange, IncludeDownloadURLs: true, IncludeObjectTimerange: true,
 		})
-		if listErr != nil {
-			cause := fmt.Errorf("refresh download URL for object %s: %w", object.id, listErr)
-			return fail(cause)
+		if err != nil {
+			return fmt.Errorf("refresh download URL for object %s: %w", objectID, err)
 		}
-		segment := matchingSegment(segments, object.id, object.timerange)
+		segment := matchingSegment(segments, objectID, object.timerange)
 		if segment == nil {
-			cause := fmt.Errorf("registered segment %s was not returned by TAMS", object.id)
-			return fail(cause)
+			return fmt.Errorf("registered segment %s was not returned by TAMS", objectID)
 		}
 		if err := checkSegmentTiming(flowID, object, *segment); err != nil {
-			return fail(err)
+			return err
 		}
 		startBefore := time.Now().Add(p.limits.PresignedURL)
 		for index := range segment.GetURLs {
@@ -210,19 +220,13 @@ func (p *Pipeline) verifyOneWithRetraction(ctx context.Context, recovery func() 
 				segment.GetURLs[index].StartBefore = startBefore
 			}
 		}
-		err := p.verifyObject(ctx, object, *segment)
-		if err == nil {
-			break
-		}
+		err = p.verifyObject(ctx, object, *segment)
 		if attempt == 0 && errors.Is(err, tams.ErrPresignedURLExpired) && ctx.Err() == nil {
-			p.logger.Debug("download URL expired during verification; listing again", "object_id", object.id)
+			p.logger.Debug("download URL expired during verification; listing again", "object_id", objectID)
 			continue
 		}
-		return fail(err)
+		return err
 	}
-	p.observability.Verification(object.size, observability.OutcomeVerified)
-	p.advanceProgress(ctx, progress.PhaseVerify, 1, object.size)
-	return outcomeVerified, nil
 }
 
 func (p *Pipeline) retractWithinRecovery(ctx context.Context, flowID string, object preparedObject, cause error) (verificationOutcome, error) {

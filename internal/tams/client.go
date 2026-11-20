@@ -41,8 +41,8 @@ type Config struct {
 	Endpoint          string
 	Transport         http.RoundTripper
 	ExternalTransport http.RoundTripper
-	// Timeout bounds a metadata request end to end. These carry small JSON
-	// bodies, so a wall-clock deadline is the right shape for them.
+	// Timeout bounds each attempt of a metadata request. These carry small
+	// JSON bodies, so a wall-clock deadline is the right shape for them.
 	Timeout time.Duration
 	// TransferTimeout optionally bounds a Media Object upload or verification
 	// end to end. It defaults to none so it does not cap a large healthy body.
@@ -867,7 +867,7 @@ func requestError(ctx context.Context, method, rawURL string, err error) error {
 			Err:    context.DeadlineExceeded,
 		}
 	}
-	return fmt.Errorf("%s %s: request failed", method, auth.RedactURL(rawURL))
+	return fmt.Errorf("%s %s: %w", method, auth.RedactURL(rawURL), netio.ErrRequestFailed)
 }
 
 func transferRequestError(ctx context.Context, watch *netio.IdleWatch, method, rawURL string, err error) error {

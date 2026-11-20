@@ -764,6 +764,9 @@ func TestClientNetworkErrorsDoNotLeakTransportCredentials(t *testing.T) {
 	if strings.Contains(err.Error(), "top-secret") {
 		t.Fatalf("network error leaked credentials: %v", err)
 	}
+	if !errors.Is(err, netio.ErrRequestFailed) || !strings.HasSuffix(err.Error(), ": request failed") {
+		t.Fatalf("the withheld transport error is not marked as a failed request: %v", err)
+	}
 }
 func TestClientWithholdsResponseBodies(t *testing.T) {
 	t.Parallel()

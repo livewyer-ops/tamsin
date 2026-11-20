@@ -24,6 +24,9 @@ func TestReadCollectedFlowMetadata(t *testing.T) {
 	if metadata["audio 1"]["codec"] != "audio/x-smpte302m" || metadata["data"]["tags"] == nil {
 		t.Fatalf("metadata = %#v", metadata)
 	}
+	if metadata, err = readCollectedFlowMetadata(write("none.json", `{}`)); err != nil || metadata == nil {
+		t.Fatalf("an empty object should be accepted: %#v, %v", metadata, err)
+	}
 	if metadata, err = readCollectedFlowMetadata(""); err != nil || metadata != nil {
 		t.Fatalf("no file should mean no overrides: %#v, %v", metadata, err)
 	}
@@ -31,6 +34,7 @@ func TestReadCollectedFlowMetadata(t *testing.T) {
 		"array.json":  `[{"codec": "x"}]`,
 		"scalar.json": `{"audio": "audio/aac"}`,
 		"null.json":   `{"audio": null}`,
+		"bare.json":   `null`,
 		"two.json":    `{"audio": {}} {"video": {}}`,
 	} {
 		if _, err := readCollectedFlowMetadata(write(name, content)); err == nil {

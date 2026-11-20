@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/livewyer-ops/tamsin/internal/media"
+	"github.com/livewyer-ops/tamsin/internal/source"
 	"github.com/livewyer-ops/tamsin/internal/tams"
 )
 
@@ -363,6 +365,69 @@ func TestRegistrationCleanupUsesOneSharedDeadline(t *testing.T) {
 	for index, deadline := range deadlines {
 		if deadline.IsZero() || !deadline.Equal(deadlines[0]) {
 			t.Fatalf("cleanup %d deadline = %s, want one shared deadline %s", index, deadline, deadlines[0])
+		}
+	}
+}
+
+// TestRegistrationFailureKeepsItsCodeWhereverItHappens covers the three
+// places a Segment registration runs: the whole-file path, the last flush of
+// a render and a flush while the render is still going. A failure the store
+// gives no type to is tams.registration_failed in each, and one with a type
+// of its own keeps it.
+func TestRegistrationFailureKeepsItsCodeWhereverItHappens(t *testing.T) {
+	t.Parallel()
+	const flowID = "00000000-0000-4000-8000-000000000001"
+	for _, path := range []struct {
+		name    string
+		objects int
+	}{
+		{"the whole file", 0},
+		{"the last flush of a render", 3},
+		{"a flush during the render", rollingCommitObjects + 3},
+	} {
+		for _, failure := range []struct {
+			name, code string
+			arrange    func(*fakeClient)
+		}{
+			{"an untyped failure", FailureCodeTAMSRegistrationFailed, func(client *fakeClient) {
+				client.registerSegmentsErr = errors.New("the store refused the batch")
+			}},
+			{"a Segment conflict", FailureCodeSegmentConflict, func(client *fakeClient) {
+				const occupant = "00000000-0000-4000-8000-000000000002"
+				client.segments[flowID] = map[string]tams.Segment{
+					occupant: {ObjectID: occupant, Timerange: "[0:0_1:0)", GetURLs: []tams.PresignedURL{{URL: "mem://" + occupant}}},
+				}
+				client.objects[occupant] = []byte("another producer's media")
+			}},
+		} {
+			t.Run(path.name+"/"+failure.name, func(t *testing.T) {
+				t.Parallel()
+				directory := t.TempDir()
+				input := filepath.Join(directory, "input.ts")
+				if err := os.WriteFile(input, []byte("media"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				client := newFakeClient()
+				failure.arrange(client)
+				config := Config{Concurrency: 1, FlowID: flowID, TempDirectory: directory}
+				var segmenter media.Segmenter
+				if path.objects > 0 {
+					config.SegmentDuration, config.EssenceStorage = time.Second, media.EssenceStorageMuxed
+					segmenter = &rollingBoundSegmenter{objects: path.objects}
+				}
+				pipeline, err := New(config, client, fakeProber{}, segmenter, discardLogger(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				batch, err := pipeline.Run(t.Context(), []source.Item{localSource(input)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				result := batch.Results[0]
+				if result.Failure == nil || result.Failure.Code != failure.code || !result.Failure.ActionRequired {
+					t.Fatalf("failure = %+v, want %s with action required: %s", result.Failure, failure.code, result.Error)
+				}
+			})
 		}
 	}
 }
