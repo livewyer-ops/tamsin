@@ -23,14 +23,14 @@ func TestInputOptionsPinProtocolAndFormats(t *testing.T) {
 	if local[2] != "-format_whitelist" || local[3] != inputFormatAllowlist {
 		t.Fatalf("format whitelist missing: %v", local)
 	}
-	for _, denied := range []string{"hls", "dash", "concat", "image2", "imf", "lavfi", "vobsub", "webm_dash_manifest", "rtsp", "sdp", "data"} {
+	for _, denied := range []string{"hls", "dash", "concat", "image2", "imf", "lavfi", "vobsub", "webm_dash_manifest", "rtsp", "sdp", "data", "matroska", "webm", "mxf", "wav", "flac", "mp3", "png_pipe", "jpeg_pipe"} {
 		for _, name := range strings.Split(inputFormatAllowlist, ",") {
 			if name == denied {
 				t.Fatalf("resource-opening demuxer %q is on the allowlist", denied)
 			}
 		}
 	}
-	for _, required := range []string{"mov", "mp4", "matroska", "webm", "mpegts", "mxf", "wav", "flac", "mp3", "png_pipe", "jpeg_pipe"} {
+	for _, required := range []string{"mov", "mpegts"} {
 		if !strings.Contains(","+inputFormatAllowlist+",", ","+required+",") {
 			t.Fatalf("supported container %q is missing from the allowlist", required)
 		}

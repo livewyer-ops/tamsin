@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 
 	"github.com/livewyer-ops/tamsin/internal/tams"
 )
@@ -13,23 +12,7 @@ import (
 // Object is mutated, so an unusable service or a mistyped backend is a startup
 // error rather than a partially applied ingest.
 func (p *Pipeline) runStartupPreflight(ctx context.Context) (string, error) {
-	var (
-		startup     sync.WaitGroup
-		service     map[string]any
-		serviceErr  error
-		backends    []tams.StorageBackend
-		backendsErr error
-	)
-	startup.Add(2)
-	go func() {
-		defer startup.Done()
-		service, serviceErr = p.client.Service(ctx)
-	}()
-	go func() {
-		defer startup.Done()
-		backends, backendsErr = p.client.StorageBackends(ctx)
-	}()
-	startup.Wait()
+	service, backends, serviceErr, backendsErr := tams.ServiceAndBackends(ctx, p.client)
 	// A parent cancellation is a run interruption. Per-request client
 	// deadlines below remain typed TAMS preflight failures while the parent
 	// context is live; do not conflate those two timeout domains.
@@ -57,6 +40,9 @@ func (p *Pipeline) runStartupPreflight(ctx context.Context) (string, error) {
 		return "", withFailure(FailureCodePreflightFailed, FailureMessageTransferLifetimeInvalid, true,
 			fmt.Errorf("validate TAMS service lifetimes: %w", err))
 	}
+	for _, warning := range limits.Warnings {
+		p.logger.Warn(warning)
+	}
 	p.limits = limits
 	p.logger.Debug("store lifetimes",
 		"object_registration", p.limits.ObjectRegistration, "presigned_url", p.limits.PresignedURL)
@@ -65,6 +51,13 @@ func (p *Pipeline) runStartupPreflight(ctx context.Context) (string, error) {
 		return "", withFailure(FailureCodeStorageUnavailable, FailureMessageStorageUnavailable, true, err)
 	}
 	return selection.Backend.ID, nil
+}
+
+// storeIsNewerMinor reports a store on a later minor revision than the
+// pinned schemas describe. Minor revisions add fields, so a Flow read from
+// such a store may legitimately fail the pinned closed schemas.
+func (p *Pipeline) storeIsNewerMinor() bool {
+	return p.apiVersion.Major == tams.SpecMajor && p.apiVersion.Minor > tams.SpecMinor
 }
 
 // APICompatibility is the result of comparing a service document with the

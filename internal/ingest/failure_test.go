@@ -65,7 +65,7 @@ func TestDescribeInputInterruptedFailure(t *testing.T) {
 func TestFailedResultPreservesTypedOperationTimeout(t *testing.T) {
 	t.Parallel()
 	pipeline := &Pipeline{config: Config{Profile: ProfileEssenceSegments, ProfileVersion: "1", VerificationMode: VerificationReadback}}
-	cause := withFailure(FailureCodePreflightFailed, FailureMessagePreflightTimedOut, true, context.DeadlineExceeded)
+	cause := withFailure(FailureCodePreflightFailed, FailureMessagePreflightFailed, true, context.DeadlineExceeded)
 	result := pipeline.failedResult(source.Item{URI: "file:///input.ts"}, cause)
 	if result.Failure == nil || result.Failure.Code != FailureCodePreflightFailed || !result.Failure.ActionRequired {
 		t.Fatalf("typed child deadline was mislabeled: %#v", result.Failure)
@@ -108,6 +108,7 @@ func TestPublishedFailureCodesAreStable(t *testing.T) {
 		{FailureCodePreflightFailed, "tams.preflight_failed"},
 		{FailureCodeStorageUnavailable, "tams.storage_unavailable"},
 		{FailureCodeFlowPlanFailed, "flow.plan_failed"},
+		{FailureCodeSegmentConflict, "tams.segment_conflict"},
 		{FailureCodeFlowWriteFailed, "flow.write_failed"},
 		{FailureCodeTAMSRegistrationFailed, "tams.registration_failed"},
 		{FailureCodeStagingCapacity, "staging.capacity"},

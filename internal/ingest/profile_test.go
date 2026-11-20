@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,22 +12,17 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/source"
 )
 
-type profilePolicyProber struct{ probe media.Probe }
+type profilePolicyProber struct {
+	proberDefaults
+	probe media.Probe
+}
 
 func (p profilePolicyProber) Probe(context.Context, string) (media.Probe, error) {
 	return p.probe, nil
 }
 
-func (profilePolicyProber) Version(context.Context) (string, error) {
-	return "ffprobe version 5.1 test", nil
-}
-
 func (p profilePolicyProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
-}
-
-func (profilePolicyProber) ProbePresentation(context.Context, string, *media.Probe) error {
-	return nil
 }
 
 func TestNamedProfilesAreVersionedMediaContracts(t *testing.T) {
@@ -62,22 +56,16 @@ func TestNamedProfilesAreVersionedMediaContracts(t *testing.T) {
 
 func TestAllBuiltInProfilesCompleteExactDryRuns(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.mp4")
-	if err := os.WriteFile(filename, []byte("fixture"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.mp4", "fixture")
 	for _, definition := range BuiltInProfiles() {
 		t.Run(definition.Name, func(t *testing.T) {
 			t.Parallel()
-			pipeline, err := New(Config{
+			pipeline := mustNew(t, Config{
 				Profile: definition.Name, ProfileVersion: definition.Version,
 				SegmentDuration: definition.SegmentDuration, SegmentFormat: definition.SegmentFormat,
 				EssenceStorage: definition.EssenceStorage, DryRunMode: DryRunExact,
 				Concurrency: 1, Transfers: 1, ProbeConcurrency: 1,
 			}, nil, fakeProber{}, fakeSegmenter{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 			if err != nil {
 				t.Fatalf("Pipeline.Run() = _, %v, want nil", err)
@@ -224,6 +212,10 @@ func TestMPEGTSSegmentsRejectUnsupportedCodecs(t *testing.T) {
 	if err := validateMPEGTSSegmentCodecs(unsupported); err == nil || !strings.Contains(err.Error(), "audio/flac") {
 		t.Fatalf("unsupported codec error = %v", err)
 	}
+	compatible.Streams = append(compatible.Streams, media.Stream{Index: 2, CodecType: "audio", CodecName: "s302m"})
+	if err := validateMPEGTSSegmentCodecs(compatible); err != nil {
+		t.Fatalf("SMPTE 302M rejected: %v", err)
+	}
 }
 
 func TestMuxerChangingArgumentsMustMatchContainerPolicy(t *testing.T) {
@@ -242,54 +234,65 @@ func TestMuxerChangingArgumentsMustMatchContainerPolicy(t *testing.T) {
 
 func TestMPEGTSSegmentPolicyFailsBeforeInvokingFFmpeg(t *testing.T) {
 	directory := t.TempDir()
-	filename := directory + "/audio.flac"
+	filename := directory + "/audio.mp4"
 	if err := os.WriteFile(filename, []byte("flac source"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	prober := profilePolicyProber{probe: media.Probe{
-		Format:  media.Format{Name: "flac", Duration: "1"},
-		Streams: []media.Stream{{Index: 0, CodecType: "audio", CodecName: "flac", SampleRate: "48000", Channels: 2}},
-	}}
-	pipeline, err := New(Config{
-		Profile: ProfileMPEGTSSegments, ProfileVersion: "1",
-		Concurrency: 1, DryRunMode: DryRunExact, SegmentDuration: 2 * time.Second,
-		SegmentFormat: media.SegmentFormatMPEGTS, EssenceStorage: media.EssenceStorageIndependent,
-	}, nil, prober, versionedCountingSegmenter{err: errors.New("FFmpeg must not run")}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if batch.Failed != 1 || len(batch.Results) != 1 || !strings.Contains(batch.Results[0].Error, "audio/flac") {
-		t.Fatalf("result = %#v, want an unsupported MPEG-TS codec failure", batch)
+	for _, format := range []media.SegmentFormat{media.SegmentFormatSource, media.SegmentFormatMPEGTS} {
+		prober := profilePolicyProber{probe: media.Probe{
+			Format:  media.Format{Name: "mov,mp4", Duration: "1", Tags: map[string]string{"major_brand": "isom"}},
+			Streams: []media.Stream{{Index: 0, CodecType: "audio", CodecName: "flac", SampleRate: "48000", Channels: 2}},
+		}}
+		if format == media.SegmentFormatSource {
+			prober.probe.Format.Name = "mpegts"
+		}
+		pipeline := mustNew(t, Config{
+			Profile: ProfileCustom, ProfileVersion: "1",
+			Concurrency: 1, DryRunMode: DryRunExact, SegmentDuration: 2 * time.Second,
+			SegmentFormat: format, EssenceStorage: media.EssenceStorageIndependent,
+		}, nil, prober, versionedCountingSegmenter{err: errors.New("FFmpeg must not run")}, discardLogger(), nil)
+		batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if batch.Failed != 1 || len(batch.Results) != 1 || !strings.Contains(batch.Results[0].Error, "audio/flac") {
+			t.Fatalf("result = %#v, want an unsupported MPEG-TS codec failure", batch)
+		}
 	}
 }
 
-func TestRendererEpochAndByteProfilesDeriveStableFlowIDs(t *testing.T) {
+// TestGeneratedFlowIDIsFixed holds the treatment fingerprint's encoding and
+// the renderer epoch together. Changing either renews this identifier, and
+// with it every generated Flow ID, so the literal moves only on purpose.
+func TestGeneratedFlowIDIsFixed(t *testing.T) {
 	t.Parallel()
 	config := Config{
 		Profile: ProfileEssenceSegments, ProfileVersion: "1",
 		SegmentDuration: 10 * time.Second, SegmentFormat: media.SegmentFormatSource,
 		EssenceStorage: media.EssenceStorageIndependent,
 	}
-	one := namedID("flow", "input", flowProfile("bytes-one", config))
-	differentBytes := namedID("flow", "input", flowProfile("bytes-two", config))
-	newProfile := config
-	newProfile.ProfileVersion = "2"
-	differentProfileVersion := namedID("flow", "input", flowProfile("bytes-one", newProfile))
-	differentRendererEpoch := namedID("flow", "input", flowProfileForRendererEpoch("bytes-one", config, "2"))
-	for label, id := range map[string]string{
-		"different bytes": differentBytes, "different semantic profile": differentProfileVersion,
-		"different renderer epoch": differentRendererEpoch,
-	} {
-		if id == one {
-			t.Fatalf("%s derived the same Flow ID %s", label, id)
+	if got := namedID("flow", "input", flowProfile("bytes-one", config)); got != "95d9b777-3c9c-559c-adac-9540f073060a" {
+		t.Fatalf("generated Flow ID changed to %s", got)
+	}
+}
+
+// TestRendererEpochRenewsEveryProfilesFlowIDs covers what a renewal of the
+// renderer epoch reaches: the generated Flow ID of every named profile, and
+// no Source ID, which the epoch is no part of.
+func TestRendererEpochRenewsEveryProfilesFlowIDs(t *testing.T) {
+	t.Parallel()
+	for _, profile := range BuiltInProfiles() {
+		config := Config{
+			Profile: profile.Name, ProfileVersion: profile.Version, SegmentDuration: profile.SegmentDuration,
+			SegmentFormat: profile.SegmentFormat, EssenceStorage: profile.EssenceStorage,
+		}
+		earlier := namedID("flow", "input", flowProfileForRendererEpoch("bytes", config, "5"))
+		if current := namedID("flow", "input", flowProfile("bytes", config)); current == earlier {
+			t.Errorf("%s: epoch %s derives the Flow ID %s that epoch 5 did", profile.Name, rendererIdentityEpoch, current)
 		}
 	}
-	if rendererIdentityEpoch != "3" {
-		t.Fatalf("renderer identity epoch = %q, want 3", rendererIdentityEpoch)
+	if got := sourceIdentity("abc"); got != "51d68e09-61df-503d-bfbf-3c6c9840b2ba" {
+		t.Errorf("Source ID changed to %s", got)
 	}
 }
 
@@ -313,12 +316,9 @@ func TestWholeFileProfileIsPartOfGeneratedIdentity(t *testing.T) {
 
 func TestMachineResultReportsTheToolchainThatWroteMedia(t *testing.T) {
 	t.Parallel()
-	filename := filepath.Join(t.TempDir(), "fixture.ts")
-	if err := os.WriteFile(filename, []byte("muxed-media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "fixture.ts", "muxed-media")
 	const report = "ffmpeg version 7.0\nconfiguration: --enable-example\nlibavformat 61.0"
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Profile: ProfileEssenceSegments, ProfileVersion: "1",
 		Concurrency: 1, Transfers: 2, DryRunMode: DryRunExact,
 		SegmentDuration: 10 * time.Second, SegmentFormat: media.SegmentFormatSource,
@@ -326,9 +326,6 @@ func TestMachineResultReportsTheToolchainThatWroteMedia(t *testing.T) {
 	}, nil, fakeProber{}, versionedCountingSegmenter{
 		countingSegmenter: countingSegmenter{objects: 2}, version: report,
 	}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 	if err != nil {
 		t.Fatal(err)
@@ -343,5 +340,25 @@ func TestMachineResultReportsTheToolchainThatWroteMedia(t *testing.T) {
 	wantFingerprint := mediaToolchainFingerprint(ProfileEssenceSegments, "1", report)
 	if result.MediaToolchain != wantFingerprint {
 		t.Fatalf("MediaToolchain = %q, want %q", result.MediaToolchain, wantFingerprint)
+	}
+}
+
+func TestRenderedTrackPolicy(t *testing.T) {
+	for _, muxer := range []string{"mp4", "mpegts"} {
+		for _, track := range []media.Stream{
+			{CodecType: "subtitle", CodecName: "mov_text"},
+			{CodecType: "subtitle", CodecName: "eia_608"},
+			{CodecType: "subtitle", CodecName: "dvb_subtitle"},
+			{CodecType: "subtitle", CodecName: "dvb_teletext"},
+			{CodecType: "data", CodecName: "scte_35"},
+			{CodecType: "data", CodecName: "tmcd"},
+			{CodecType: "attachment", CodecName: "ttf"},
+		} {
+			err := validateRenderedTracks(media.Probe{Streams: []media.Stream{track}}, muxer)
+			allowed := muxer == "mp4" && track.CodecName == "mov_text"
+			if (err == nil) != allowed {
+				t.Errorf("%s %s/%s: %v", muxer, track.CodecType, track.CodecName, err)
+			}
+		}
 	}
 }

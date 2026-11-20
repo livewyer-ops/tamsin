@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/livewyer-ops/tamsin/internal/auth"
+	"github.com/livewyer-ops/tamsin/internal/tamstime"
 )
 
 // SegmentListOptions selects what a Segment listing should contain.
@@ -25,6 +26,10 @@ type SegmentListOptions struct {
 	// it off: deciding what to resume needs an Object identifier and a
 	// timerange, nothing more.
 	IncludeDownloadURLs bool
+	// IncludeObjectTimerange asks for each Segment's object_timerange, which
+	// TAMS 8.2 omits unless requested. Resume adoption compares it against the
+	// timing Tamsin would have registered.
+	IncludeObjectTimerange bool
 }
 
 // ListSegments lists a Flow's Segments, following the paging cursor to
@@ -43,6 +48,9 @@ func (c *Client) ListSegments(ctx context.Context, flowID string, options Segmen
 	if options.Timerange != "" {
 		query.Set("timerange", options.Timerange)
 	}
+	if options.IncludeObjectTimerange {
+		query.Set("include_object_timerange", "true")
+	}
 	if options.IncludeDownloadURLs {
 		// Omit the filter: a service may only offer non-presigned URLs.
 		query.Set("verbose_storage", "true")
@@ -56,10 +64,21 @@ func (c *Client) ListSegments(ctx context.Context, flowID string, options Segmen
 		query.Set("accept_get_urls", "")
 		query.Set("presigned", "false")
 	}
-	requestPath := "flows/" + escapeSegment(flowID) + "/segments?" + query.Encode()
+	requestPath := "flows/" + url.PathEscape(flowID) + "/segments?" + query.Encode()
 	segments, err := listPages[Segment](ctx, c, requestPath, "segments for flow "+flowID)
 	if err != nil {
 		return nil, err
+	}
+	// A listing decides what is resumed, adopted and confirmed deleted, so an
+	// entry that cannot be matched must fail the listing instead of reading as
+	// a Segment that is not there.
+	for _, segment := range segments {
+		if segment.ObjectID == "" {
+			return nil, fmt.Errorf("listing segments for flow %s returned a segment without an object_id", flowID)
+		}
+		if !tamstime.SegmentTimeRange(segment.Timerange) {
+			return nil, fmt.Errorf("listing segments for flow %s returned a segment without a valid timerange", flowID)
+		}
 	}
 	if !options.IncludeDownloadURLs {
 		// Preserve the caller's disclosure choice even if a service ignores it.
@@ -93,6 +112,11 @@ func listPages[T any](ctx context.Context, c *Client, requestPath, description s
 		response, err := c.doJSONResponse(ctx, http.MethodGet, requestPath, nil, &page, http.StatusOK)
 		if err != nil {
 			return nil, err
+		}
+		// An empty body or null leaves the page nil. Only an array, which may
+		// be empty, says what the listing holds.
+		if page == nil {
+			return nil, fmt.Errorf("listing %s returned a response that is not a JSON array", description)
 		}
 		if response.BodyBytes > c.segmentByteLimit-responseBytes {
 			return nil, fmt.Errorf("listing %s exceeded %d response bytes", description, c.segmentByteLimit)

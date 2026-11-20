@@ -3,6 +3,7 @@ package media
 import (
 	"errors"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -28,6 +29,28 @@ func TestSegmentDirectorySamplingToleratesRemovedChildrenOnly(t *testing.T) {
 	err := addSegmentDirectoryEntry("/segments", "/segments", nil, os.ErrNotExist, &total)
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing staging root error = %v, want os.ErrNotExist", err)
+	}
+}
+
+func TestStagingDirectoryBytesCountsRegularFilesAndChecksOverflow(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "segment.ts")
+	if err := os.WriteFile(path, []byte("123"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(path, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if size, err := StagingDirectoryBytes(root); err != nil || size != 3 {
+		t.Fatalf("size = %d, err = %v", size, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := int64(math.MaxInt64 - 2)
+	if err := addSegmentDirectoryEntry(root, path, fs.FileInfoToDirEntry(info), nil, &total); err == nil {
+		t.Fatal("staging byte count overflowed")
 	}
 }
 

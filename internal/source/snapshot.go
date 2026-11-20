@@ -68,7 +68,7 @@ func (r *Resolver) httpRange(ctx context.Context, target *url.URL, headers http.
 		}
 		// A transport error can contain the complete request, including a
 		// signed query. The operation alone is enough here.
-		return nil, withPublicError("Remote input request failed.", errors.New("remote input request failed"))
+		return nil, withPublicError("Remote input request failed.", fmt.Errorf("remote input %w", netio.ErrRequestFailed))
 	}
 	response.Body = watch.DemandBody(response.Body)
 	return response, nil

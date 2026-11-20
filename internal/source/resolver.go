@@ -151,8 +151,6 @@ func New(config Config) *Resolver {
 		metadataTimeout:     config.MetadataTimeout,
 		maxInputs:           config.MaxInputs,
 		observability:       config.Observability,
-		seen:                make(map[string]struct{}),
-		manifests:           make(map[string]struct{}),
 	}
 }
 
@@ -272,6 +270,9 @@ func (r *Resolver) resolveLocal(ctx context.Context, input string) ([]Item, erro
 			if walkErr != nil {
 				return walkErr
 			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if entry.Type().IsRegular() {
 				uri := fileURI(path)
 				if _, exists := r.seen[uri]; exists {
@@ -366,6 +367,9 @@ func (r *Resolver) resolveManifest(ctx context.Context, filename string) ([]Item
 	scanner.Buffer(make([]byte, 64<<10), maxManifestLine)
 	lineNumber := 0
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		lineNumber++
 		if !utf8.Valid(scanner.Bytes()) {
 			return nil, fmt.Errorf("manifest %s:%d is not valid UTF-8", filename, lineNumber)
@@ -457,7 +461,7 @@ func (r *Resolver) resolveHTTP(parsed *url.URL) ([]Item, error) {
 			}
 			// A transport error can contain the complete request, including input
 			// credentials. The operation and redacted URL are enough here.
-			return nil, false, fmt.Errorf("download input %s: request failed", auth.RedactURL(parsed.String()))
+			return nil, false, fmt.Errorf("download input %s: %w", auth.RedactURL(parsed.String()), netio.ErrRequestFailed)
 		}
 		watch.Progress()
 		responseBody := watch.Body(response.Body)

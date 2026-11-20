@@ -26,16 +26,18 @@ func (p *Pipeline) executeFlowPlan(ctx context.Context, inputURI string, graph f
 	if p.config.DryRunMode != DryRunOff {
 		return nil
 	}
-	p.expectTransfers(ctx, collectPlannedFlowObjects(targets))
-	if err := p.writeFlowGraph(ctx, planned, results); err != nil {
+	p.expectTransfers(ctx, targets)
+	if err := p.writeFlowGraph(ctx, planned, results, graph.changes); err != nil {
 		return err
 	}
+	p.populateSources(ctx, planned)
 	defer p.finishFlowStatus(ctx, graph, "Flow graph", &returnErr)
 	for _, target := range targets {
 		if target.role != "" {
 			p.logger.Info("ingesting essence", "input", inputURI, "flow_id", target.flowID, "role", target.role)
 		}
-		if err := p.registerFlow(ctx, target.flowID, target.objects, results[target.resultIndex].Objects, storageID); err != nil {
+		var throughput float64
+		if err := p.registerFlow(ctx, target.flowID, plannedContainer(planned, target.flowID), target.objects, results[target.resultIndex].Objects, storageID, &throughput, graph.changes); err != nil {
 			return withFailure(FailureCodeTAMSRegistrationFailed, FailureMessageTAMSRegistrationFailed, true, err)
 		}
 	}
@@ -54,24 +56,25 @@ func (p *Pipeline) planFlowWrites(ctx context.Context, graph flowGraph, results 
 	return planned, p.observeFlowPlans(ctx, graph, planned, results)
 }
 
-func (p *Pipeline) writeFlowGraph(ctx context.Context, planned []plannedFlowWrite, results []FlowResult) error {
+func (p *Pipeline) writeFlowGraph(ctx context.Context, planned []plannedFlowWrite, results []FlowResult, changes flowChanges) error {
 	if p.config.DryRunMode != DryRunOff {
 		return nil
 	}
-	if err := p.commitFlowGraphObserved(ctx, planned, results); err != nil {
+	if err := p.commitFlowGraphObserved(ctx, planned, results, changes); err != nil {
 		return withFailure(FailureCodeFlowWriteFailed, FailureMessageFlowWriteFailed, true, err)
 	}
 	return nil
 }
 
-func collectPlannedFlowObjects(targets []flowRegistrationTarget) []preparedObject {
-	total := 0
-	for index := range targets {
-		total += len(targets[index].objects)
+// plannedContainer is the container the written Flow declares. Every Media
+// Object uploaded for the Flow is typed as it unless the store instructs
+// otherwise.
+func plannedContainer(planned []plannedFlowWrite, flowID string) string {
+	for _, plan := range planned {
+		if plan.member.id == flowID {
+			container, _ := plan.effective["container"].(string)
+			return container
+		}
 	}
-	objects := make([]preparedObject, 0, total)
-	for _, target := range targets {
-		objects = append(objects, target.objects...)
-	}
-	return objects
+	return ""
 }

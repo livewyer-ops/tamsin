@@ -316,13 +316,11 @@ func TestSegmentOutputsCannotGrowPastTheGlobalBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lease.release()
-	pipeline, err := New(config, newFakeClient(), fakeProber{}, sparseCapacitySegmenter{bytes: required + 16}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pipeline := mustNew(t, config, newFakeClient(), fakeProber{}, sparseCapacitySegmenter{bytes: required + 16}, discardLogger(), nil)
 	staged := stagedFile{path: input, size: 1, lease: lease, cleanup: func() {}}
-	_, cleanup, err := pipeline.prepareObjects(context.Background(), "flow", staged,
-		media.FlowInfo{Duration: int64(time.Second), SegmentContainer: media.SegmentContainer{Muxer: "mpegts", Extension: ".ts"}})
+	cleanup, err := pipeline.renderSegmentsTo(context.Background(), staged,
+		media.FlowInfo{Duration: int64(time.Second), SegmentContainer: media.SegmentContainer{Muxer: "mpegts", Extension: ".ts"}},
+		[]int{media.AllStreams}, nil, pipeline.rollingStagingWindow(staged), func(media.SegmentRecord) error { return nil })
 	cleanup()
 	var capacity *stagingCapacityError
 	if !errors.As(err, &capacity) {
@@ -408,14 +406,11 @@ func TestRollingMultiOutputUsesOneGlobalPendingWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	segmenter := &rollingBoundSegmenter{objects: objectsPerFlow}
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 8, ProbeConcurrency: 1,
 		SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageIndependent,
 		TempDirectory: directory,
 	}, newFakeClient(), fourEssenceProber{}, segmenter, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(input)})
 	if err != nil || batch.Succeeded != 1 {
 		t.Fatalf("multi-output rolling ingest = %#v, %v", batch, err)
@@ -445,14 +440,11 @@ func TestRollingSegmentsKeepDiskAndTerminalMemoryBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	segmenter := &rollingBoundSegmenter{objects: objects}
-	pipeline, err := New(Config{
+	pipeline := mustNew(t, Config{
 		Concurrency: 1, Transfers: 8, ProbeConcurrency: 1,
 		SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed,
 		TempDirectory: directory,
 	}, newFakeClient(), fakeProber{}, segmenter, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(input)})
 	if err != nil || batch.Succeeded != 1 {
 		t.Fatalf("rolling ingest = %#v, %v", batch, err)
@@ -471,4 +463,12 @@ func TestRollingSegmentsKeepDiskAndTerminalMemoryBounded(t *testing.T) {
 		segmenter.window.LowBytes >= segmenter.window.HighBytes {
 		t.Fatalf("renderer staging window = %#v", segmenter.window)
 	}
+}
+
+func (sparseCapacitySegmenter) ProbeParameterSets(context.Context, string, int) (media.ParameterSets, error) {
+	return media.ParameterSets{}, nil
+}
+
+func (*rollingBoundSegmenter) ProbeParameterSets(context.Context, string, int) (media.ParameterSets, error) {
+	return media.ParameterSets{}, nil
 }

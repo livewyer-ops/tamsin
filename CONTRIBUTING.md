@@ -1,10 +1,6 @@
 # Contributing
 
-TAMSin is an ingest utility. Prefer a small change that
-solves a demonstrated operator problem over a new abstraction or subsystem.
-Use existing code, the Go standard library, platform features and current
-dependencies before adding another implementation or dependency.
-
+TAMSin is an ingest utility.
 Open an issue before investing in a large feature or public-contract change.
 General TAMS administration is outside the project's scope.
 
@@ -27,21 +23,32 @@ TAMS 8.1 and 8.2 TAMOSS implementations.
 For a focused rerun, use `make e2e TAMSIN_E2E_VERSION=8.2` (or 8.1).
 Both versions must pass before release.
 
+`make coverage` runs the tests with a coverage profile, writes it to
+`coverage.out` and prints the total. `make verify` does not run it.
+
+Benchmarks are not part of `make verify`. Run them by hand when a change may
+affect the number of TAMS requests, transfer concurrency or staging:
+
+```sh
+go test ./internal/ingest -run '^$' -bench . -benchtime 1x
+```
+
+`BenchmarkRemoteInput` runs FFmpeg over a generated three-minute input. Set
+`TAMSIN_BENCH_INPUT` to measure a file of your own.
+
 Changes to source resolution, authentication, Flow/Object identity, mutation,
 verification, output events or exit codes need an observable behaviour test.
-Tests must be deterministic and safe to run with the complete suite. Do not
-commit generated binaries, media fixtures, credentials, Kind state or TAMOSS
-source caches.
+Tests must be deterministic and safe to run with the complete suite. Keep
+stdout machine-readable, diagnostics on stderr, credentials redacted and
+retries bounded. Do not commit generated binaries, media fixtures,
+credentials, Kind state or TAMOSS source caches.
 
 See [Releasing](docs/releasing.md) for the binary and container release steps.
 
 ## Pull requests
 
-Use a Conventional Commit-style, user-meaningful title. Keep the description to
-the problem, user-visible decision, security/resource impact and verification.
-Keep stdout machine-readable, diagnostics on stderr, credentials redacted and
-retries bounded.
+Use a Conventional Commit title; the squash merge uses it as the commit
+subject.
 
-Contributors are responsible for every submitted change regardless of the
-tools used to produce it. Do not include customer media, private source or
-credentials in external tools, commits, tests or issues.
+Do not include customer media, private source or credentials in external
+tools, commits, tests or issues.

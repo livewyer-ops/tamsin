@@ -98,8 +98,7 @@ func TestStreamedContainersAndEssenceLayouts(t *testing.T) {
 	}{
 		{"mp4 tail moov and B-frames", ".mp4", []string{"-f", "lavfi", "-i", "testsrc2=size=128x96:rate=25:duration=6", "-c:v", "libx264", "-g", "50", "-bf", "3"}, media.EssenceStorageMuxed, media.SegmentFormatSource},
 		{"mpegts", ".ts", []string{"-f", "lavfi", "-i", "testsrc2=size=128x96:rate=25:duration=6", "-c:v", "libx264", "-g", "50", "-bf", "3"}, media.EssenceStorageMuxed, media.SegmentFormatMPEGTS},
-		{"mxf", ".mxf", []string{"-f", "lavfi", "-i", "testsrc2=size=128x96:rate=25:duration=6", "-c:v", "mpeg2video", "-g", "25", "-pix_fmt", "yuv422p"}, media.EssenceStorageMuxed, media.SegmentFormatSource},
-		{"audio", ".wav", []string{"-f", "lavfi", "-i", "sine=sample_rate=48000:duration=6", "-c:a", "pcm_s16le"}, media.EssenceStorageIndependent, media.SegmentFormatSource},
+		{"audio", ".mp4", []string{"-f", "lavfi", "-i", "sine=sample_rate=48000:duration=6", "-c:a", "aac"}, media.EssenceStorageIndependent, media.SegmentFormatSource},
 		{"two independent streams", ".mp4", []string{"-f", "lavfi", "-i", "testsrc2=size=128x96:rate=25:duration=6", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=6", "-c:v", "libx264", "-g", "50", "-c:a", "aac"}, media.EssenceStorageIndependent, media.SegmentFormatSource},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -107,10 +106,7 @@ func TestStreamedContainersAndEssenceLayouts(t *testing.T) {
 			item, _ := serveStreamFixture(t, filename, 0)
 			client := newFakeClient()
 			config := Config{InputMode: InputStream, SegmentDuration: 2 * time.Second, SegmentFormat: tc.format, EssenceStorage: tc.storage, TempDirectory: t.TempDir(), VerificationMode: VerificationReadback}
-			pipeline, err := New(config, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+			pipeline := mustNew(t, config, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
 			batch, err := pipeline.Run(t.Context(), []source.Item{item})
 			if err != nil || batch.Succeeded != 1 {
 				t.Fatalf("run: %v, results: %+v", err, batch.Results)
@@ -138,7 +134,9 @@ func TestStreamedContainersAndEssenceLayouts(t *testing.T) {
 }
 
 func TestStreamingRegistersBeforeReadingWholeInputLargerThanBudget(t *testing.T) {
-	filename := streamFixture(t, ".wav", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=180", "-c:a", "pcm_s16le")
+	// The byte counter includes overlapping probe and render reads. Keep the
+	// TS fixture large enough to distinguish those reads from the complete input.
+	filename := streamFixture(t, ".ts", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=320", "-c:a", "mp2", "-b:a", "384k")
 	for _, scheme := range []string{"http", "s3"} {
 		t.Run(scheme, func(t *testing.T) {
 			item, read := serveStreamFixture(t, filename, time.Millisecond)
@@ -149,7 +147,7 @@ func TestStreamingRegistersBeforeReadingWholeInputLargerThanBudget(t *testing.T)
 					options.BaseEndpoint = aws.String(endpoint)
 					options.UsePathStyle = true
 				})
-				items, err := newResolver(source.Config{S3Client: client, S3: source.S3Config{Endpoint: endpoint}}).Resolve(t.Context(), []string{"s3://bucket/media.wav"})
+				items, err := newResolver(source.Config{S3Client: client, S3: source.S3Config{Endpoint: endpoint}}).Resolve(t.Context(), []string{"s3://bucket/media.ts"})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -164,10 +162,7 @@ func TestStreamingRegistersBeforeReadingWholeInputLargerThanBudget(t *testing.T)
 			client.onRegisterSegments = func() { firstRead.CompareAndSwap(0, read.Load()) }
 			config := Config{InputMode: InputStream, SegmentDuration: 10 * time.Second, EssenceStorage: media.EssenceStorageMuxed,
 				StagingByteBudget: 4 << 20, TempDirectory: t.TempDir()}
-			pipeline, err := New(config, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+			pipeline := mustNew(t, config, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
 			batch, err := pipeline.Run(t.Context(), []source.Item{item})
 			if err != nil || batch.Succeeded != 1 {
 				t.Fatalf("run: %v, results: %+v", err, batch.Results)
@@ -189,10 +184,7 @@ func TestStreamModeFallbackAndPassthrough(t *testing.T) {
 	}
 	for _, mode := range []InputMode{InputAuto, InputStream, InputStage} {
 		client := newFakeClient()
-		pipeline, err := New(Config{InputMode: mode, SegmentDuration: time.Second}, client, fakeProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		pipeline := mustNew(t, Config{InputMode: mode, SegmentDuration: time.Second}, client, fakeProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
 		batch, err := pipeline.Run(t.Context(), items)
 		if err != nil || (batch.Failed == 1) != (mode == InputStream) {
 			t.Fatalf("mode=%s: %v, %+v", mode, err, batch.Results)
@@ -221,17 +213,14 @@ func TestStreamedVariableCadenceKeepsOnlyAValidPrefix(t *testing.T) {
 		{"variable after a validated pending segment", 125, true, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			filename := streamFixture(t, ".mkv", "-f", "lavfi", "-i", "testsrc2=size=128x96:rate=25:duration=6",
+			filename := streamFixture(t, ".ts", "-f", "lavfi", "-i", "testsrc2=size=128x96:rate=25:duration=6",
 				"-vf", fmt.Sprintf("setpts=PTS+if(gte(N\\,%d)\\,0.2/TB\\,0)", tc.frame),
 				"-fps_mode", "vfr", "-c:v", "libx264", "-bf", "0", "-g", "50")
 			item, _ := serveStreamFixture(t, filename, 0)
 			client := newFakeClient()
 			client.serviceDocument = map[string]any{"api_version": "8.2", "min_object_timeout": "300:0", "min_presigned_url_timeout": "30:0"}
-			pipeline, err := New(Config{InputMode: InputStream, SegmentDuration: 2 * time.Second, EssenceStorage: media.EssenceStorageMuxed, TempDirectory: t.TempDir()},
+			pipeline := mustNew(t, Config{InputMode: InputStream, SegmentDuration: 2 * time.Second, EssenceStorage: media.EssenceStorageMuxed, TempDirectory: t.TempDir()},
 				client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
 			batch, err := pipeline.Run(t.Context(), []source.Item{item})
 			if err != nil || (batch.Failed == 1) != tc.fail {
 				t.Fatalf("run=%v, results=%+v", err, batch.Results)
@@ -256,20 +245,20 @@ func TestStreamRevisionAndMetadataGuardExplicitFlowID(t *testing.T) {
 	client := newFakeClient()
 	client.flows[flowID] = map[string]any{"source_id": "source", "tags": map[string]any{media.TagPrefix + "input_revision": "old"}}
 	pipeline := &Pipeline{client: client, config: Config{DryRunMode: DryRunOff}}
-	_, err := pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: map[string]any{"source_id": "source", "tags": map[string]any{media.TagPrefix + "input_revision": "new"}}})
+	_, err := pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: map[string]any{"source_id": "source", "tags": map[string]any{media.TagPrefix + "input_revision": "new"}}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "different input revision") || client.putFlowCalls != 0 {
 		t.Fatalf("revision guard: %v, writes=%d", err, client.putFlowCalls)
 	}
 	// A Flow written from staged bytes lets auto mode stage again instead of
 	// failing; a Flow written from a streamed revision names its remedy.
 	client.flows[flowID] = map[string]any{"source_id": "source", "tags": map[string]any{}}
-	_, err = pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: map[string]any{"source_id": "source", "tags": map[string]any{media.TagPrefix + "input_revision": "new"}}})
+	_, err = pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: map[string]any{"source_id": "source", "tags": map[string]any{media.TagPrefix + "input_revision": "new"}}}, nil)
 	var unavailable *source.StreamUnavailableError
 	if !errors.As(err, &unavailable) || client.putFlowCalls != 0 {
 		t.Fatalf("staged Flow streamed: %v, writes=%d", err, client.putFlowCalls)
 	}
 	client.flows[flowID] = map[string]any{"source_id": "source", "tags": map[string]any{media.TagPrefix + "input_revision": "old"}}
-	_, err = pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: map[string]any{"source_id": "source", "tags": map[string]any{}}})
+	_, err = pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: map[string]any{"source_id": "source", "tags": map[string]any{}}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "--input-mode=stream") || client.putFlowCalls != 0 {
 		t.Fatalf("streamed Flow staged: %v, writes=%d", err, client.putFlowCalls)
 	}
@@ -278,12 +267,29 @@ func TestStreamRevisionAndMetadataGuardExplicitFlowID(t *testing.T) {
 	existing := maps.Clone(flow)
 	existing["essence_parameters"] = map[string]any{"frame_rate": map[string]any{"numerator": 25, "denominator": 1}, "vfr": false}
 	client.flows[flowID] = existing
-	if _, err := pipeline.planFlowWrite(t.Context(), graphFlow{id: flowID, flow: flow}); err != nil {
+	if _, err := pipeline.planFlowWrite(t.Context(), graphFlow{id: flowID, flow: flow}, nil); err != nil {
 		t.Fatalf("normal Flow GET defaults prevented resume: %v", err)
 	}
 	existing["essence_parameters"] = map[string]any{"frame_rate": map[string]any{"numerator": 30, "denominator": 1}}
-	if _, err := pipeline.planFlowWrite(t.Context(), graphFlow{id: flowID, flow: flow}); err == nil || !strings.Contains(err.Error(), "/essence_parameters") {
+	if _, err := pipeline.planFlowWrite(t.Context(), graphFlow{id: flowID, flow: flow}, nil); err == nil || !strings.Contains(err.Error(), "/essence_parameters") {
 		t.Fatalf("technical metadata guard: %v", err)
+	}
+
+	// The same guard holds for staged input: an explicit --flow-id pointing
+	// at a different file must fail before mutation, while the same file
+	// resumes and a Flow that declares no technical metadata may be described.
+	staged := tams.Flow{"source_id": "source", "tags": map[string]any{}, "format": "urn:x-nmos:format:video", "codec": "video/h264", "container": "video/mp4"}
+	client.flows[flowID] = tams.Flow{"source_id": "source", "tags": map[string]any{}, "format": "urn:x-nmos:format:video", "codec": "video/h265", "container": "video/mp4"}
+	if _, err := pipeline.planFlowWrite(t.Context(), graphFlow{id: flowID, flow: staged}, nil); err == nil || !strings.Contains(err.Error(), "/codec") || client.putFlowCalls != 0 {
+		t.Fatalf("staged technical metadata guard: %v, writes=%d", err, client.putFlowCalls)
+	}
+	client.flows[flowID] = maps.Clone(staged)
+	if _, err := pipeline.planFlowWrite(t.Context(), graphFlow{id: flowID, flow: staged}, nil); err != nil {
+		t.Fatalf("identical staged Flow did not resume: %v", err)
+	}
+	client.flows[flowID] = tams.Flow{"source_id": "source", "tags": map[string]any{}, "label": "placeholder"}
+	if _, err := pipeline.planFlowWrite(t.Context(), graphFlow{id: flowID, flow: staged}, nil); err != nil {
+		t.Fatalf("a Flow without technical metadata could not be described: %v", err)
 	}
 }
 
@@ -293,10 +299,7 @@ func TestStreamingFallsBackBeforeMutationWhenInitialCadenceIsUnknown(t *testing.
 	for _, mode := range []InputMode{InputStream, InputAuto} {
 		client := newFakeClient()
 		config := Config{InputMode: mode, SegmentDuration: time.Second, EssenceStorage: media.EssenceStorageMuxed, TempDirectory: t.TempDir()}
-		pipeline, err := New(config, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		pipeline := mustNew(t, config, client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
 		batch, err := pipeline.Run(t.Context(), []source.Item{item})
 		if err != nil || (batch.Failed == 1) != (mode == InputStream) {
 			t.Fatalf("mode=%s run=%v results=%+v", mode, err, batch.Results)
@@ -342,11 +345,8 @@ func TestStreamFallbackCannotHideAnUpstreamFailure(t *testing.T) {
 		},
 	}
 	client := newFakeClient()
-	pipeline, err := New(Config{InputMode: InputAuto, SegmentDuration: time.Second, TempDirectory: t.TempDir()},
+	pipeline := mustNew(t, Config{InputMode: InputAuto, SegmentDuration: time.Second, TempDirectory: t.TempDir()},
 		client, unavailableAfterReadProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(t.Context(), []source.Item{item})
 	if err != nil || batch.Failed != 1 || staged.Load() || client.putFlowCalls != 0 {
 		t.Fatalf("run=%v staged=%v writes=%d results=%+v", err, staged.Load(), client.putFlowCalls, batch.Results)
@@ -369,11 +369,8 @@ func TestExplicitStreamRefusalReportsStableCode(t *testing.T) {
 			},
 		}
 		client := newFakeClient()
-		pipeline, err := New(Config{InputMode: mode, SegmentDuration: time.Second, TempDirectory: t.TempDir()},
+		pipeline := mustNew(t, Config{InputMode: mode, SegmentDuration: time.Second, TempDirectory: t.TempDir()},
 			client, fakeProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
 		batch, err := pipeline.Run(t.Context(), []source.Item{item})
 		if err != nil {
 			t.Fatal(err)
@@ -430,11 +427,8 @@ func TestStreamedSegmentWithoutCadenceEvidenceKeepsTheDeclaredPlan(t *testing.T)
 		},
 	}
 	client := newFakeClient()
-	pipeline, err := New(Config{InputMode: InputStream, SegmentDuration: time.Second, TempDirectory: t.TempDir()},
+	pipeline := mustNew(t, Config{InputMode: InputStream, SegmentDuration: time.Second, TempDirectory: t.TempDir()},
 		client, cadenceGapProber{gap: "segment-00000002.mp4"}, countingSegmenter{objects: 4}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(t.Context(), []source.Item{item})
 	if err != nil || batch.Failed != 0 || client.uploads != 4 {
 		t.Fatalf("run=%v uploads=%d results=%+v", err, client.uploads, batch.Results)
@@ -442,16 +436,13 @@ func TestStreamedSegmentWithoutCadenceEvidenceKeepsTheDeclaredPlan(t *testing.T)
 }
 
 func TestStagedFlowStreamRefusalAndAutomaticFallback(t *testing.T) {
-	filename := streamFixture(t, ".wav", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=3", "-c:a", "pcm_s16le")
+	filename := streamFixture(t, ".mp4", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=3", "-c:a", "aac")
 	item, _ := serveStreamFixture(t, filename, 0)
 	client := newFakeClient()
 	for _, mode := range []InputMode{InputStage, InputStream, InputAuto} {
-		pipeline, err := New(Config{FlowID: "2233e4e2-796e-4c40-990a-2b23bb7dce32", InputMode: mode,
+		pipeline := mustNew(t, Config{FlowID: "2233e4e2-796e-4c40-990a-2b23bb7dce32", InputMode: mode,
 			SegmentDuration: time.Second, TempDirectory: t.TempDir()},
 			client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
 		writes, uploads := client.putFlowCalls, client.uploads
 		batch, err := pipeline.Run(t.Context(), []source.Item{item})
 		if err != nil {
@@ -502,12 +493,9 @@ func TestStreamedSegmentsAcceptOperatorSuppliedCodec(t *testing.T) {
 		},
 	}
 	client := newFakeClient()
-	pipeline, err := New(Config{InputMode: InputStream, SegmentDuration: time.Second, TempDirectory: t.TempDir(),
+	pipeline := mustNew(t, Config{InputMode: InputStream, SegmentDuration: time.Second, TempDirectory: t.TempDir(),
 		FlowMetadata: map[string]any{"codec": "video/x-dnxhd"}},
 		client, unsupportedCodecProber{}, countingSegmenter{objects: 2}, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	batch, err := pipeline.Run(t.Context(), []source.Item{item})
 	if err != nil || batch.Failed != 0 || client.uploads != 2 {
 		t.Fatalf("run=%v uploads=%d results=%+v", err, client.uploads, batch.Results)
@@ -520,5 +508,28 @@ func TestGeneratedLabelUsesTheSameDigestFormForEveryInputKind(t *testing.T) {
 	streamed := generatedLabel("sha256:1a2b3c4d5e6f7a8b9c0d")
 	if staged != "TAMSin 1a2b3c4d5e6f" || streamed != staged {
 		t.Fatalf("labels: staged=%q streamed=%q", staged, streamed)
+	}
+}
+
+func TestStreamedMP4RetainsFixedCadence(t *testing.T) {
+	filename := streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=7", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=7", "-c:v", "libx264", "-g", "50", "-bf", "0", "-c:a", "aac")
+	item, _ := serveStreamFixture(t, filename, 0)
+	pipeline := mustNew(t, Config{InputMode: InputStream, SegmentDuration: 2 * time.Second, EssenceStorage: media.EssenceStorageMuxed, TempDirectory: t.TempDir()}, newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
+	batch, err := pipeline.Run(t.Context(), []source.Item{item})
+	if err != nil || batch.Succeeded != 1 {
+		t.Fatalf("MP4 cadence: %v, %+v", err, batch.Results)
+	}
+}
+
+func TestStreamedCollectedAudioOverrideMustMatchRenderedChannels(t *testing.T) {
+	path := streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=3", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=3", "-c:v", "libx264", "-g", "25", "-c:a", "aac")
+	item, _ := serveStreamFixture(t, path, 0)
+	for _, layout := range []media.EssenceStorage{media.EssenceStorageMuxed, media.EssenceStorageIndependent} {
+		c := newFakeClient()
+		p := mustNew(t, Config{InputMode: InputStream, SegmentDuration: time.Second, EssenceStorage: layout, CollectedFlowMetadata: map[string]tams.Flow{"audio": {"essence_parameters": map[string]any{"channels": 2, "sample_rate": 48000}}}}, c, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
+		b, err := p.Run(t.Context(), []source.Item{item})
+		if err != nil || b.Failed != 1 || !strings.Contains(b.Results[0].Error, "/essence_parameters/channels") || len(c.flows) != 0 || c.allocations != 0 {
+			t.Fatalf("%s accepted contradicted audio metadata or mutated the graph: %v %+v", layout, err, b.Results)
+		}
 	}
 }

@@ -199,8 +199,13 @@ func (p *Pipeline) expandFlowProfile(ctx context.Context, member graphFlow) (gra
 		}
 		generated, generatedPresent := member.flow[field]
 		required, requiredPresent := metadata[field]
-		mismatch := firstJSONValueMismatch(appendJSONPointer("/flow_metadata", field),
-			generated, generatedPresent, required, requiredPresent)
+		var mismatch *jsonValueMismatch
+		if field == "essence_parameters" {
+			mismatch = firstEssenceParameterMismatch(generated, generatedPresent, required, requiredPresent)
+		} else {
+			mismatch = firstJSONValueMismatch(appendJSONPointer("/flow_metadata", field),
+				generated, generatedPresent, required, requiredPresent)
+		}
 		if mismatch != nil {
 			err := fmt.Errorf(
 				"flow %s does not exactly match TAMS Flow Profile %s at %s (generated=%s profile=%s)",
@@ -217,6 +222,40 @@ func (p *Pipeline) expandFlowProfile(ctx context.Context, member graphFlow) (gra
 	expanded["profile_id"] = member.profileID
 	member.flow = expanded
 	return member, nil
+}
+
+// firstEssenceParameterMismatch compares essence parameters one-sidedly. A
+// Profile is the fuller description: the BBC reference Profiles declare
+// component type, chroma subsampling or codec parameters that a probe cannot
+// establish, and the expansion adopts them. Every parameter Tamsin did
+// establish must be declared by the Profile with the same value, otherwise the
+// Profile would silently redescribe the media. Top-level fields stay strict in
+// both directions.
+func firstEssenceParameterMismatch(generated any, generatedPresent bool, profile any, profilePresent bool) *jsonValueMismatch {
+	const path = "/flow_metadata/essence_parameters"
+	if !generatedPresent {
+		return nil
+	}
+	if !profilePresent {
+		return firstJSONValueMismatch(path, generated, true, profile, false)
+	}
+	generatedParameters, generatedObject := generated.(map[string]any)
+	profileParameters, profileObject := profile.(map[string]any)
+	if !generatedObject || !profileObject {
+		return firstJSONValueMismatch(path, generated, true, profile, true)
+	}
+	keys := make([]string, 0, len(generatedParameters))
+	for key := range generatedParameters {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		required, requiredPresent := profileParameters[key]
+		if mismatch := firstJSONValueMismatch(appendJSONPointer(path, key), generatedParameters[key], true, required, requiredPresent); mismatch != nil {
+			return mismatch
+		}
+	}
+	return nil
 }
 
 func profileMismatchMessage(mismatch *jsonValueMismatch) string {

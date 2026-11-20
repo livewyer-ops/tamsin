@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math/big"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -21,10 +22,7 @@ import (
 )
 
 func TestRefreshedSignedURLResumesTheSameGeneratedGraph(t *testing.T) {
-	filename := filepath.Join(t.TempDir(), "programme.ts")
-	if err := os.WriteFile(filename, []byte("stable muxed media"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "programme.ts", "stable muxed media")
 	firstURL := "https://alice:first-secret@media.example.test/library/programme.ts?" +
 		"X-Amz-Credential=first-credential&X-Amz-Signature=first-signature#first-fragment"
 	secondURL := "https://bob:second-secret@media.example.test/library/programme.ts?" +
@@ -41,10 +39,7 @@ func TestRefreshedSignedURLResumesTheSameGeneratedGraph(t *testing.T) {
 		t.Helper()
 		item := localSource(filename)
 		item.URI, item.Name = rawURL, "programme.ts"
-		pipeline, err := New(config, client, muxedProber{}, countingSegmenter{objects: 2}, logger, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		pipeline := mustNew(t, config, client, muxedProber{}, countingSegmenter{objects: 2}, logger, nil)
 		batch, err := pipeline.Run(context.Background(), []source.Item{item})
 		if err != nil {
 			t.Fatal(err)
@@ -105,21 +100,15 @@ func TestRefreshedSignedURLResumesTheSameGeneratedGraph(t *testing.T) {
 func TestDuplicateContentIsSerializedAndProvenanceIsDeterministic(t *testing.T) {
 	run := func(concurrency int) (string, []Result, int, int) {
 		t.Helper()
-		filename := filepath.Join(t.TempDir(), "shared.bin")
-		if err := os.WriteFile(filename, []byte("one representation"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		filename := writeFixture(t, "shared.bin", "one representation")
 		first, second := localSource(filename), localSource(filename)
 		first.URI, first.Name = "https://origin-b.example.test/b/programme.bin?token=one", "b.bin"
 		second.URI, second.Name = "https://origin-a.example.test/a/programme.bin?token=two", "a.bin"
 		client := newFakeClient()
-		pipeline, err := New(Config{
+		pipeline := mustNew(t, Config{
 			Concurrency: concurrency, Transfers: 2, SegmentDuration: time.Second,
 			EssenceStorage: media.EssenceStorageMuxed,
 		}, client, fakeProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
 		batch, err := pipeline.Run(context.Background(), []source.Item{first, second})
 		if err != nil {
 			t.Fatal(err)
@@ -182,12 +171,9 @@ func TestGeneratedIdentityIncludesEffectiveMediaInterpretation(t *testing.T) {
 	}
 	run := func(filename string) Result {
 		t.Helper()
-		pipeline, err := New(Config{
+		pipeline := mustNew(t, Config{
 			DryRunMode: DryRunExact, SegmentDuration: 0, EssenceStorage: media.EssenceStorageMuxed,
 		}, nil, filenameSensitiveProber{}, nil, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
 		batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 		if err != nil {
 			t.Fatal(err)
@@ -244,9 +230,6 @@ func TestGeneratedIdentityCoversEveryMediaTreatmentField(t *testing.T) {
 	if flowProfile("bytes-a", left) == flowProfile("bytes-a", right) {
 		t.Fatal("FFmpeg argument boundaries collide in the media-treatment fingerprint")
 	}
-	if flowProfileForRendererEpoch("bytes-a", base, "1") == flowProfileForRendererEpoch("bytes-a", base, "2") {
-		t.Fatal("different renderer policy epochs reused the same treatment fingerprint")
-	}
 }
 
 func TestStreamIdentityUsesRevisionAndCallerResource(t *testing.T) {
@@ -299,7 +282,7 @@ func TestStreamFlowIdentityExcludesLaterMeasurementsButIncludesOverrides(t *test
 		"essence_parameters": map[string]any{"frame_width": 1920, "frame_rate": map[string]any{"numerator": 25, "denominator": 1}}}
 	id := func(key string, flow tams.Flow, info media.FlowInfo, overrides tams.Flow) string {
 		t.Helper()
-		value, err := streamedFlowID(key, flow, info, overrides)
+		value, err := streamedFlowID(key, flow, info, overrides, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -317,7 +300,7 @@ func TestStreamFlowIdentityExcludesLaterMeasurementsButIncludesOverrides(t *test
 	}
 }
 
-func TestMediaInterpretationIdentityIncludesPhase2GraphFacts(t *testing.T) {
+func TestMediaInterpretationIdentityIncludesCodecAndContainerMapping(t *testing.T) {
 	flow := tams.Flow{"format": "urn:x-nmos:format:multi", "container": "video/mp2t"}
 	info := media.FlowInfo{
 		Format: "urn:x-nmos:format:multi", Container: "video/mp2t",
@@ -359,24 +342,18 @@ func TestExplicitRootStabilizesChildrenWithoutRotatingObjects(t *testing.T) {
 		rootID   = "00000000-0000-4000-8000-000000000001"
 		sourceID = "00000000-0000-4000-8000-000000000002"
 	)
-	filename := filepath.Join(t.TempDir(), "programme.ts")
-	if err := os.WriteFile(filename, []byte("explicit graph"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	filename := writeFixture(t, "programme.ts", "explicit graph")
 	run := func(rawURL string) ([]string, Result, []ObjectResult) {
 		t.Helper()
 		item := localSource(filename)
 		item.URI = rawURL
 		client := newFakeClient()
 		recorder := &objectRecorder{}
-		pipeline, err := New(Config{
+		pipeline := mustNew(t, Config{
 			LifecycleObserver: recorder,
 			Concurrency:       1, Transfers: 2, SegmentDuration: time.Second,
 			EssenceStorage: media.EssenceStorageMuxed, FlowID: rootID, SourceID: sourceID,
 		}, client, muxedProber{}, countingSegmenter{objects: 1}, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
 		batch, err := pipeline.Run(context.Background(), []source.Item{item})
 		if err != nil {
 			t.Fatal(err)
@@ -468,10 +445,7 @@ func TestLocalMutationFailsBeforeAnyTAMSMutation(t *testing.T) {
 				name += "-verified"
 			}
 			t.Run(name, func(t *testing.T) {
-				filename := filepath.Join(t.TempDir(), "mutable.bin")
-				if err := os.WriteFile(filename, []byte("media-A"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				filename := writeFixture(t, "mutable.bin", "media-A")
 				client := newFakeClient()
 				duration := time.Duration(0)
 				var segmenter media.Segmenter
@@ -480,13 +454,10 @@ func TestLocalMutationFailsBeforeAnyTAMSMutation(t *testing.T) {
 					segmenter = countingSegmenter{objects: 1}
 				}
 				prober := &mutatingProber{target: filename, replacement: []byte("media-B")}
-				pipeline, err := New(Config{
+				pipeline := mustNew(t, Config{
 					Concurrency: 1, Transfers: 1, VerificationMode: verification, SegmentDuration: duration,
 					EssenceStorage: media.EssenceStorageMuxed,
 				}, client, prober, segmenter, discardLogger(), nil)
-				if err != nil {
-					t.Fatal(err)
-				}
 				batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 				if err != nil {
 					t.Fatal(err)
@@ -516,10 +487,10 @@ func storedFlowIDs(client *fakeClient) []string {
 	return ids
 }
 
-type filenameSensitiveProber struct{}
+type filenameSensitiveProber struct{ proberDefaults }
 
 func (filenameSensitiveProber) Probe(_ context.Context, filename string) (media.Probe, error) {
-	probe := media.Probe{Format: media.Format{Name: "raw", Duration: "1.0", StartTime: "0.0"}}
+	probe := media.Probe{Format: media.Format{Name: "mpegts", Duration: "1.0", StartTime: "0.0"}}
 	if strings.HasSuffix(filename, ".audio") {
 		probe.Streams = []media.Stream{{
 			CodecName: "pcm_s16le", CodecType: "audio", SampleRate: "48000", Channels: 2,
@@ -538,10 +509,6 @@ func (filenameSensitiveProber) Version(context.Context) (string, error) {
 
 func (p filenameSensitiveProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
-}
-
-func (filenameSensitiveProber) ProbePresentation(context.Context, string, *media.Probe) error {
-	return nil
 }
 
 type mutatingProber struct {
@@ -571,4 +538,12 @@ func (p *mutatingProber) ProbeObject(ctx context.Context, filename string) (medi
 
 func (*mutatingProber) ProbePresentation(context.Context, string, *media.Probe) error {
 	return nil
+}
+
+func (*mutatingProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (*mutatingProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
 }

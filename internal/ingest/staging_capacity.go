@@ -466,7 +466,7 @@ func estimatedStagingRequirement(item source.Item, config Config) (required int6
 		if item.Size >= rollingOutputWindowBytes {
 			return rollingOutputWindowBytes, false, nil
 		}
-		allowance, err := percentageWithFloor(item.Size, segmentAllowancePercent, segmentAllowanceFloor)
+		allowance, err := segmentAllowance(item.Size)
 		return min(allowance, rollingOutputWindowBytes), false, err
 	}
 	remote := item.LocalPath == ""
@@ -493,7 +493,7 @@ func estimatedStagingRequirement(item source.Item, config Config) (required int6
 		required = max(item.Size, 1)
 	}
 	if generated {
-		allowance, allowanceErr := percentageWithFloor(item.Size, segmentAllowancePercent, segmentAllowanceFloor)
+		allowance, allowanceErr := segmentAllowance(item.Size)
 		if allowanceErr != nil {
 			return 0, false, allowanceErr
 		}
@@ -508,15 +508,18 @@ func estimatedStagingRequirement(item source.Item, config Config) (required int6
 	return required, false, nil
 }
 
-func percentageWithFloor(value int64, percent int64, floor int64) (int64, error) {
-	if value < 0 || percent <= 0 {
+// segmentAllowance is the staging that rendering an input of that size may
+// need: its size and a percentage more, or its size and a fixed floor more,
+// whichever is larger.
+func segmentAllowance(size int64) (int64, error) {
+	if size < 0 {
 		return 0, errors.New("invalid staging estimate")
 	}
-	if value > math.MaxInt64/percent {
+	if size > math.MaxInt64/segmentAllowancePercent {
 		return 0, errors.New("staging estimate exceeds the supported byte range")
 	}
-	estimate := value * percent / 100
-	minimum, err := checkedAdd(value, floor)
+	estimate := size * segmentAllowancePercent / 100
+	minimum, err := checkedAdd(size, segmentAllowanceFloor)
 	if err != nil {
 		return 0, err
 	}
@@ -528,34 +531,6 @@ func checkedAdd(left, right int64) (int64, error) {
 		return 0, errors.New("staging estimate exceeds the supported byte range")
 	}
 	return left + right, nil
-}
-
-func directoryBytes(root string) (int64, error) {
-	var total int64
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			// A rolling sink removes committed Segment files while the capacity
-			// monitor walks the directory. Disappearing entries no longer consume
-			// staging and are therefore safe to omit from this sample.
-			if errors.Is(walkErr, os.ErrNotExist) && path != root {
-				return nil
-			}
-			return walkErr
-		}
-		if !entry.Type().IsRegular() {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
-		total, err = checkedAdd(total, info.Size())
-		return err
-	})
-	return total, err
 }
 
 func formatBytes(bytes int64) string {

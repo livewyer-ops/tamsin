@@ -148,6 +148,31 @@ func TestResolveMaxInputsCountsUniqueItems(t *testing.T) {
 		t.Fatalf("resolved %d S3 items, want one unique item", len(s3Items))
 	}
 }
+
+// A cancelled run stops expanding a directory or a manifest of local files,
+// neither of which makes a request that would notice the cancellation.
+func TestResolveStopsExpandingWhenCancelled(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "a.bin"), []byte("a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(t.TempDir(), "sources.txt")
+	if err := os.WriteFile(manifest, []byte(filepath.Join(directory, "a.bin")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, input := range []string{directory, manifest} {
+		if _, err := newResolver(Config{}).Resolve(ctx, []string{input}); !errors.Is(err, context.Canceled) {
+			t.Errorf("Resolve(%s) error = %v, want context.Canceled", filepath.Base(input), err)
+		}
+		if items, err := newResolver(Config{}).Resolve(context.Background(), []string{input}); err != nil || len(items) != 1 {
+			t.Errorf("Resolve(%s) without cancellation = %d items, %v", filepath.Base(input), len(items), err)
+		}
+	}
+}
+
 func TestResolveEmptyDirectoryFails(t *testing.T) {
 	t.Parallel()
 	if _, err := newResolver(Config{}).Resolve(context.Background(), []string{t.TempDir()}); err == nil {
@@ -414,6 +439,9 @@ func TestHTTPSourceErrorsDoNotLeakCredentials(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "top-secret") || strings.Contains(err.Error(), "input-secret") {
 		t.Fatalf("HTTP input error leaked credentials: %v", err)
+	}
+	if !errors.Is(err, netio.ErrRequestFailed) || !strings.HasSuffix(err.Error(), ": request failed") {
+		t.Fatalf("the withheld transport error is not marked as a failed request: %v", err)
 	}
 }
 

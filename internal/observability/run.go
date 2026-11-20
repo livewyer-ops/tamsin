@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/url"
 	"sync"
 	"time"
 
@@ -166,13 +167,13 @@ func (r *Run) Retry(operation Operation, attempt, max, statusCode int, cause err
 }
 
 // Failure emits one secret-safe terminal failure record. The ordinary error is
-// reduced to the same closed class vocabulary as retries; its message is never
-// accepted as a log attribute.
+// reduced to the closed class vocabulary of retries and one class more; its
+// message is never accepted as a log attribute.
 func (r *Run) Failure(err error) {
 	if r == nil || err == nil {
 		return
 	}
-	r.logger.Error("ingest run failed", "error_class", errorClass(err))
+	r.logger.Error("ingest run failed", "error_class", failureClass(err))
 }
 
 // Staged records one successfully staged resolved input. A Run belongs to one
@@ -269,4 +270,29 @@ func errorClass(err error) string {
 		return "truncated_stream"
 	}
 	return "transport"
+}
+
+// failureClass classifies the error a run ended with. A retry is scheduled
+// only for a request, so its cause is the transport's when no narrower class
+// fits. A run can end for any reason: there the transport class is kept for a
+// failed request or a network error and every other cause is unclassified.
+func failureClass(err error) string {
+	class := errorClass(err)
+	if class == "transport" && !requestFailed(err) {
+		return "unclassified"
+	}
+	return class
+}
+
+// requestFailed reports whether err came from a request or the network. It
+// names their error types: net.Error would not do, because a system call's
+// error number satisfies it and a missing local file carries one.
+func requestFailed(err error) bool {
+	var (
+		request    *url.Error
+		operation  *net.OpError
+		resolution *net.DNSError
+	)
+	return errors.Is(err, netio.ErrRequestFailed) || errors.As(err, &request) ||
+		errors.As(err, &operation) || errors.As(err, &resolution)
 }

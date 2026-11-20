@@ -258,9 +258,9 @@ func TestCLIRequiresProfileAndResolvesExplicitEssenceSegmentsProfile(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.profile != "essence-segments" || options.profileVersion != "1" ||
-		options.segmentDuration != 10*time.Second || options.segmentFormat != "source" ||
-		options.essenceStorage != "independent" {
+	if options.treatment.Name != "essence-segments" || options.treatment.Version != "1" ||
+		options.treatment.SegmentDuration != 10*time.Second || options.treatment.SegmentFormat != "source" ||
+		options.treatment.EssenceStorage != "independent" {
 		t.Fatalf("default resolved options = %#v", options)
 	}
 }
@@ -343,6 +343,10 @@ func TestCLINumericFlowProfileMatchesByJSONSemanticsBeforeMutation(t *testing.T)
 	if code := Execute(context.Background(), base, strings.NewReader(""), &stdout, &stderr); code != ExitPartial {
 		t.Fatalf("mismatching Profile exit = %d, want %d; stdout=%s stderr=%s", code, ExitPartial, stdout.String(), stderr.String())
 	}
+	// No request failed here, so the run's failure record must not blame one.
+	if !strings.Contains(stderr.String(), `msg="ingest run failed"`) || !strings.Contains(stderr.String(), "error_class=unclassified") {
+		t.Fatalf("failure record of a refused input: %s", stderr.String())
+	}
 	state = decodeCLIIngestEventStream(t, stdout.Bytes()).state
 	inputState = state.Inputs[0]
 	if inputState.Finished == nil || inputState.Finished.ErrorCode != ingest.FailureCodeFlowPlanFailed ||
@@ -371,8 +375,8 @@ func TestCLIStreamedNumericProfileAndEventOrdering(t *testing.T) {
 			t.Skip("requires ffmpeg and ffprobe")
 		}
 	}
-	filename := filepath.Join(t.TempDir(), "media.wav")
-	if output, err := exec.CommandContext(t.Context(), "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=3", "-c:a", "pcm_s16le", filename).CombinedOutput(); err != nil {
+	filename := filepath.Join(t.TempDir(), "media.mp4")
+	if output, err := exec.CommandContext(t.Context(), "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=3", "-c:a", "aac", filename).CombinedOutput(); err != nil {
 		t.Fatalf("fixture: %v: %s", err, output)
 	}
 	probe, err := (media.FFprobe{}).Probe(t.Context(), filename)
@@ -401,7 +405,7 @@ func TestCLIStreamedNumericProfileAndEventOrdering(t *testing.T) {
 			return
 		}
 		switch r.URL.Path {
-		case "/input.wav":
+		case "/input.mp4":
 			w.Header().Set("ETag", `"fixture"`)
 			http.ServeFile(w, r, filename)
 		case "/service":
@@ -419,7 +423,7 @@ func TestCLIStreamedNumericProfileAndEventOrdering(t *testing.T) {
 	}))
 	defer server.Close()
 	args := []string{"--profile", "muxed-segments", "--segment-duration=1s", "--input-mode=stream", "--format=json", "--progress=none",
-		"--auth=none", "--endpoint", server.URL, "--tams-flow-profile", profileID, "--input", server.URL + "/input.wav?signature=private-marker"}
+		"--auth=none", "--endpoint", server.URL, "--tams-flow-profile", profileID, "--input", server.URL + "/input.mp4?signature=private-marker"}
 	var stdout, stderr bytes.Buffer
 	if code := Execute(t.Context(), append(append([]string{}, args...), "--dry-run=exact"), strings.NewReader(""), &stdout, &stderr); code != ExitOK {
 		t.Fatalf("matching streamed Profile: exit=%d stdout=%s stderr=%s", code, &stdout, &stderr)
@@ -453,7 +457,8 @@ func TestReadFlowMetadataPreservesNumbersAndRejectsTrailingData(t *testing.T) {
 	}{
 		{"large nested integer", `{"essence_parameters":{"sample_rate":9007199254740993}}`, true},
 		{"trailing whitespace", "{}\n ", true},
-		{"null", "null", true},
+		{"empty object", "{}", true},
+		{"null", "null", false},
 		{"two objects", "{} {}", false},
 		{"trailing garbage", "{} garbage", false},
 		{"array", "[]", false},
@@ -477,12 +482,92 @@ func TestReadFlowMetadataPreservesNumbersAndRejectsTrailingData(t *testing.T) {
 	}
 }
 
+// A metadata file holding null is refused with the other arguments, before
+// the store is asked for anything. An empty object overrides nothing and stays
+// valid.
+func TestCLIRejectsAMetadataFileHoldingNull(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		http.NotFound(writer, request)
+	}))
+	// The parallel subtests run after this function returns.
+	t.Cleanup(server.Close)
+	directory := t.TempDir()
+	input := filepath.Join(directory, "fixture.mp4")
+	if err := os.WriteFile(input, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ffprobe := fakeMediaTool(t, directory)
+	for _, flag := range []string{"--flow-metadata", "--collected-flow-metadata"} {
+		for _, content := range []string{"null", "{}"} {
+			t.Run(flag+" "+content, func(t *testing.T) {
+				t.Parallel()
+				metadata := filepath.Join(t.TempDir(), "metadata.json")
+				if err := os.WriteFile(metadata, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				args := []string{
+					"--format", "json", "--progress", "none", "--log-level", "error", "--profile", "preserve",
+					"--segment-duration", "0", "--ffprobe", ffprobe, flag, metadata, "--input", input,
+				}
+				var stdout, stderr bytes.Buffer
+				if content == "{}" {
+					code := Execute(context.Background(), append(args, "--dry-run=fast"), strings.NewReader(""), &stdout, &stderr)
+					if code != ExitOK {
+						t.Fatalf("an empty object was refused: exit = %d; stdout = %s; stderr = %s", code, stdout.String(), stderr.String())
+					}
+					return
+				}
+				code := Execute(context.Background(), append(args, "--endpoint", server.URL, "--auth", "none", "--retries", "0"),
+					strings.NewReader(""), &stdout, &stderr)
+				state := decodeCLIIngestEventStream(t, stdout.Bytes()).state
+				if code != ExitUsage || state.Finished == nil || state.Finished.ExitCode != ExitUsage ||
+					len(state.Diagnostics) != 1 || state.Diagnostics[0].Code != ingest.FailureCodeConfigInvalid {
+					t.Fatalf("exit = %d, want %d with one config.invalid diagnostic; stdout = %s; stderr = %s",
+						code, ExitUsage, stdout.String(), stderr.String())
+				}
+				if requests.Load() != 0 {
+					t.Fatalf("the store received %d requests before the file was refused", requests.Load())
+				}
+			})
+		}
+	}
+}
+
 func TestCLIUsageExitCode(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	code := Execute(context.Background(), []string{"--concurrency", "0", "--dry-run=fast", "missing"}, strings.NewReader(""), &stdout, &stderr)
 	if code != ExitUsage {
 		t.Fatalf("exit = %d, want %d; stderr = %s", code, ExitUsage, stderr.String())
+	}
+}
+
+// TestCLIRejectsADeletionTimeoutThatIsNotPositive covers every place the
+// setting can come from. Zero or less would leave a deletion without a
+// deadline.
+func TestCLIRejectsADeletionTimeoutThatIsNotPositive(t *testing.T) {
+	for _, value := range []string{"0s", "-1s"} {
+		for _, origin := range []string{"flag", "environment", "file"} {
+			t.Run(origin+" "+value, func(t *testing.T) {
+				args := []string{"--dry-run=fast", "missing"}
+				switch origin {
+				case "flag":
+					args = append([]string{"--deletion-timeout=" + value}, args...)
+				case "environment":
+					t.Setenv("TAMSIN_HTTP_DELETION_TIMEOUT", value)
+				case "file":
+					args = append([]string{"--config", writeTestConfig(t, t.TempDir(), "\nhttp:\n  deletion_timeout: "+value+"\n")}, args...)
+				}
+				var stdout, stderr bytes.Buffer
+				code := Execute(context.Background(), args, strings.NewReader(""), &stdout, &stderr)
+				if code != ExitUsage || !strings.Contains(stderr.String(), "deletion timeout must be positive") {
+					t.Fatalf("exit = %d, want %d and the reason; stderr = %s", code, ExitUsage, stderr.String())
+				}
+			})
+		}
 	}
 }
 
@@ -915,11 +1000,9 @@ for arg in "$@"; do
   fi
 done
 cat <<'EOF'
-{"streams":[{"index":0,"codec_name":"h264","codec_type":"video","width":64,"height":64,"avg_frame_rate":"25/1","start_time":"0.0","duration":"1.0","disposition":{"attached_pic":0}}],"format":{"format_name":"mov,mp4","start_time":"0.0","duration":"1.0","size":"7","bit_rate":"56000"}}
+{"streams":[{"index":0,"codec_name":"h264","codec_type":"video","width":64,"height":64,"avg_frame_rate":"25/1","start_time":"0.0","duration":"1.0","disposition":{"attached_pic":0}}],"format":{"tags":{"major_brand":"isom"},"format_name":"mov,mp4","start_time":"0.0","duration":"1.0","size":"7","bit_rate":"56000"}}
 EOF
 `
-	if err := os.WriteFile(filename, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writeTestTool(t, filename, script)
 	return filename
 }

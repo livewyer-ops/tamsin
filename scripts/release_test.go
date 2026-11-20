@@ -25,6 +25,7 @@ func repositoryFile(t *testing.T, name string) string {
 
 type workflowStep struct {
 	ID, Uses, Run string
+	With          map[string]string
 }
 
 type workflowJob struct {
@@ -99,6 +100,54 @@ func TestReleaseRunsVerificationAndE2EBeforePublishing(t *testing.T) {
 	}
 }
 
+func TestReleaseRequiresMainAncestry(t *testing.T) {
+	t.Parallel()
+	job := readWorkflow(t, "release.yml").Jobs["verify"]
+	guardIndex, guard := stepByID(t, job, "release-origin")
+	if guardIndex != 1 || !strings.HasPrefix(job.Steps[0].Uses, "actions/checkout@") || job.Steps[0].With["fetch-depth"] != "0" {
+		t.Fatal("release ancestry must be checked immediately after a complete checkout")
+	}
+	repository := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		command := exec.Command("git", args...)
+		command.Dir = repository
+		command.Env = append(os.Environ(), "GIT_AUTHOR_NAME=Test", "GIT_COMMITTER_NAME=Test",
+			"GIT_AUTHOR_EMAIL=test@example.invalid", "GIT_COMMITTER_EMAIL=test@example.invalid")
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	git("init", "--initial-branch=main")
+	git("-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "base")
+	base := git("rev-parse", "HEAD")
+	git("-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "main")
+	main := git("rev-parse", "HEAD")
+	git("update-ref", "refs/remotes/origin/main", main)
+	git("checkout", "-b", "unmerged", base)
+	git("-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "unmerged")
+	unmerged := git("rev-parse", "HEAD")
+	for _, test := range []struct {
+		name, commit string
+		accepted     bool
+	}{
+		{"main", main, true}, {"ancestor", base, true},
+		{"unmerged", unmerged, false}, {"unknown", "missing", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := exec.Command("bash", "-e", "-c", guard.Run)
+			command.Dir = repository
+			command.Env = append(os.Environ(), "GITHUB_SHA="+test.commit)
+			output, err := command.CombinedOutput()
+			if (err == nil) != test.accepted {
+				t.Fatalf("accepted=%v: %v: %s", test.accepted, err, output)
+			}
+		})
+	}
+}
+
 func TestE2ECoversBothSupportedTAMSVersions(t *testing.T) {
 	t.Parallel()
 	workflow := readWorkflow(t, "e2e.yml")
@@ -144,6 +193,11 @@ func TestVersionedImageTagsAreNotOverwritten(t *testing.T) {
 
 func checkImageTagAbsence(t *testing.T, script string) {
 	t.Helper()
+	checker, err := filepath.Abs(filepath.Join(repositoryRoot, "scripts", "check-image-tag-absent.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script = "mkdir scripts && ln -s \"$TAG_CHECK\" scripts/check-image-tag-absent.sh\n" + script
 	for _, test := range []struct {
 		name, output, status string
 		allowed              bool
@@ -157,7 +211,7 @@ func checkImageTagAbsence(t *testing.T, script string) {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := runWorkflowShell(t, script, "printf '%s\\n' \"$LOOKUP_OUTPUT\" >&2\nexit \"$LOOKUP_STATUS\"\n",
 				"RUNTIME_IMAGE=ghcr.io/example/app:1.0.0", "GITHUB_REPOSITORY=Example/App", "VERSION=1.0.0",
-				"LOOKUP_OUTPUT="+test.output, "LOOKUP_STATUS="+test.status)
+				"LOOKUP_OUTPUT="+test.output, "LOOKUP_STATUS="+test.status, "TAG_CHECK="+checker)
 			if (err == nil) != test.allowed {
 				t.Fatalf("tag check error=%v, allowed=%v", err, test.allowed)
 			}
@@ -358,6 +412,8 @@ func TestReleaseNotesComeFromDatedChangelogSection(t *testing.T) {
 		{"0.1.0-in2", "no dated [0.1.0-in2] release section", false},
 		{"0.1.0", "not a TAMSin release tag", false},
 		{"v1.0.0", "not a TAMSin release tag", false},
+		{"v0.1.0-in1", "not a TAMSin release tag", false},
+		{"v0.1.0-in1-rc1", "not a TAMSin release tag", false},
 		{"v0.1.0-rc.1", "not a TAMSin release tag", false},
 	} {
 		output, err := exec.Command(checker, test.tag, changelog).CombinedOutput()

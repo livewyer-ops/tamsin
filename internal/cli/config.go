@@ -14,10 +14,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/livewyer-ops/tamsin/internal/auth"
 	"github.com/livewyer-ops/tamsin/internal/ingest"
 	"github.com/livewyer-ops/tamsin/internal/media"
+	"github.com/livewyer-ops/tamsin/internal/tams"
+	"github.com/livewyer-ops/tamsin/internal/tamstime"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"go.yaml.in/yaml/v3"
@@ -198,11 +199,13 @@ func configDefinitions() []configDefinition {
 		{key: "config", kind: configString, flag: "config"},
 		{key: "endpoint", kind: configString, flag: "endpoint", redactURL: true, fileAllowed: true},
 		{key: "format", kind: configString, flag: "format", fileAllowed: true},
+		{key: "http.deletion_timeout", kind: configDuration, flag: "deletion-timeout", fileAllowed: true},
 		{key: "http.insecure_skip_verify", kind: configBool, flag: "insecure-skip-verify", fileAllowed: true},
 		{key: "http.retries", kind: configInt, flag: "retries", fileAllowed: true},
 		{key: "http.timeout", kind: configDuration, flag: "timeout", fileAllowed: true},
 		{key: "http.transfer_idle_timeout", kind: configDuration, flag: "transfer-idle-timeout", fileAllowed: true},
 		{key: "http.transfer_timeout", kind: configDuration, flag: "transfer-timeout", fileAllowed: true},
+		{key: "ingest.collected_flow_metadata", kind: configString, flag: "collected-flow-metadata", fileAllowed: true},
 		{key: "ingest.concurrency", kind: configInt, flag: "concurrency", defaultValue: min(runtime.GOMAXPROCS(0), 8), fileAllowed: true},
 		{key: "ingest.dry_run", kind: configString, flag: "dry-run", fileAllowed: true},
 		{key: "ingest.essence_storage", kind: configString, flag: "essence-storage", fileAllowed: true},
@@ -547,14 +550,14 @@ func (s *settings) validate() error {
 	if err := s.validateGlobal(); err != nil {
 		return err
 	}
-	if concurrency := s.GetInt("ingest.concurrency"); concurrency <= 0 || concurrency > 256 {
-		return errors.New("concurrency must be between 1 and 256")
+	if concurrency := s.GetInt("ingest.concurrency"); concurrency <= 0 || concurrency > ingest.MaxConcurrency {
+		return fmt.Errorf("concurrency must be between 1 and %d", ingest.MaxConcurrency)
 	}
-	if transfers := s.GetInt("ingest.transfers"); transfers < 0 || transfers > 256 {
-		return errors.New("transfers must be between 0 and 256")
+	if transfers := s.GetInt("ingest.transfers"); transfers < 0 || transfers > ingest.MaxConcurrency {
+		return fmt.Errorf("transfers must be between 0 and %d", ingest.MaxConcurrency)
 	}
-	if concurrency := s.GetInt("ingest.probe_concurrency"); concurrency < 0 || concurrency > 256 {
-		return errors.New("probe-concurrency must be between 0 and 256")
+	if concurrency := s.GetInt("ingest.probe_concurrency"); concurrency < 0 || concurrency > ingest.MaxConcurrency {
+		return fmt.Errorf("probe-concurrency must be between 0 and %d", ingest.MaxConcurrency)
 	}
 	if maximum := s.GetInt("ingest.max_inputs"); maximum <= 0 {
 		return errors.New("max-inputs must be positive")
@@ -588,23 +591,33 @@ func (s *settings) validate() error {
 	if _, err := media.ParseTimestamp(s.GetString("ingest.start")); err != nil {
 		return err
 	}
+	if start := s.GetString("ingest.start"); !tamstime.CanonicalTimestamp(start) {
+		return fmt.Errorf("ingest.start %q is not a canonical TAMS timestamp: use seconds:nanoseconds with no plus sign or leading zeros, such as 0:0 or -12:500000000", start)
+	}
 	for _, identifier := range []struct{ key, label string }{
 		{key: "ingest.flow_id", label: "flow ID"},
 		{key: "ingest.source_id", label: "source ID"},
 		{key: "ingest.storage_id", label: "storage ID"},
 	} {
-		value := s.GetString(identifier.key)
-		if value == "" {
-			continue
-		}
-		if _, err := uuid.Parse(value); err != nil {
-			return fmt.Errorf("%s must be a UUID: %w", identifier.label, err)
+		if err := identifierError(identifier.label, s.GetString(identifier.key)); err != nil {
+			return err
 		}
 	}
 	if _, err := parseHeaders(s.GetStringSlice("source.http_headers")); err != nil {
 		return err
 	}
 	return s.validateURLs()
+}
+
+// identifierError reports a configured identifier that is not a UUID.
+func identifierError(label, value string) error {
+	if value == "" {
+		return nil
+	}
+	if _, err := tams.CanonicalUUID(value); err != nil {
+		return fmt.Errorf("%s must be a UUID: %w", label, err)
+	}
+	return nil
 }
 
 func (s *settings) validateGlobal() error {
@@ -647,8 +660,11 @@ func (s *settings) validateGlobal() error {
 	if timeout := s.GetDuration("http.transfer_idle_timeout"); timeout <= 0 {
 		return errors.New("transfer idle timeout must be positive")
 	}
-	if retries := s.GetInt("http.retries"); retries < 0 || retries > 20 {
-		return errors.New("HTTP retries must be between 0 and 20")
+	if timeout := s.GetDuration("http.deletion_timeout"); timeout <= 0 {
+		return errors.New("deletion timeout must be positive")
+	}
+	if retries := s.GetInt("http.retries"); retries < 0 || retries > ingest.MaxRetries {
+		return fmt.Errorf("HTTP retries must be between 0 and %d", ingest.MaxRetries)
 	}
 	return nil
 }

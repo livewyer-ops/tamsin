@@ -10,11 +10,12 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/observability"
 	"github.com/livewyer-ops/tamsin/internal/progress"
 	"github.com/livewyer-ops/tamsin/internal/tams"
+	"github.com/livewyer-ops/tamsin/internal/tamstime"
 )
 
 func (p *Pipeline) acceptStorageVerification(ctx context.Context, object preparedObject, results []ObjectResult) {
-	setObjectDisposition(results, object.id, ObjectDispositionRegistered)
-	setObjectVerification(results, object.id, ObjectVerificationVerified, VerificationMethodStorage)
+	setObjectDisposition(results, object.key(), ObjectDispositionRegistered)
+	setObjectVerification(results, object.key(), ObjectVerificationVerified, VerificationMethodStorage)
 	p.observability.Verification(object.size, observability.OutcomeVerified)
 	p.advanceProgress(ctx, progress.PhaseVerify, 1, object.size)
 }
@@ -39,11 +40,11 @@ func (p *Pipeline) reconcileRegistrationError(ctx context.Context, flowID string
 		var registered, rejected []preparedObject
 		for _, object := range objects {
 			if requestWasRegistered(partial.RegisteredSegments, object) {
-				setObjectDisposition(results, object.id, ObjectDispositionRegistered)
+				setObjectDisposition(results, object.key(), ObjectDispositionRegistered)
 				registered = append(registered, object)
 				continue
 			}
-			setObjectDisposition(results, object.id, ObjectDispositionRejected)
+			setObjectDisposition(results, object.key(), ObjectDispositionRejected)
 			rejected = append(rejected, object)
 		}
 		cleanupErr := p.retractRegisteredObjects(recoveryCtx, flowID, registered, results,
@@ -73,7 +74,7 @@ func (p *Pipeline) reconcileRegistrationError(ctx context.Context, flowID string
 			unresolved = append(unresolved, object)
 			continue
 		}
-		setObjectDisposition(results, object.id, ObjectDispositionRegistered)
+		setObjectDisposition(results, object.key(), ObjectDispositionRegistered)
 		visible = append(visible, object)
 	}
 
@@ -130,12 +131,12 @@ func (p *Pipeline) retractRegisteredObjects(ctx context.Context, flowID string,
 				outcome, err := p.retractWithinRecovery(ctx, flowID, object,
 					fmt.Errorf("object %s: %s", object.id, cause))
 				if outcome == outcomeRetractionFailed {
-					setObjectDisposition(results, object.id, ObjectDispositionStranded)
+					setObjectDisposition(results, object.key(), ObjectDispositionStranded)
 					failures[index] = fmt.Errorf("object %s (%s) is stranded: %w",
 						object.id, object.timerange, err)
 					continue
 				}
-				setObjectDisposition(results, object.id, ObjectDispositionRetracted)
+				setObjectDisposition(results, object.key(), ObjectDispositionRetracted)
 			}
 		}()
 	}
@@ -158,7 +159,7 @@ func (p *Pipeline) retractRegisteredObjects(ctx context.Context, flowID string,
 
 func requestWasRegistered(requests []tams.SegmentRequest, object preparedObject) bool {
 	for _, request := range requests {
-		if request.ObjectID == object.id && request.Timerange == object.timerange {
+		if request.ObjectID == object.id && tamstime.EqualTimeRanges(request.Timerange, object.timerange) {
 			return true
 		}
 	}

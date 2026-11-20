@@ -29,6 +29,15 @@ const (
 	SegmentFormatMPEGTS SegmentFormat = "mpegts"
 )
 
+// OutputContainer is the container a render in this format writes from a
+// source in the given container.
+func (f SegmentFormat) OutputContainer(source SegmentContainer) SegmentContainer {
+	if f == SegmentFormatMPEGTS {
+		return SegmentContainer{Muxer: "mpegts", Extension: ".ts"}
+	}
+	return source
+}
+
 // ContainerMIME reports the container MIME type Segments of this format carry,
 // or empty when the format follows the source and the probe already knows it.
 func (f SegmentFormat) ContainerMIME() string {
@@ -88,14 +97,19 @@ type SegmentContainer struct {
 // one entry; a renderer may accept several independent essences so a
 // high-track-count source is opened only once.
 type SegmentRequest struct {
-	Input           string
-	Duration        time.Duration
-	Format          SegmentFormat
-	SourceContainer SegmentContainer
-	StreamIndices   []int
-	Directory       string
-	AdditionalArgs  []string
-	BitExact        bool
+	Input             string
+	FlowStart         int64
+	Muxed             bool
+	ProgrammeDuration int64
+	Duration          time.Duration
+	Format            SegmentFormat
+	SourceContainer   SegmentContainer
+	StreamIndices     []int
+	Directory         string
+	AdditionalArgs    []string
+	// Streams is the probed source, which tells the renderer the codec of
+	// each stream it copies.
+	Streams []Stream
 	// StagingWindow applies process-level backpressure while a streaming sink
 	// commits and removes completed outputs. It is optional because callers
 	// which retain every output cannot safely acknowledge reclaimed space.
@@ -126,11 +140,23 @@ func (w SegmentStagingWindow) validate() error {
 // exact nanosecond values parsed from the segment muxer's CSV manifest. Timed
 // is false for an unsegmented whole-essence extraction.
 type SegmentRecord struct {
-	StreamIndex int
-	Path        string
-	Start       int64
-	End         int64
-	Timed       bool
+	StreamIndex       int
+	Path              string
+	Start             int64
+	End               int64
+	Timed             bool
+	Final             bool
+	MPEGTS            bool
+	FlowStart         int64
+	ProgrammeDuration int64
+	// NextPath is the Segment that follows this one in its output, which
+	// FFmpeg has closed by the time this one is passed on. It is empty for
+	// the last.
+	NextPath string
+	// RepeatsParameterSets is set for an output whose H.264 video had the
+	// parameter sets of its sample description written before every key
+	// frame. They are the right ones only while the stream never changes them.
+	RepeatsParameterSets bool
 	// FlushStaging asks a streaming sink to reclaim all completed outputs
 	// before returning. It is set when the staging high watermark pauses
 	// FFmpeg at a closed-output boundary.
@@ -141,6 +167,9 @@ type SegmentSink func(SegmentRecord) error
 
 type Segmenter interface {
 	Segment(context.Context, SegmentRequest, SegmentSink) error
+	// ProbeParameterSets reads the parameter sets an MPEG-TS Object carries
+	// for the H.264 stream at the given place among its video streams.
+	ProbeParameterSets(ctx context.Context, filename string, video int) (ParameterSets, error)
 	Version(context.Context) (string, error)
 }
 
@@ -150,17 +179,18 @@ type FFmpeg struct {
 
 type segmentOutput struct {
 	streamIndex int
+	repeats     bool
 	path        string
 	reader      *os.File
 	writer      *os.File
 }
 
-// Segment uses stream copy by default. Tamsin never silently transcodes or
-// increments media generation; callers may provide explicit additional args.
-// Segment cuts input into Media Objects. streamIndex selects a single
-// elementary stream for independent essence storage, or AllStreams to carry the
-// whole container through. A zero duration is only meaningful for a single
-// stream, where it extracts that essence whole rather than cutting it.
+// Segment cuts input into Media Objects by stream copy. Tamsin never silently
+// transcodes or increments media generation; callers may provide explicit
+// additional args. request.StreamIndices selects elementary streams for
+// independent essence storage, or AllStreams to carry the whole container
+// through. A zero duration extracts each selected stream whole rather than
+// cutting it.
 func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink SegmentSink) error {
 	if len(request.StreamIndices) == 0 {
 		return errors.New("at least one stream index is required")
@@ -196,12 +226,9 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 	if err := os.MkdirAll(request.Directory, 0o700); err != nil {
 		return fmt.Errorf("create segment directory: %w", err)
 	}
-	outputContainer := request.SourceContainer
-	if request.Format == SegmentFormatMPEGTS {
-		outputContainer = SegmentContainer{Muxer: "mpegts", Extension: ".ts"}
-	}
-	if outputContainer.Muxer == "" || outputContainer.Extension == "" {
-		return errors.New("source container is outside Tamsin's segmentation profile; use --segment-format mpegts or store it whole")
+	outputContainer := request.Format.OutputContainer(request.SourceContainer)
+	if (outputContainer.Muxer != "mp4" && outputContainer.Muxer != "mpegts") || outputContainer.Extension == "" {
+		return errors.New("output container must be MP4 or MPEG-TS")
 	}
 	extension := strings.ToLower(outputContainer.Extension)
 	if !strings.HasPrefix(extension, ".") {
@@ -212,21 +239,33 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 	arguments = append(arguments, "-i", request.Input)
 	outputs := make([]segmentOutput, 0, len(request.StreamIndices))
 	for outputIndex, streamIndex := range request.StreamIndices {
+		muxer := outputContainer.Muxer
 		mapSpec := "0"
 		prefix := "segment"
 		if streamIndex != AllStreams {
 			mapSpec = "0:" + strconv.Itoa(streamIndex)
 			prefix = "essence-" + strconv.Itoa(streamIndex)
 		}
-		arguments = append(arguments, "-map", mapSpec, "-c", "copy")
-		if request.BitExact {
-			arguments = append(arguments, "-fflags", "+bitexact")
+		arguments = append(arguments, "-map", mapSpec)
+		arguments = append(arguments, "-c", "copy")
+		var filters []string
+		if muxer == "mpegts" && request.SourceContainer.Muxer == "mp4" && len(request.AdditionalArgs) == 0 {
+			filters = parameterSetFilters(request.Streams, streamIndex)
 		}
+		arguments = append(arguments, filters...)
+		// Every render is bit-exact so an identical re-run produces identical
+		// bytes, and with them identical Object identifiers.
+		arguments = append(arguments, "-fflags", "+bitexact")
 		arguments = append(arguments, request.AdditionalArgs...)
+		arguments = append(arguments, "-avoid_negative_ts", "disabled")
+		phase := strconv.FormatInt((mpegTSPhase(request.FlowStart)+500)/1000, 10) + "us"
 		if request.Duration <= 0 {
+			if muxer == "mpegts" {
+				arguments = append(arguments, "-mpegts_copyts", "1", "-max_delay", "0", "-output_ts_offset", phase)
+			}
 			path := filepath.Join(request.Directory, prefix+extension)
-			arguments = append(arguments, "-f", outputContainer.Muxer, path)
-			outputs = append(outputs, segmentOutput{streamIndex: streamIndex, path: path})
+			arguments = append(arguments, "-f", muxer, path)
+			outputs = append(outputs, segmentOutput{streamIndex: streamIndex, repeats: len(filters) > 0, path: path})
 			continue
 		}
 		reader, writer, err := os.Pipe()
@@ -235,17 +274,22 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			return fmt.Errorf("create segment manifest pipe: %w", err)
 		}
 		pattern := filepath.Join(request.Directory, prefix+"-%08d"+extension)
+		if muxer == "mpegts" {
+			// Emit audio PES promptly so preroll precedes the first presented video PTS at a clock rollover.
+			arguments = append(arguments, "-reset_timestamps", "0", "-segment_format_options", "mpegts_copyts=1:avoid_negative_ts=disabled:max_delay=0", "-initial_offset", phase)
+		} else {
+			arguments = append(arguments, "-reset_timestamps", "1", "-segment_format_options", "movie_timescale=1000000")
+		}
 		arguments = append(arguments,
 			"-f", "segment",
-			"-segment_format", outputContainer.Muxer,
+			"-segment_format", muxer,
 			"-segment_time", strconv.FormatFloat(request.Duration.Seconds(), 'f', 9, 64),
-			"-reset_timestamps", "1",
 			"-segment_list", "pipe:"+strconv.Itoa(3+outputIndex),
 			"-segment_list_type", "csv",
 			"-segment_list_flags", "+live",
 			pattern,
 		)
-		outputs = append(outputs, segmentOutput{streamIndex: streamIndex, reader: reader, writer: writer})
+		outputs = append(outputs, segmentOutput{streamIndex: streamIndex, repeats: len(filters) > 0, reader: reader, writer: writer})
 	}
 
 	if request.Duration <= 0 {
@@ -254,7 +298,7 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			return fmt.Errorf("extract essences from %q: %w: %s", request.Input, err, strings.TrimSpace(string(stderr)))
 		}
 		for _, output := range outputs {
-			if err := sink(SegmentRecord{StreamIndex: output.streamIndex, Path: output.path}); err != nil {
+			if err := sink(SegmentRecord{StreamIndex: output.streamIndex, Path: output.path, MPEGTS: outputContainer.Muxer == "mpegts", RepeatsParameterSets: output.repeats, Final: true}); err != nil {
 				return err
 			}
 		}
@@ -291,6 +335,9 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 	workCtx, cancelWork := context.WithCancel(ctx)
 	defer cancelWork()
 	records := make(chan SegmentRecord, maxPendingSegments)
+	var waitErr error
+	exited := make(chan struct{})
+	go func() { waitErr = command.Wait(); close(exited) }()
 	recordError := func(err error) {
 		errMu.Lock()
 		if parseErr == nil {
@@ -309,9 +356,38 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			previousStart := int64(-1)
 			decoder := csv.NewReader(output.reader)
 			decoder.FieldsPerRecord = 3
+			var pending *SegmentRecord
+			emit := func(record SegmentRecord) bool {
+				if backpressure != nil {
+					flush, controlErr := backpressure.beforeSink()
+					if controlErr != nil {
+						recordError(controlErr)
+						return false
+					}
+					record.FlushStaging = flush
+				}
+				select {
+				case records <- record:
+				case <-workCtx.Done():
+					return false
+				}
+				counts[index]++
+				return true
+			}
 			for {
 				fields, err := decoder.Read()
 				if errors.Is(err, io.EOF) {
+					// FFmpeg closes its outputs and lists the Segment it was
+					// writing when it fails or is signalled, too. That Segment
+					// is the programme's last only if FFmpeg then exits cleanly;
+					// otherwise it may be cut short, and it is not passed on.
+					if pending != nil {
+						<-exited
+						if waitErr == nil {
+							pending.Final = request.Muxed && output.streamIndex == AllStreams
+							emit(*pending)
+						}
+					}
 					return
 				}
 				if err != nil {
@@ -333,27 +409,20 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 					recordError(err)
 					return
 				}
-				record := SegmentRecord{StreamIndex: output.streamIndex, Path: path, Start: start, End: end, Timed: true}
-				if backpressure != nil {
-					flush, controlErr := backpressure.beforeSink()
-					if controlErr != nil {
-						recordError(controlErr)
+				record := SegmentRecord{StreamIndex: output.streamIndex, Path: path, Start: start, End: end, Timed: true, FlowStart: request.FlowStart, ProgrammeDuration: request.ProgrammeDuration, MPEGTS: outputContainer.Muxer == "mpegts", RepeatsParameterSets: output.repeats}
+				// A Segment is passed on once the next one is listed, which
+				// shows it is not the last.
+				if pending != nil {
+					pending.NextPath = path
+					if !emit(*pending) {
 						return
 					}
-					record.FlushStaging = flush
 				}
-				select {
-				case records <- record:
-				case <-workCtx.Done():
-					return
-				}
-				counts[index]++
+				pending = &record
 				previousStart = start
 			}
 		}()
 	}
-	waitResult := make(chan error, 1)
-	go func() { waitResult <- command.Wait() }()
 	go func() { parsers.Wait(); close(records) }()
 	// Keep reading closure notifications during probing and uploads. Otherwise
 	// a slow sink prevents the high-watermark check while FFmpeg fills the disk.
@@ -376,7 +445,7 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			recordError(err)
 		}
 	}
-	waitErr := <-waitResult
+	<-exited
 	errMu.Lock()
 	manifestErr := parseErr
 	errMu.Unlock()
@@ -395,6 +464,40 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 		}
 	}
 	return nil
+}
+
+// parameterSetFilters returns the bitstream filters an MPEG-TS output needs
+// for the H.264 video it copies out of an MP4. An MP4 keeps the parameter sets
+// in its sample description, and FFmpeg's h264_mp4toannexb writes them into the
+// stream only before IDR pictures. An Object cut on any other key frame, as an
+// open GOP begins with, would hold none and could not be decoded on its own,
+// so dump_extra writes them before every key frame that does not begin with
+// them. They are the sets of the sample description, which stay the right
+// ones only while the stream never changes them: the caller checks that on
+// each Object. H.264 from an MPEG-TS source is left as it is, because its
+// sets arrive in the stream and may change there.
+func parameterSetFilters(streams []Stream, streamIndex int) []string {
+	var arguments []string
+	video := 0
+	for _, stream := range streams {
+		if stream.CodecType != "video" {
+			continue
+		}
+		if stream.CodecName == "h264" && (streamIndex == AllStreams || streamIndex == stream.Index) {
+			specifier := ":v"
+			if streamIndex == AllStreams {
+				// Every stream is mapped, so a video stream keeps its place among the output's.
+				specifier += ":" + strconv.Itoa(video)
+			}
+			// FFmpeg 6 rescales a copied packet to the time base hinted for
+			// its output stream before filtering it, and hints one tick a
+			// frame, which would round every timestamp to the frame rate.
+			// The hint is set to MPEG-TS's own time base instead.
+			arguments = append(arguments, "-bsf"+specifier, "h264_mp4toannexb,dump_extra=freq=keyframe", "-time_base"+specifier, "1/90000")
+		}
+		video++
+	}
+	return arguments
 }
 
 func closeSegmentPipes(outputs []segmentOutput) {

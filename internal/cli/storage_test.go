@@ -8,20 +8,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/livewyer-ops/tamsin/internal/ingest"
 	"github.com/livewyer-ops/tamsin/internal/tams"
 )
 
 func TestCLIIngestSupportsBothStorageURLModes(t *testing.T) {
-	for _, presigned := range []bool{false, true} {
-		name := "non-presigned"
-		if presigned {
-			name = "presigned"
-		}
+	for _, name := range []string{"non-presigned", "presigned", "segmented resume"} {
+		presigned := name != "non-presigned"
 		t.Run(name, func(t *testing.T) {
 			const backendID = "2834cde7-b5db-47e3-9fdd-e793376565fe"
 			var mu sync.Mutex
@@ -33,7 +32,18 @@ func TestCLIIngestSupportsBothStorageURLModes(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				defer mu.Unlock()
-				if r.Header.Get("Authorization") != "Bearer fixture-token" {
+				// API credentials belong on API requests and on unsigned media URLs
+				// served from the same origin. A presigned URL carries its own
+				// authorisation, so credentials added to it would be a leak and can
+				// invalidate its signature.
+				media := strings.HasPrefix(r.URL.Path, "/media/")
+				authorised := r.Header.Get("Authorization") == "Bearer fixture-token"
+				switch {
+				case media && presigned && authorised:
+					t.Errorf("API credentials were sent with a presigned URL for %s", r.URL.Path)
+					http.Error(w, "unexpected credentials", http.StatusBadRequest)
+					return
+				case !(media && presigned) && !authorised:
 					t.Errorf("missing same-origin credentials for %s", r.URL.Path)
 					http.Error(w, "unauthorised", http.StatusUnauthorized)
 					return
@@ -89,7 +99,7 @@ func TestCLIIngestSupportsBothStorageURLModes(t *testing.T) {
 					default:
 						listed := make([]tams.Segment, 0, len(segments))
 						for _, segment := range segments {
-							item := tams.Segment{ObjectID: segment.ObjectID, Timerange: segment.Timerange}
+							item := tams.Segment{ObjectID: segment.ObjectID, Timerange: segment.Timerange, TSOffset: segment.TSOffset, ObjectTimerange: segment.ObjectTimerange}
 							if !r.URL.Query().Has("accept_get_urls") && (presigned || r.URL.Query().Get("presigned") != "true") {
 								item.GetURLs = []tams.PresignedURL{{URL: baseURL + "/media/object", Presigned: presigned}}
 								if presigned {
@@ -101,6 +111,14 @@ func TestCLIIngestSupportsBothStorageURLModes(t *testing.T) {
 						}
 						_ = json.NewEncoder(w).Encode(listed)
 					}
+				case strings.HasPrefix(r.URL.Path, "/api/sources/"):
+					// Sources are derived by the store; their label, description
+					// and tags are written through sub-resources.
+					if r.Method == http.MethodPut {
+						w.WriteHeader(http.StatusNoContent)
+						return
+					}
+					_, _ = io.WriteString(w, `{"id":"`+strings.TrimPrefix(r.URL.Path, "/api/sources/")+`","tags":{}}`)
 				case strings.HasPrefix(r.URL.Path, "/api/flows/"):
 					if r.Method == http.MethodPut {
 						var flow tams.Flow
@@ -123,6 +141,51 @@ func TestCLIIngestSupportsBothStorageURLModes(t *testing.T) {
 			baseURL = server.URL
 			directory := t.TempDir()
 			input := filepath.Join(directory, "fixture.mp4")
+			if name == "segmented resume" {
+				for _, tool := range []string{"ffmpeg", "ffprobe"} {
+					if _, err := exec.LookPath(tool); err != nil {
+						t.Skipf("requires %s", tool)
+					}
+				}
+				if out, err := exec.CommandContext(t.Context(), "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=2.5", "-c:a", "aac", input).CombinedOutput(); err != nil {
+					t.Fatalf("fixture: %v: %s", err, out)
+				}
+				args := []string{"ingest", "-i", input, "--endpoint", baseURL + "/api", "--auth", "bearer", "--token", "fixture-token",
+					"--allow-insecure-auth-loopback", "--format", "json", "--progress", "none", "--verify", "none", "--transfers", "1",
+					"--profile", "mpegts-segments", "--segment-duration", "1s"}
+				run := func() *cliInputEventState {
+					t.Helper()
+					var stdout, stderr bytes.Buffer
+					if code := Execute(t.Context(), args, strings.NewReader(""), &stdout, &stderr); code != ExitOK {
+						t.Fatalf("exit=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+					}
+					return decodeCLIIngestEventStream(t, stdout.Bytes()).state.Inputs[0]
+				}
+				first := run()
+				total := len(first.ObjectResults)
+				if total < 2 || uploads != total {
+					t.Fatalf("initial Objects=%d uploads=%d", total, uploads)
+				}
+				for _, missing := range []int{0, 1} {
+					mu.Lock()
+					segments = segments[:total-missing]
+					mu.Unlock()
+					retry := run()
+					resumed := 0
+					for _, event := range retry.ObjectResults {
+						if event.Result.Verification != ingest.ObjectVerificationNotRequested {
+							t.Errorf("verification = %s", event.Result.Verification)
+						}
+						if event.Result.Disposition == ingest.ObjectDispositionResumed {
+							resumed++
+						}
+					}
+					if len(retry.ObjectResults) != total || retry.Finished.ObjectCount != uint64(total) || resumed != total-missing || uploads != total+missing || downloads != 0 {
+						t.Fatalf("missing=%d events=%d summary=%d resumed=%d uploads=%d downloads=%d", missing, len(retry.ObjectResults), retry.Finished.ObjectCount, resumed, uploads, downloads)
+					}
+				}
+				return
+			}
 			if err := os.WriteFile(input, []byte("\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isommp41"), 0o600); err != nil {
 				t.Fatal(err)
 			}

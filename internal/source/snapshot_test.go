@@ -17,6 +17,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/livewyer-ops/tamsin/internal/netio"
 )
 
 func TestHTTPSnapshotAndPrivateBridge(t *testing.T) {
@@ -117,6 +118,21 @@ func TestHTTPSnapshotRejectsUnsafeInitialResponses(t *testing.T) {
 				t.Fatalf("snapshot error=%v, fallback=%v", err, tc.fallback)
 			}
 		})
+	}
+}
+
+// A snapshot request that gets no response says so without the request's
+// own text and is marked as a failed request.
+func TestHTTPSnapshotRequestFailureIsMarkedAndWithheld(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{Transport: sourceRoundTripError(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("dial https://example.test/media?signature=top-secret")
+	})}
+	target, _ := url.Parse("https://example.test/media?signature=input-secret")
+	_, err := newResolver(Config{HTTPClient: client}).httpSnapshot(t.Context(), target)
+	if err == nil || !errors.Is(err, netio.ErrRequestFailed) || !strings.Contains(err.Error(), "remote input request failed") ||
+		strings.Contains(err.Error(), "secret") {
+		t.Fatalf("snapshot error = %v", err)
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"maps"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -23,7 +25,7 @@ func generatedRootFlowID(profileKey, mediaKey string) string {
 	return framedID("flow/content-profile/v1", profileKey, mediaKey)
 }
 
-func streamedFlowID(profileKey string, flow tams.Flow, info media.FlowInfo, overrides tams.Flow) (string, error) {
+func streamedFlowID(profileKey string, flow tams.Flow, info media.FlowInfo, overrides tams.Flow, collectedOverrides map[string]tams.Flow) (string, error) {
 	// Initial rate estimates and whole-input duration are not identity evidence.
 	// The same source revision must keep its IDs as segments establish cadence.
 	initial := func(flow tams.Flow) tams.Flow {
@@ -51,7 +53,18 @@ func streamedFlowID(profileKey string, flow tams.Flow, info media.FlowInfo, over
 	if err != nil {
 		return "", err
 	}
-	return framedID("flow/input-revision/v1", profileKey, mediaKey, string(encoded)), nil
+	if len(collectedOverrides) == 0 {
+		return framedID("flow/input-revision/v1", profileKey, mediaKey, string(encoded)), nil
+	}
+	perRole := make(map[string]tams.Flow, len(collectedOverrides))
+	for role, override := range collectedOverrides {
+		perRole[role] = flowIdentityFields(override)
+	}
+	encodedCollected, err := json.Marshal(perRole)
+	if err != nil {
+		return "", err
+	}
+	return framedID("flow/input-revision/v1", profileKey, mediaKey, string(encoded), string(encodedCollected)), nil
 }
 
 // generatedChildFlowID anchors every derived member to the root Flow. Besides
@@ -99,10 +112,17 @@ type mediaInterpretationIdentity struct {
 	Start              int64                         `json:"start"`
 	Duration           int64                         `json:"duration"`
 	ContentType        string                        `json:"content_type"`
-	SegmentContainer   media.SegmentContainer        `json:"segment_container"`
+	SegmentContainer   identitySegmentContainer      `json:"segment_container"`
 	ContainerSupported bool                          `json:"container_supported"`
 	UnsupportedCodecs  []media.UnsupportedCodec      `json:"unsupported_codecs,omitempty"`
+	UndescribedStreams []media.UnsupportedCodec      `json:"dropped_streams,omitempty"`
 	Collected          []collectedFlowInterpretation `json:"collected,omitempty"`
+}
+
+// Preserve the original fingerprint encoding after removing MXF rendering.
+// AudioMuxer remains empty for every supported input.
+type identitySegmentContainer struct {
+	Muxer, Extension, AudioMuxer string
 }
 
 type collectedFlowInterpretation struct {
@@ -114,26 +134,24 @@ type collectedFlowInterpretation struct {
 	Offset             int64          `json:"offset"`
 }
 
-// mediaInterpretationFingerprint captures only the normalized facts that
-// BuildFlow and segmentation use. It excludes identifiers, labels, descriptions
-// and provenance, so a filename can affect identity only when probing that name
-// actually changes the media graph. This matters for raw formats and stdin:
-// FFmpeg may legitimately interpret identical bytes differently from a naming
-// hint, and those graphs must not claim one Flow ID.
+// mediaInterpretationFingerprint hashes the effective media interpretation,
+// excluding identifiers, labels, descriptions and provenance. Legacy fields
+// retain their encoded values so model cleanup does not change resume identity.
 func mediaInterpretationFingerprint(flow tams.Flow, info media.FlowInfo) (string, error) {
 	identity := mediaInterpretationIdentity{
 		Root: flowIdentityFields(flow), Format: info.Format, Codec: info.Codec,
 		Container: info.Container, Start: info.Start, Duration: info.Duration,
-		ContentType: info.ContentType, SegmentContainer: info.SegmentContainer,
-		ContainerSupported: info.ContainerSupported,
+		ContentType: info.ContentType, SegmentContainer: identitySegmentContainer{Muxer: info.SegmentContainer.Muxer, Extension: info.SegmentContainer.Extension},
+		ContainerSupported: true,
 		UnsupportedCodecs:  info.UnsupportedCodecs,
+		UndescribedStreams: info.UndescribedStreams,
 		Collected:          make([]collectedFlowInterpretation, len(info.Collected)),
 	}
 	for index, collected := range info.Collected {
 		identity.Collected[index] = collectedFlowInterpretation{
 			Role: collected.Role, Flow: flowIdentityFields(collected.Flow),
 			ContainerMapping:   collected.ContainerMapping,
-			ContainerSupported: collected.ContainerSupported,
+			ContainerSupported: true,
 			StreamIndex:        collected.StreamIndex,
 			Offset:             collected.Offset,
 		}
@@ -187,4 +205,64 @@ func (p *Pipeline) acquireGraph(rootFlowID string) func() {
 		}
 		p.graphLocksMu.Unlock()
 	}
+}
+
+var idNamespace = uuid.MustParse("d1f5657c-cee0-5ac4-a0a5-c78ba122fa39")
+
+// rendererIdentityEpoch changes only when TAMSin deliberately changes the
+// semantics of media it writes. Package rebuilds and FFmpeg patch releases are
+// provenance, not a new ingest policy, and must not manufacture a new Flow.
+const rendererIdentityEpoch = "6"
+
+// flowProfile is everything about an ingest that changes what ends up in the
+// store. Generated identifiers derive from it, so that the same input treated
+// the same way keeps landing on the same Flow -- which is what makes a resume
+// work -- while any difference that alters the result produces a new one.
+//
+// Essence storage is part of it because it decides whether one Flow or several
+// are written and what shape the parent takes. Without it a muxed
+// multi-essence Flow and the collector of a demultiplexed ingest would derive
+// the same identifier for the same input: two incompatible Flows claiming one
+// ID, one holding Media Objects and one holding none.
+//
+// The start is part of it because it decides where the media sits on the
+// timeline. Without it a second ingest at a different --start appends to the
+// Flow the first one made, instead of describing the placement that was asked
+// for.
+func flowProfile(digest string, config Config) string {
+	return flowProfileForRendererEpoch(digest, config, rendererIdentityEpoch)
+}
+
+func flowProfileForRendererEpoch(digest string, config Config, rendererEpoch string) string {
+	parts := []string{
+		config.Profile,
+		config.ProfileVersion,
+		digest,
+		strconv.FormatInt(int64(config.SegmentDuration), 10),
+		string(config.SegmentFormat),
+		string(config.EssenceStorage),
+		strconv.FormatInt(config.Start, 10),
+		strconv.Itoa(len(config.FFmpegArgs)),
+	}
+	parts = append(parts, config.FFmpegArgs...)
+	parts = append(parts, config.TAMSFlowProfiles...)
+	parts = append(parts, rendererEpoch)
+	return identityFingerprint("media-treatment/v1", parts...)
+}
+
+func mediaToolchainFingerprint(profile, profileVersion, ffmpegReport string) string {
+	return identityFingerprint("media-toolchain/v1", profile, profileVersion, ffmpegReport)
+}
+
+// sourceIdentity derives a Source identifier from content, independent of its
+// location or packaging. The same essence shares a Source across muxed and
+// demuxed Flows. Re-encoding changes the bytes; --source-id lets the operator
+// assert equivalence when the resulting media still represents the same Source.
+func sourceIdentity(digest string, parts ...string) string {
+	return namedID(append([]string{"source", digest}, parts...)...)
+}
+
+func namedID(parts ...string) string {
+	// Source and Object identity encodings must stay stable for resume.
+	return uuid.NewSHA1(idNamespace, []byte(strings.Join(parts, "\x00"))).String()
 }

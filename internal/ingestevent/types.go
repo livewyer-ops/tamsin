@@ -186,14 +186,6 @@ type Severity string
 // SeverityError is the only severity TAMSin emits.
 const SeverityError Severity = "error"
 
-func clonePtr[T any](value *T) *T {
-	if value == nil {
-		return nil
-	}
-	clone := *value
-	return &clone
-}
-
 // Diagnostic carries a stable code and a safe display fallback. Message and
 // Hint must already be stripped of credentials, signed URLs, headers, provider
 // response bodies, and raw provider errors before construction.

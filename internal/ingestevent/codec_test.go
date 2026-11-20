@@ -18,16 +18,6 @@ import (
 
 const testRunID = "d1f5657c-cee0-5ac4-a0a5-c78ba122fa39"
 
-type flushingBuffer struct {
-	bytes.Buffer
-	flushes int
-}
-
-func (b *flushingBuffer) Flush() error {
-	b.flushes++
-	return nil
-}
-
 func testEncoder(t *testing.T, sink io.Writer) *Encoder {
 	t.Helper()
 	encoder, err := NewEncoder(sink, testRunID)
@@ -53,9 +43,9 @@ func emitHello(t *testing.T, encoder *Encoder, limit uint64) {
 	}
 }
 
-func TestEncoderWritesOrderedFlushableNDJSON(t *testing.T) {
+func TestEncoderWritesOrderedNDJSON(t *testing.T) {
 	t.Parallel()
-	sink := &flushingBuffer{}
+	sink := &bytes.Buffer{}
 	encoder := testEncoder(t, sink)
 	emitHello(t, encoder, DefaultMaxEventBytes)
 	if err := encoder.Emit(InputScope(0), InputDeclared{Input: "file:///input.ts"}); err != nil {
@@ -64,14 +54,8 @@ func TestEncoderWritesOrderedFlushableNDJSON(t *testing.T) {
 	if err := encoder.Emit(nil, RunFinished{Outcome: RunSucceeded, ExitCode: 0}); err != nil {
 		t.Fatal(err)
 	}
-	if err := encoder.Finalize(); err != nil {
-		t.Fatal(err)
-	}
 	first, _, _ := bytes.Cut(sink.Bytes(), []byte("\n"))
 	assertJSONEqual(t, first, `{"protocol":"tamsin.ingest.events","protocol_version":"2.1","type":"hello","seq":0,"run_id":"d1f5657c-cee0-5ac4-a0a5-c78ba122fa39","emitted_at":"2026-08-09T08:35:46.002Z","elapsed_ms":1,"payload":{"tool_version":"1.0.0","tool_commit":"abc","result_schema_version":"2.1","profile_policy_version":"1","max_event_bytes":1048576,"capabilities":[]}}`)
-	if sink.flushes != 3 {
-		t.Fatalf("flushes = %d, want 3", sink.flushes)
-	}
 	decoder := json.NewDecoder(bytes.NewReader(sink.Bytes()))
 	for sequence := uint64(0); sequence < 3; sequence++ {
 		var envelope Envelope
@@ -93,9 +77,6 @@ func TestEncoderEnforcesProcessBoundaries(t *testing.T) {
 	emitHello(t, encoder, DefaultMaxEventBytes)
 	if err := encoder.Emit(nil, Hello{}); err == nil {
 		t.Fatal("second hello succeeded")
-	}
-	if err := encoder.Finalize(); err == nil {
-		t.Fatal("incomplete stream finalised")
 	}
 
 	encoder = testEncoder(t, io.Discard)

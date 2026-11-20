@@ -11,7 +11,6 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/progress"
 	"github.com/livewyer-ops/tamsin/internal/source"
 	"github.com/livewyer-ops/tamsin/internal/tams"
-	"github.com/livewyer-ops/tamsin/internal/tamsschema"
 )
 
 const (
@@ -20,17 +19,34 @@ const (
 )
 
 type rollingObjectPreparer struct {
-	pipeline     *Pipeline
-	flowID       string
-	streamIndex  int
-	flowPosition int64
-	rates        *media.SegmentBitRateAccumulator
+	pipeline    *Pipeline
+	flowID      string
+	streamIndex int
+	cursor      *timelineCursor
+	rates       *media.SegmentBitRateAccumulator
+	// ahead is the probe of the Object at aheadPath, the one after the last
+	// prepared. It was read to place that one and is kept for its own turn.
+	ahead     media.Probe
+	aheadPath string
+	// cyclePackets pictures of the source's video last cycleTicks ticks of the
+	// 90 kHz clock, where the stream placed is video of a known rate.
+	cyclePackets, cycleTicks int64
 }
 
-func newRollingObjectPreparer(p *Pipeline, flowID string, streamIndex int, start int64) *rollingObjectPreparer {
+// timedBy gives the preparer the frame period of the source it places.
+func (p *rollingObjectPreparer) timedBy(source []media.Stream) *rollingObjectPreparer {
+	p.cyclePackets, p.cycleTicks = media.PictureCycle(source, p.streamIndex)
+	return p
+}
+
+// newRollingObjectPreparer places a stream's Segments from start. A muxed
+// render is anchored where its reference stream begins, referenceStart, which
+// differs from start when that stream begins after the container does.
+func newRollingObjectPreparer(p *Pipeline, flowID string, streamIndex int, start, referenceStart int64) *rollingObjectPreparer {
 	return &rollingObjectPreparer{
 		pipeline: p, flowID: flowID, streamIndex: streamIndex,
-		flowPosition: start, rates: media.NewSegmentBitRateAccumulator(p.config.SegmentDuration),
+		cursor: newTimelineCursor(start, referenceStart, p.logger),
+		rates:  media.NewSegmentBitRateAccumulator(p.config.SegmentDuration),
 	}
 }
 
@@ -51,6 +67,9 @@ func (p *rollingObjectPreparer) prepare(ctx context.Context, record media.Segmen
 	if record.Timed && record.End <= record.Start {
 		return preparedObject{}, errors.New("renderer emitted a non-positive segment interval")
 	}
+	if measured == nil && p.aheadPath != "" && record.Path == p.aheadPath {
+		measured = &p.ahead
+	}
 	if measured == nil {
 		probe, probeErr := p.pipeline.probeObject(ctx, record.Path)
 		if probeErr != nil {
@@ -58,26 +77,62 @@ func (p *rollingObjectPreparer) prepare(ctx context.Context, record media.Segmen
 		}
 		measured = &probe
 	}
-	objectStart, duration, err := media.ProbeTiming(*measured)
+	measurement, err := measureObject(*measured, size, checksum)
 	if err != nil {
 		return preparedObject{}, err
 	}
-	object, next, err := placeObject(p.flowID, record.Path, objectMeasurement{
-		size: size, checksum: checksum, objectStart: objectStart, duration: duration,
-	}, p.flowPosition)
+	measurement.pace(p.cyclePackets, p.cycleTicks)
+	// An MPEG-TS Segment ends where the next Object's first sample is, which
+	// only that Object's own timestamps say. An Object that cannot be read
+	// fails on its own turn, so the Segments before it are kept.
+	if record.MPEGTS && record.Timed && record.NextPath != "" {
+		if probe, probeErr := p.pipeline.probeObject(ctx, record.NextPath); probeErr == nil {
+			if next, measureErr := measureObject(probe, 0, ""); measureErr == nil {
+				measurement.next = &next
+				p.ahead, p.aheadPath = probe, record.NextPath
+			}
+		}
+	}
+	object, err := p.cursor.object(p.flowID, record.Path, record, measurement)
 	if err != nil {
 		return preparedObject{}, err
 	}
-	p.flowPosition = next
-	p.rates.Add(media.SegmentMeasurement{Bytes: size, Duration: duration})
+	p.rates.Add(media.SegmentMeasurement{Bytes: size, Duration: object.duration})
 	return object, nil
 }
 
+// probeObject measures a rendered Object. An MPEG-TS Object carries its H.264
+// parameter sets in the stream, so those are read as well: whether the Object
+// can be decoded on its own depends on where they are.
 func (p *Pipeline) probeObject(ctx context.Context, path string) (media.Probe, error) {
-	return p.prober.ProbeObject(ctx, path)
+	probe, err := p.prober.ProbeObject(ctx, path)
+	if err != nil || probe.Format.Name != "mpegts" {
+		return probe, err
+	}
+	video := 0
+	for index := range probe.Streams {
+		stream := &probe.Streams[index]
+		if stream.CodecType != "video" {
+			continue
+		}
+		if stream.CodecName == "h264" {
+			// An Object with no sequence parameter set at all has no picture
+			// size, and FFmpeg cannot copy its stream to list what it holds.
+			sets := media.ParameterSets{Missing: true}
+			if stream.Width > 0 && stream.Height > 0 {
+				if sets, err = p.segmenter.ProbeParameterSets(ctx, path, video); err != nil {
+					return media.Probe{}, err
+				}
+			}
+			stream.ParameterSets = &sets
+		}
+		video++
+	}
+	return probe, nil
 }
 
 type rollingFlowState struct {
+	role        string
 	flowID      string
 	resultIndex int
 	flow        tams.Flow
@@ -187,26 +242,29 @@ func (e *rollingExecution) flush(state *rollingFlowState) error {
 	objects := state.pending
 	pendingSize := state.pendingSize
 	objectResults := make([]ObjectResult, len(objects))
-	objectIDs := make(map[string]struct{}, len(objects))
+	objectIDs := make(map[segmentKey]struct{}, len(objects))
 	for index, object := range objects {
 		objectResults[index] = e.pipeline.newObjectResult(object)
-		objectIDs[object.id] = struct{}{}
+		objectIDs[object.key()] = struct{}{}
 	}
 
 	var operationErr error
 	if e.pipeline.config.DryRunMode != DryRunOff {
 		operationErr = e.pipeline.observeObjectBatch(e.ctx, state.flowID, objectResults, objectIDs)
 	} else {
-		operationErr = e.pipeline.registerRollingChunk(
-			e.ctx, state.flowID, objects, objectResults, e.storageID, &state.throughput)
+		operationErr = e.pipeline.registerFlow(
+			e.ctx, state.flowID, plannedContainer(e.planned, state.flowID), objects, objectResults, e.storageID, &state.throughput, e.graph.changes)
 		if operationErr != nil {
 			for index := range objectResults {
+				objectIDs[objectResults[index].key()] = struct{}{}
 				if objectResults[index].Disposition == ObjectDispositionPlanned {
 					objectResults[index].Disposition = ObjectDispositionUnattempted
 				}
 			}
-			operationErr = errors.Join(operationErr,
-				e.pipeline.observeObjectBatch(e.ctx, state.flowID, objectResults, objectIDs))
+			// The failure is the registration's whether this flush is the
+			// render's last or one in the middle of it.
+			operationErr = withFailure(FailureCodeTAMSRegistrationFailed, FailureMessageTAMSRegistrationFailed, true, errors.Join(operationErr,
+				e.pipeline.observeObjectBatch(e.ctx, state.flowID, objectResults, objectIDs)))
 		}
 	}
 
@@ -293,9 +351,10 @@ func (p *Pipeline) beginRollingFlowPlan(ctx context.Context, graph flowGraph,
 		planned[index].effective = maps.Clone(planned[index].effective)
 		planned[index].request = maps.Clone(planned[index].request)
 	}
-	if err := p.writeFlowGraph(ctx, planned, results); err != nil {
+	if err := p.writeFlowGraph(ctx, planned, results, graph.changes); err != nil {
 		return nil, err
 	}
+	p.populateSources(ctx, planned)
 	return planned, nil
 }
 
@@ -309,38 +368,36 @@ func (p *Pipeline) finishRollingFlowMetadata(ctx context.Context, graph flowGrap
 	}
 	for index := range planned {
 		member := byID[planned[index].member.id]
-		planned[index].changed = false
-		fields := []string{"avg_bit_rate", "max_bit_rate"}
-		if planned[index].member.profileID != "" {
-			fields = []string{"max_bit_rate"}
+		member.flow = maps.Clone(member.flow)
+		if member.profileID != "" {
+			// A Profile owns the encoding target; only the measured maximum
+			// is Flow-specific.
+			delete(member.flow, "avg_bit_rate")
 		}
-		for _, field := range fields {
-			if value, present := member.flow[field]; present {
-				if planned[index].effective[field] != value {
-					planned[index].effective[field] = value
-					planned[index].changed = true
-				}
-			}
+		expanded, err := p.expandFlowProfile(ctx, member)
+		if err != nil {
+			return err
 		}
-		planned[index].request = flowPutProjection(planned[index].effective, planned[index].member.profileID)
-		if err := tamsschema.ValidateFlowGet(p.apiVersion, planned[index].effective); err != nil {
+		// The Flow is read again rather than rewritten from the snapshot
+		// taken when the ingest began: a PUT replaces the whole Flow, and an
+		// hours-long ingest gives an operator or a MAM time to add tags or a
+		// label that must survive.
+		plan, err := p.planFlowWrite(ctx, expanded, p.overridesFor(graph, member))
+		if err == nil {
+			err = p.validatePlannedFlow(plan)
+		}
+		if err != nil {
 			return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
-				fmt.Errorf("final rolling Flow metadata for %s is invalid at %w", member.id, err))
+				fmt.Errorf("plan final rolling Flow metadata for %s: %w", member.id, err))
 		}
-		if err := tamsschema.ValidateFlowPut(p.apiVersion, planned[index].request); err != nil {
-			return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
-				fmt.Errorf("final rolling Flow PUT metadata for %s is invalid at %w", member.id, err))
-		}
+		planned[index] = plan
 	}
 	if err := validateFlowGraph(graph, planned); err != nil {
 		return withFailure(FailureCodeFlowPlanFailed, FailureMessageFlowPlanFailed, true,
 			fmt.Errorf("final rolling Flow graph is invalid: %w", err))
 	}
 	for _, plan := range planned {
-		if !plan.changed {
-			continue
-		}
-		if err := p.writeFlow(ctx, plan); err != nil {
+		if err := p.writeFlow(ctx, plan, graph.changes); err != nil {
 			return withFailure(FailureCodeFlowWriteFailed, FailureMessageFlowWriteFailed, true,
 				fmt.Errorf("write final rolling Flow metadata: %w", err))
 		}
@@ -367,7 +424,7 @@ func (p *Pipeline) ingestMuxedRolling(ctx context.Context, staged stagedFile, fl
 	}
 	state := &rollingFlowState{
 		flowID: root.id, resultIndex: len(result.Flows) - 1, flow: root.flow,
-		preparer: newRollingObjectPreparer(p, root.id, media.AllStreams, p.config.Start),
+		preparer: newRollingObjectPreparer(p, root.id, media.AllStreams, p.config.Start, p.config.Start+flowInfo.ReferenceOffset).timedBy(flowInfo.Streams),
 	}
 	window := p.rollingStagingWindow(staged)
 	execution := newRollingExecution(p, ctx, &result, storageID, window, state)
@@ -423,9 +480,9 @@ func (p *Pipeline) ingestIndependentRolling(ctx context.Context, staged stagedFi
 	for index, essence := range flowInfo.Collected {
 		flowResult, member := p.essenceFlow(staged, graph.collectorID, index, essence)
 		states = append(states, &rollingFlowState{
-			flowID: member.id, resultIndex: len(result.Flows), flow: member.flow,
+			role: member.role, flowID: member.id, resultIndex: len(result.Flows), flow: member.flow,
 			preparer: newRollingObjectPreparer(
-				p, member.id, essence.StreamIndex, p.config.Start+essence.Offset),
+				p, member.id, essence.StreamIndex, p.config.Start+essence.Offset, p.config.Start+essence.Offset).timedBy(flowInfo.Streams),
 		})
 		result.Flows = append(result.Flows, flowResult)
 		graph.flows = append(graph.flows, member)
@@ -493,8 +550,10 @@ func (p *Pipeline) ingestIndependentRolling(ctx context.Context, staged stagedFi
 	return result, p.finishRollingFlowMetadata(ctx, graph, execution.planned)
 }
 
+// canRenderRollingMultiOutput also asks that no two essences share a stream
+// index, since a joint render names each of its outputs by that index.
 func canRenderRollingMultiOutput(states []*rollingFlowState, additionalArgs []string) bool {
-	if len(states) < multiOutputEssenceThreshold || len(additionalArgs) > 0 {
+	if !rendersTogether(len(states), additionalArgs) {
 		return false
 	}
 	seen := make(map[int]struct{}, len(states))

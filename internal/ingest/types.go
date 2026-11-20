@@ -25,6 +25,10 @@ type TAMSClient interface {
 	ListSegments(context.Context, string, tams.SegmentListOptions) ([]tams.Segment, error)
 	UploadFile(context.Context, tams.PresignedURL, string) (tams.UploadReceipt, error)
 	DownloadDigest(context.Context, tams.PresignedURL, int64) (int64, string, error)
+	Source(context.Context, string) (tams.Source, error)
+	PutSourceLabel(context.Context, string, string) error
+	PutSourceDescription(context.Context, string, string) error
+	PutSourceTag(context.Context, string, string, any) error
 }
 
 // graphFlow describes one member of the complete empty Flow graph which must
@@ -40,7 +44,15 @@ type graphFlow struct {
 	profileID        string
 }
 
+// flowGraph is the set of Flows one input produces. It is passed by value,
+// and every copy shares the flows slice, each member's Flow map and the
+// changes map with the others. A function given a flowGraph may therefore
+// assign a member's profile ID, set fields on a member's Flow or record a
+// status change, and its caller reads the result from its own copy. Code that
+// needs a Flow as it stood at one moment clones the map, as
+// beginRollingFlowPlan does.
 type flowGraph struct {
+	changes     flowChanges
 	flows       []graphFlow
 	collectorID string
 	storage     media.EssenceStorage
@@ -100,6 +112,12 @@ type Config struct {
 	FlowID            string
 	SourceID          string
 	FlowMetadata      tams.Flow
+	// CollectedFlowMetadata overrides one collected essence Flow at a time,
+	// keyed by its collection role ("video", "audio 1"), for facts an
+	// operator knows about one track of a multiplex, such as the codec of a
+	// data track Tamsin cannot name. Roles that the input does not produce
+	// are an error.
+	CollectedFlowMetadata map[string]tams.Flow
 	// TAMSFlowProfiles assigns immutable TAMS 8.2 Flow Profiles using
 	// [format[:index]=]UUID selectors.
 	TAMSFlowProfiles []string
@@ -107,13 +125,18 @@ type Config struct {
 
 type Pipeline struct {
 	config Config
-	// reporter presents progress to an operator. It is Discard unless the CLI
-	// decided a terminal is watching, so the pipeline itself stays unaware of
-	// whether anything is being rendered.
+	// reporter presents progress to an operator. The CLI supplies the event
+	// stream for JSON output, plain lines on stderr otherwise and Discard when
+	// progress is off, so the pipeline itself stays unaware of what is
+	// rendered.
 	reporter progress.Reporter
 	// transfers is the global budget. Acquiring a slot is what bounds
 	// concurrency; goroutines are cheap, waiting on the network is not.
 	transfers chan struct{}
+	// sourceSlots bounds the Sources being populated across the run. It is as
+	// large as the transfer budget and apart from it, so populating a Source
+	// never waits behind another input's upload.
+	sourceSlots chan struct{}
 	// probes bounds media measurement globally. Limiting it per Flow multiplied
 	// by the number of Flows prepared at once.
 	probes chan struct{}
@@ -141,8 +164,6 @@ type Pipeline struct {
 	profileAssignments   []flowProfileAssignment
 	profileMu            sync.Mutex
 	profileCache         map[string]tams.Profile
-	flowStatusMu         sync.Mutex
-	flowStatuses         map[string]string
 	client               TAMSClient
 	prober               media.Prober
 	segmenter            media.Segmenter
@@ -163,13 +184,13 @@ type Pipeline struct {
 }
 
 type ObjectResult struct {
-	ObjectID           string                   `json:"object_id"`
-	Timerange          string                   `json:"timerange"`
-	Bytes              int64                    `json:"bytes"`
-	SHA256             string                   `json:"sha256"`
-	Disposition        ObjectDisposition        `json:"disposition"`
-	Verification       ObjectVerificationStatus `json:"verification_status"`
-	VerificationMethod VerificationMethod       `json:"verification_method"`
+	ObjectID           string
+	Timerange          string
+	Bytes              int64
+	SHA256             string
+	Disposition        ObjectDisposition
+	Verification       ObjectVerificationStatus
+	VerificationMethod VerificationMethod
 
 	reported bool
 }
@@ -223,16 +244,16 @@ type ObjectSummary struct {
 // in Result.Flows; Result.RootFlowID points at the Flow which represents the
 // input as a whole rather than duplicating it at the Result level.
 type FlowResult struct {
-	FlowID            string          `json:"flow_id"`
-	SourceID          string          `json:"source_id"`
-	Role              string          `json:"role,omitempty"`
-	TAMSFlowProfileID string          `json:"tams_flow_profile_id,omitempty"`
-	Disposition       FlowDisposition `json:"disposition"`
-	ObjectSummary     ObjectSummary   `json:"object_summary"`
-	Objects           []ObjectResult  `json:"-"`
+	FlowID            string
+	SourceID          string
+	Role              string
+	TAMSFlowProfileID string
+	Disposition       FlowDisposition
+	ObjectSummary     ObjectSummary
+	Objects           []ObjectResult
 	// Kind prevents terminal consumers from inferring media ownership from an
 	// empty role or Object count.
-	Kind FlowKind `json:"kind"`
+	Kind FlowKind
 }
 
 // FlowDisposition reports what this invocation knows about each planned Flow
@@ -277,9 +298,9 @@ const (
 // human receipt and process event adapters. It never contains raw
 // provider bodies, URLs, headers, FFmpeg commands, or arbitrary error text.
 type Failure struct {
-	Code           string `json:"code"`
-	Message        string `json:"message"`
-	ActionRequired bool   `json:"action_required"`
+	Code           string
+	Message        string
+	ActionRequired bool
 }
 
 type Result struct {

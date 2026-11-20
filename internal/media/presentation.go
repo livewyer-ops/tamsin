@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -19,9 +21,9 @@ import (
 type CadenceEvidence uint8
 
 const (
-	// CadenceUnexamined is retained for callers that supply Probe values
-	// directly. The production pipeline always asks its Prober to inspect
-	// video before building its Flow.
+	// CadenceUnexamined means no scan was made: a caller built the Probe
+	// itself, the operator supplied essence_parameters, or a fast dry run of
+	// a streamed input took the rate the stream declares.
 	CadenceUnexamined CadenceEvidence = iota
 	// CadenceUnknown means the scan ran but the input did not expose enough
 	// usable presentation timestamps to make either claim.
@@ -89,10 +91,15 @@ func cadenceStates(probe *Probe) map[int]*cadenceState {
 			continue
 		}
 		stream.Cadence = CadenceUnknown
-		states[stream.Index] = &cadenceState{stream: stream}
+		states[stream.Index] = &cadenceState{stream: stream, transport: probe.Format.Name == "mpegts" && stream.TimeBase == "1/90000"}
 	}
 	return states
 }
+
+// frameScanThreads is the number of threads each decoder of the decoded-frame
+// scan is given on a host with that many CPUs. The scan shares the host with
+// one other media process and the uploads.
+func frameScanThreads(cpus int) int { return min(cpus, 4) }
 
 func (p FFprobe) probePresentationMode(ctx context.Context, filename string, probe *Probe, mode presentationMode) (bool, error) {
 	states := cadenceStates(probe)
@@ -108,6 +115,11 @@ func (p FFprobe) probePresentationMode(ctx context.Context, filename string, pro
 		executable = "ffprobe"
 	}
 	arguments := append([]string{"-v", "error"}, inputOptions(filename)...)
+	if mode == presentationFrames {
+		// This pass decodes every picture, and FFprobe decodes on one thread
+		// unless it is given more.
+		arguments = append(arguments, "-threads", strconv.Itoa(frameScanThreads(runtime.GOMAXPROCS(0))))
+	}
 	arguments = append(arguments,
 		"-select_streams", "v",
 		showArgument,
@@ -142,6 +154,7 @@ func (p FFprobe) probePresentationMode(ctx context.Context, filename string, pro
 }
 
 type cadenceState struct {
+	transport    bool
 	stream       *Stream
 	first        int64
 	previous     int64
@@ -159,6 +172,9 @@ func (s *cadenceState) observe(timestamp string) {
 		return
 	}
 	if s.frames > 0 {
+		if s.transport {
+			value = unwrapTransportPTS(value, s.previous)
+		}
 		step, offsetErr := TimestampOffset(value, s.previous)
 		if offsetErr != nil || step <= 0 {
 			s.invalid = true
@@ -269,6 +285,10 @@ type PresentationSpan struct {
 	Invalid                           bool
 }
 
+// maxLeadingPictures bounds the leading pictures measured for one Object, far
+// above the few an encoder stores after a key frame.
+const maxLeadingPictures = 256
+
 // CadenceTimeline carries presentation intervals across closed segments. It
 // uses rational seconds: different container time bases never pass via float64.
 type CadenceTimeline struct {
@@ -294,7 +314,6 @@ func (c *CadenceTimeline) Observe(stream, reference Stream, segmentEnd int64) (C
 	}
 	offset := new(big.Rat).Sub(new(big.Rat).SetFrac64(segmentEnd, 1_000_000_000),
 		new(big.Rat).Add(seconds(ref.Last, refTick), seconds(ref.LastDuration, refTick)))
-	first := new(big.Rat).Add(seconds(span.First, tick), offset)
 	last := new(big.Rat).Add(seconds(span.Last, tick), offset)
 	add := func(step *big.Rat) error {
 		if step.Sign() <= 0 {
@@ -308,6 +327,36 @@ func (c *CadenceTimeline) Observe(stream, reference Stream, segmentEnd int64) (C
 		}
 		return nil
 	}
+	// An Object may store leading pictures: stored after the frame it was cut
+	// on and shown before it. A decoder given that Object alone shows the ones
+	// it can decode without the Object before and drops the rest, so the
+	// frames read from it begin at the cut frame or at a leading picture. The
+	// packets say when each leading picture is shown. Those the frames leave
+	// out are measured here, each step on its own, and the interval from the
+	// Object before runs to the earliest of them.
+	if len(stream.LeadingPTS) > maxLeadingPictures {
+		return CadenceUnknown, errors.New("too many leading pictures to measure")
+	}
+	var dropped []int64
+	for _, pts := range stream.LeadingPTS {
+		if stream.TimeBase == "1/90000" {
+			// The packets and the frames of a transport stream may have been
+			// read on either side of a timestamp wrap.
+			pts = unwrapTransportPTS(pts, span.First)
+		}
+		if pts < span.First {
+			dropped = append(dropped, pts)
+		}
+	}
+	slices.Sort(dropped)
+	earliest := span.First
+	for index := len(dropped) - 1; index >= 0; index-- {
+		if err := add(seconds(earliest-dropped[index], tick)); err != nil {
+			return CadenceUnknown, err
+		}
+		earliest = dropped[index]
+	}
+	first := new(big.Rat).Add(seconds(earliest, tick), offset)
 	if c.previous != nil {
 		if err := add(new(big.Rat).Sub(first, c.previous)); err != nil {
 			return CadenceUnknown, err

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/livewyer-ops/tamsin/internal/netio"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 )
@@ -158,17 +159,21 @@ func NewRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper) (h
 			request.URL.RawQuery = query.Encode()
 		}}, mode, nil
 	case ModeOAuthClient:
-		tokenContext := oauthHTTPContext(ctx, cfg.Timeout, base)
-		source := (&clientcredentials.Config{
+		credentials := &clientcredentials.Config{
 			ClientID:     cfg.ClientID,
 			ClientSecret: cfg.ClientSecret,
 			TokenURL:     cfg.TokenURL,
 			Scopes:       cfg.Scopes,
-		}).TokenSource(tokenContext)
-		token, tokenErr := source.Token()
+		}
+		// The first token is part of starting the run and stops with it.
+		token, tokenErr := credentials.Token(oauthHTTPContext(ctx, cfg.Timeout, base))
 		if tokenErr != nil {
 			return nil, "", oauthTokenError("obtain OAuth client credentials token", tokenErr)
 		}
+		// Refreshes happen for as long as the transport lives, including the
+		// cleanup that runs after the run itself is cancelled, so they must
+		// not inherit that cancellation; the HTTP client's timeout bounds them.
+		source := credentials.TokenSource(oauthHTTPContext(context.WithoutCancel(ctx), cfg.Timeout, base))
 		return credentialTransport{
 			base:   &oauth2.Transport{Source: oauth2.ReuseTokenSource(token, source), Base: base},
 			policy: policy,
@@ -178,7 +183,7 @@ func NewRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper) (h
 		if tokenErr != nil {
 			return nil, "", tokenErr
 		}
-		tokenContext := oauthHTTPContext(ctx, cfg.Timeout, base)
+		tokenContext := oauthHTTPContext(context.WithoutCancel(ctx), cfg.Timeout, base)
 		source := oauthAuthorizationConfig(cfg).TokenSource(tokenContext, token)
 		return credentialTransport{
 			base:   &oauth2.Transport{Source: oauth2.ReuseTokenSource(token, source), Base: base},
@@ -383,6 +388,12 @@ func oauthTokenError(action string, err error) error {
 		// client secret or authorization code. Report only the numeric status and
 		// Go's canonical text rather than the raw response.Status string.
 		return fmt.Errorf("%s: token endpoint returned %s", action, SafeHTTPStatus(retrieveError.Response.StatusCode))
+	}
+	// A request that got no response is marked as one. A response that could
+	// not be used, and a cancelled request, read the same without the mark.
+	var request *url.Error
+	if errors.As(err, &request) && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("%s: token endpoint %w", action, netio.ErrRequestFailed)
 	}
 	return fmt.Errorf("%s: token endpoint request failed", action)
 }

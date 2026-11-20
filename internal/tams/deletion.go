@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/livewyer-ops/tamsin/internal/auth"
+	"github.com/livewyer-ops/tamsin/internal/tamstime"
 )
 
 // DeleteSegments removes the selected Flow Segments and does not return until
@@ -24,15 +25,18 @@ func (c *Client) DeleteSegments(ctx context.Context, flowID string, options Segm
 	if strings.TrimSpace(options.ObjectID) == "" {
 		return errors.New("terminal segment deletion requires an object ID")
 	}
-	if c.timeout > 0 {
+	// Deletion is asynchronous on the service side and confirmed by polling,
+	// so it has a deadline of its own; each request inside still gets the
+	// metadata timeout.
+	if c.deletionTimeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.timeout)
+		ctx, cancel = context.WithTimeout(ctx, c.deletionTimeout)
 		defer cancel()
 	}
 	query := make(url.Values)
 	query.Set("timerange", options.Timerange)
 	query.Set("object_id", options.ObjectID)
-	path := "flows/" + escapeSegment(flowID) + "/segments?" + query.Encode()
+	path := "flows/" + url.PathEscape(flowID) + "/segments?" + query.Encode()
 	var initial DeletionRequest
 	response, err := c.doJSONResponse(ctx, http.MethodDelete, path, nil, &initial, http.StatusNoContent, http.StatusAccepted)
 	if err != nil {
@@ -47,7 +51,19 @@ func (c *Client) DeleteSegments(ctx context.Context, flowID string, options Segm
 	}
 	if response.StatusCode == http.StatusAccepted {
 		if err := c.waitForDeletionRequest(ctx, path, response.Header.Get("Location"), flowID, options, initial); err != nil {
-			return err
+			if !errors.Is(err, errDeletionRequestFailed) {
+				return err
+			}
+			// The service reports its request as failed, yet the Segment may
+			// already be gone; its absence is the fact that matters.
+			present, presentErr := c.segmentPresent(ctx, flowID, options)
+			if presentErr != nil {
+				return errors.Join(err, fmt.Errorf("confirm segment deletion from flow %s: %w", flowID, presentErr))
+			}
+			if present {
+				return err
+			}
+			return nil
 		}
 	}
 	if err := c.waitForSegmentAbsence(ctx, flowID, options); err != nil {
@@ -56,9 +72,26 @@ func (c *Client) DeleteSegments(ctx context.Context, flowID string, options Segm
 	return nil
 }
 
+// DeletionTimeout is the deadline one Segment deletion is given. A nil
+// client, which a dry run passes around, has none.
+func (c *Client) DeletionTimeout() time.Duration {
+	if c == nil {
+		return 0
+	}
+	return c.deletionTimeout
+}
+
+var errDeletionRequestFailed = errors.New("segment deletion request failed")
+
+// waitForDeletionRequest follows a 202's deletion request to its end. A
+// request that cannot be followed, because the service sent no Location or
+// one outside the configured API, is not an error in itself: the Segment's
+// absence, which DeleteSegments confirms afterwards, is the authoritative
+// result. Credentials are only ever sent to a reference apiReference accepts.
 func (c *Client) waitForDeletionRequest(ctx context.Context, deletePath, location, flowID string, options SegmentDeleteOptions, initial DeletionRequest) error {
 	if strings.TrimSpace(location) == "" {
-		return errors.New("TAMS accepted segment deletion without a Location header")
+		c.logger.Warn("TAMS accepted segment deletion without a Location header; confirming by segment absence", "flow_id", flowID)
+		return nil
 	}
 	deleteURL, err := c.resolve(deletePath)
 	if err != nil {
@@ -66,11 +99,13 @@ func (c *Client) waitForDeletionRequest(ctx context.Context, deletePath, locatio
 	}
 	reference, err := c.apiReference(deleteURL, location)
 	if err != nil {
-		return fmt.Errorf("invalid segment deletion Location: %w", err)
+		c.logger.Warn("segment deletion request cannot be followed; confirming by segment absence",
+			"flow_id", flowID, "reason", err.Error())
+		return nil
 	}
 
 	request := initial
-	for {
+	for polls := 0; ; polls++ {
 		if request.Status != "" {
 			complete, err := validateDeletionRequest(request, flowID, options.Timerange)
 			if err != nil {
@@ -81,7 +116,7 @@ func (c *Client) waitForDeletionRequest(ctx context.Context, deletePath, locatio
 			}
 		}
 
-		if err := waitForPoll(ctx, c.deletePollInterval); err != nil {
+		if err := waitForPoll(ctx, c.pollInterval(polls)); err != nil {
 			return fmt.Errorf("wait for segment deletion request: %w", err)
 		}
 		request = DeletionRequest{}
@@ -104,7 +139,7 @@ func validateDeletionRequest(request DeletionRequest, flowID, timerange string) 
 	if request.FlowID != flowID {
 		return false, errors.New("segment deletion request targets an unexpected flow")
 	}
-	if request.TimerangeToDelete != timerange {
+	if !tamstime.EqualTimeRanges(request.TimerangeToDelete, timerange) {
 		return false, errors.New("segment deletion request targets an unexpected timerange")
 	}
 	if request.DeleteFlow {
@@ -116,34 +151,50 @@ func validateDeletionRequest(request DeletionRequest, flowID, timerange string) 
 	case "done":
 		return true, nil
 	case "error":
-		return false, errors.New("segment deletion request failed")
+		return false, errDeletionRequestFailed
 	default:
 		return false, errors.New("segment deletion request has an unknown status")
 	}
 }
 
+func (c *Client) segmentPresent(ctx context.Context, flowID string, options SegmentDeleteOptions) (bool, error) {
+	segments, err := c.ListSegments(ctx, flowID, SegmentListOptions{
+		ObjectID: options.ObjectID, Timerange: options.Timerange,
+	})
+	if err != nil {
+		return false, fmt.Errorf("list segments to confirm deletion: %w", err)
+	}
+	for _, segment := range segments {
+		if tamstime.EqualTimeRanges(segment.Timerange, options.Timerange) && segment.ObjectID == options.ObjectID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// waitForSegmentAbsence lists the Segment until it is gone. When the deadline
+// ends the wait, the error says the Segment was still listed. A listing that
+// fails or cannot be trusted ends the wait at once with its own error, and is
+// never taken for a Segment that is still there.
 func (c *Client) waitForSegmentAbsence(ctx context.Context, flowID string, options SegmentDeleteOptions) error {
-	for {
-		segments, err := c.ListSegments(ctx, flowID, SegmentListOptions{
-			ObjectID: options.ObjectID, Timerange: options.Timerange,
-		})
+	for listings := 1; ; listings++ {
+		present, err := c.segmentPresent(ctx, flowID, options)
 		if err != nil {
 			return err
 		}
-		found := false
-		for _, segment := range segments {
-			if segment.Timerange == options.Timerange && segment.ObjectID == options.ObjectID {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !present {
 			return nil
 		}
-		if err := waitForPoll(ctx, c.deletePollInterval); err != nil {
-			return err
+		if err := waitForPoll(ctx, c.pollInterval(listings-1)); err != nil {
+			return fmt.Errorf("segment still listed after %d listings: %w", listings, err)
 		}
 	}
+}
+
+// pollInterval is how long to wait before the next poll of one deletion: it
+// doubles from deletePollInterval to sixteen times that.
+func (c *Client) pollInterval(polls int) time.Duration {
+	return c.deletePollInterval << min(polls, 4)
 }
 
 func waitForPoll(ctx context.Context, interval time.Duration) error {

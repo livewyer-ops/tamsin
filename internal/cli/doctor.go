@@ -7,11 +7,10 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/livewyer-ops/tamsin/internal/auth"
 	"github.com/livewyer-ops/tamsin/internal/ingest"
 	"github.com/livewyer-ops/tamsin/internal/media"
@@ -64,11 +63,10 @@ type doctorResult struct {
 	Checks        []doctorCheck `json:"checks"`
 }
 
-type doctorFailure struct{ exitCode int }
-
 type doctorRun struct {
-	report   doctorResult
-	failures []doctorFailure
+	report doctorResult
+	// failures holds the exit code of each failed check.
+	failures []int
 }
 
 func newDoctorRun(online bool) *doctorRun {
@@ -90,7 +88,7 @@ func (r *doctorRun) fail(name string, err error, exitCode int, detail map[string
 	r.report.Checks = append(r.report.Checks, doctorCheck{
 		Name: name, Status: doctorFail, Detail: detail, Error: err.Error(),
 	})
-	r.failures = append(r.failures, doctorFailure{exitCode: exitCode})
+	r.failures = append(r.failures, exitCode)
 }
 
 func (r *doctorRun) skip(name, reason string) {
@@ -104,10 +102,8 @@ func (r *doctorRun) skip(name, reason string) {
 // remote TAMS validation, and finally other local runtime failures.
 func (r *doctorRun) exitCode() int {
 	for _, candidate := range []int{ExitUsage, ExitMedia, ExitAuth, ExitRemote, ExitGeneral} {
-		for _, failure := range r.failures {
-			if failure.exitCode == candidate {
-				return candidate
-			}
+		if slices.Contains(r.failures, candidate) {
+			return candidate
 		}
 	}
 	return ExitGeneral
@@ -146,12 +142,7 @@ func (a *application) runDoctor(command *cobra.Command) error {
 	v := a.v.forCommand(command)
 	selection := v.GetString("ingest.profile")
 	storageID := v.GetString("ingest.storage_id")
-	var configErr error
-	if storageID != "" {
-		if _, err := uuid.Parse(storageID); err != nil {
-			configErr = errors.Join(configErr, fmt.Errorf("storage ID must be a UUID: %w", err))
-		}
-	}
+	configErr := identifierError("storage ID", storageID)
 	if configErr != nil {
 		run.fail("configuration", configErr, ExitUsage, nil)
 	} else {
@@ -313,23 +304,7 @@ func (a *application) runDoctorOnline(ctx context.Context, run *doctorRun, stora
 	}
 	run.report.Auth = string(mode)
 
-	var (
-		wait        sync.WaitGroup
-		service     map[string]any
-		serviceErr  error
-		backends    []tams.StorageBackend
-		backendsErr error
-	)
-	wait.Add(2)
-	go func() {
-		defer wait.Done()
-		service, serviceErr = client.Service(ctx)
-	}()
-	go func() {
-		defer wait.Done()
-		backends, backendsErr = client.StorageBackends(ctx)
-	}()
-	wait.Wait()
+	service, backends, serviceErr, backendsErr := tams.ServiceAndBackends(ctx, client)
 
 	authStatus := authenticationRejectionStatus(serviceErr, backendsErr)
 	if serviceErr == nil || backendsErr == nil {
@@ -370,10 +345,14 @@ func (a *application) runDoctorOnline(ctx context.Context, run *doctorRun, stora
 		if limitsErr != nil {
 			run.fail("service_lifetimes", safeLifetimeError(limitsErr), ExitRemote, nil)
 		} else {
-			run.pass("service_lifetimes", map[string]any{
+			detail := map[string]any{
 				"object_registration": limits.ObjectRegistration.String(),
 				"presigned_url":       limits.PresignedURL.String(),
-			})
+			}
+			if len(limits.Warnings) > 0 {
+				detail["warnings"] = limits.Warnings
+			}
+			run.pass("service_lifetimes", detail)
 		}
 	}
 
@@ -414,9 +393,6 @@ func safeDoctorRemoteError(operation string, err error) error {
 	var httpErr *tams.HTTPError
 	if errors.As(err, &httpErr) {
 		return fmt.Errorf("%s returned %d %s", operation, httpErr.StatusCode, http.StatusText(httpErr.StatusCode))
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
 	}
 	// The TAMS client suppresses raw transport errors and redacts URL query
 	// values. Keeping its diagnostic preserves actionable request context.

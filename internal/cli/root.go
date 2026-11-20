@@ -133,11 +133,15 @@ func requestedIngestFormat(arguments []string) (found, jsonRequested bool) {
 	return found, jsonRequested
 }
 
+const preserveExample = `  ENDPOINT=https://tams.example.com
+  tamsin ingest --profile preserve -i programme.mp4 -o "$ENDPOINT"`
+
 func (a *application) rootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "tamsin [flags] [input] [TAMS endpoint]",
 		Short:         "Ingest media into a Time-addressable Media Store",
-		Long:          "TAMSin resolves local, manifest, HTTP, and S3 inputs, creates TAMS Flows, and uploads verified Media Objects.",
+		Long:          "Store a whole MP4 or MPEG-TS file in TAMS with --profile preserve. Run 'tamsin profiles' to choose a treatment for time-range or per-track access.",
+		Example:       preserveExample,
 		Version:       version.String(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -201,10 +205,11 @@ func retiredAPICommand() *cobra.Command {
 
 func (a *application) ingestCommand() *cobra.Command {
 	command := &cobra.Command{
-		Use:   "ingest [flags] [input] [TAMS endpoint]",
-		Short: "Create one Flow graph per resolved input and ingest its media",
-		Args:  usageArgs(cobra.MaximumNArgs(2)),
-		RunE:  a.runIngest,
+		Use:     "ingest [flags] [input] [TAMS endpoint]",
+		Short:   "Create one Flow graph per resolved input and ingest its media",
+		Example: preserveExample,
+		Args:    usageArgs(cobra.MaximumNArgs(2)),
+		RunE:    a.runIngest,
 	}
 	addIngestFlags(command)
 	return command
@@ -212,7 +217,7 @@ func (a *application) ingestCommand() *cobra.Command {
 
 func addPersistentFlags(command *cobra.Command) {
 	flags := command.PersistentFlags()
-	flags.String("config", "", "configuration file (default: $XDG_CONFIG_HOME/tamsin/config.yaml)")
+	flags.String("config", "", "configuration file (default: tamsin/config.yaml in the platform configuration directory)")
 	flags.StringP("endpoint", "o", "", "TAMS API endpoint")
 	flags.String("format", "human", "result format: human or json")
 	flags.String("progress", "auto", "progress reporting: auto or none (plain is the same as auto)")
@@ -221,7 +226,9 @@ func addPersistentFlags(command *cobra.Command) {
 	flags.BoolP("verbose", "v", false, "show expanded human result details")
 	flags.String("log-format", "text", "diagnostic log format: text or json")
 	flags.String("log-level", "info", "diagnostic level: debug, info, warn, or error")
-	flags.Duration("timeout", 30*time.Second, "per-request timeout for TAMS metadata operations")
+	flags.Duration("timeout", 30*time.Second, "timeout for each attempt of a TAMS metadata request")
+	flags.Duration("deletion-timeout", tams.DefaultDeletionTimeout,
+		"deadline for one Segment deletion, including the service's deletion request and absence confirmation")
 	flags.Duration("transfer-timeout", 0,
 		"optional deadline for a complete media transfer (0 disables)")
 	flags.Duration("transfer-idle-timeout", netio.DefaultIdleTimeout,
@@ -335,8 +342,7 @@ func readConfigFile(filename string) ([]byte, error) {
 type ingestOptions struct {
 	inputs           []string
 	inputMode        string
-	profile          string
-	profileVersion   string
+	treatment        ingest.Profile
 	concurrency      int
 	transfers        int
 	probeConcurrency int
@@ -345,15 +351,13 @@ type ingestOptions struct {
 	tempDirectory    string
 	stagingBytes     int64
 	maxInputs        int
-	segmentDuration  time.Duration
-	segmentFormat    string
-	essenceStorage   string
 	ffmpegArgs       []string
 	start            string
 	storageID        string
 	flowID           string
 	sourceID         string
 	metadataFile     string
+	collectedFile    string
 	tamsFlowProfiles []string
 	stdinName        string
 	inputHeaders     []string
@@ -374,7 +378,7 @@ func addTreatmentFlags(command *cobra.Command) {
 		"override the profile's Flow Segment container: source or mpegts")
 	flags.String("essence-storage", "",
 		"override how the profile stores a muxed input: independent (one Flow per essence) or muxed (keep the multiplex)")
-	flags.StringArray("ffmpeg-arg", nil, "additional explicit FFmpeg argument (repeatable)")
+	flags.StringArray("ffmpeg-arg", nil, "FFmpeg argument for a single-essence custom render with explicit output metadata (repeatable)")
 }
 
 func addReadinessFlags(command *cobra.Command) {
@@ -387,7 +391,7 @@ func addReadinessFlags(command *cobra.Command) {
 
 func addIngestFlags(command *cobra.Command) {
 	flags := command.Flags()
-	flags.StringArrayP("input", "i", nil, "input path or URI (repeatable)")
+	flags.StringArrayP("input", "i", nil, "MP4 or MPEG-TS path or URI (repeatable)")
 	flags.String("input-mode", "auto", "remote input access: auto, stream, or stage")
 	addTreatmentFlags(command)
 	addReadinessFlags(command)
@@ -409,6 +413,7 @@ func addIngestFlags(command *cobra.Command) {
 	flags.String("flow-id", "", "Flow UUID for a single resolved input")
 	flags.String("source-id", "", "Source UUID for a single resolved input")
 	flags.String("flow-metadata", "", "JSON Flow metadata overrides")
+	flags.String("collected-flow-metadata", "", "JSON object of per-role Flow metadata overrides for collected essences")
 	flags.StringArray("tams-flow-profile", nil,
 		"TAMS 8.2 Flow Profile assignment as [video|audio|image|data[:N]=]UUID (repeatable)")
 	flags.String("stdin-name", "stdin.bin",
@@ -530,6 +535,10 @@ func (a *application) runIngest(command *cobra.Command, args []string) (returnEr
 	if err != nil {
 		return withExit(ExitUsage, err)
 	}
+	collectedMetadata, err := readCollectedFlowMetadata(options.collectedFile)
+	if err != nil {
+		return withExit(ExitUsage, err)
+	}
 
 	var client *tams.Client
 	if ingest.DryRunMode(options.dryRun) == ingest.DryRunOff || len(options.tamsFlowProfiles) > 0 {
@@ -550,13 +559,14 @@ func (a *application) runIngest(command *cobra.Command, args []string) (returnEr
 	}
 	pipeline, err := ingest.New(ingest.Config{
 		Observability: run, LifecycleObserver: lifecycleObserver,
-		Profile: options.profile, ProfileVersion: options.profileVersion,
+		Profile: options.treatment.Name, ProfileVersion: options.treatment.Version,
 		Concurrency: options.concurrency, Transfers: options.transfers, ProbeConcurrency: options.probeConcurrency, Retries: a.v.GetInt("http.retries"),
 		DryRunMode: ingest.DryRunMode(options.dryRun), VerificationMode: ingest.VerificationMode(options.verify),
 		TempDirectory: options.tempDirectory, StagingByteBudget: options.stagingBytes,
 		InputMode:       ingest.InputMode(options.inputMode),
-		SegmentDuration: options.segmentDuration, SegmentFormat: media.SegmentFormat(options.segmentFormat), EssenceStorage: media.EssenceStorage(options.essenceStorage), FFmpegArgs: options.ffmpegArgs, Start: start, StorageID: options.storageID,
-		FlowID: options.flowID, SourceID: options.sourceID, FlowMetadata: metadata, TAMSFlowProfiles: options.tamsFlowProfiles,
+		SegmentDuration: options.treatment.SegmentDuration, SegmentFormat: options.treatment.SegmentFormat, EssenceStorage: options.treatment.EssenceStorage, FFmpegArgs: options.ffmpegArgs, Start: start, StorageID: options.storageID,
+		FlowID: options.flowID, SourceID: options.sourceID, FlowMetadata: metadata, CollectedFlowMetadata: collectedMetadata,
+		TAMSFlowProfiles: options.tamsFlowProfiles,
 	}, client, media.FFprobe{Executable: options.ffprobe}, media.FFmpeg{Executable: options.ffmpeg}, logger, reporter)
 	if err != nil {
 		return withExit(ExitUsage, err)
@@ -614,6 +624,7 @@ func (a *application) resolveIngestOptions(command *cobra.Command, args []string
 		flowID:           v.GetString("ingest.flow_id"),
 		sourceID:         v.GetString("ingest.source_id"),
 		metadataFile:     v.GetString("ingest.flow_metadata"),
+		collectedFile:    v.GetString("ingest.collected_flow_metadata"),
 		tamsFlowProfiles: v.GetStringSlice("ingest.tams_flow_profiles"),
 		stdinName:        v.GetString("source.stdin_name"),
 		inputHeaders:     v.GetStringSlice("source.http_headers"),
@@ -636,15 +647,11 @@ func (a *application) resolveIngestOptions(command *cobra.Command, args []string
 	if strings.TrimSpace(v.GetString("ingest.profile")) == "" {
 		return nil, "", errors.New("ingest profile is required; choose one with --profile (run `tamsin profiles` to compare them)")
 	}
-	profile, err := v.treatment()
+	treatment, err := v.treatment()
 	if err != nil {
 		return nil, "", err
 	}
-	options.profile = profile.Name
-	options.profileVersion = profile.Version
-	options.segmentDuration = profile.SegmentDuration
-	options.segmentFormat = string(profile.SegmentFormat)
-	options.essenceStorage = string(profile.EssenceStorage)
+	options.treatment = treatment
 	if options.inputMode == string(ingest.InputStream) && len(options.ffmpegArgs) > 0 {
 		return nil, "", errors.New("--input-mode=stream cannot be combined with --ffmpeg-arg; use auto or stage")
 	}
@@ -695,7 +702,7 @@ func (a *application) tamsClient(ctx context.Context, endpoint string, base *htt
 		Endpoint: cleanEndpoint, Transport: transport, ExternalTransport: base,
 		Timeout: a.v.GetDuration("http.timeout"), TransferTimeout: a.v.GetDuration("http.transfer_timeout"), TransferIdleTimeout: a.v.GetDuration("http.transfer_idle_timeout"),
 		Retries: a.v.GetInt("http.retries"), UserAgent: "tamsin/" + version.Version,
-		Observability: run,
+		Observability: run, DeletionTimeout: a.v.GetDuration("http.deletion_timeout"), Logger: run.Logger(),
 	})
 	if err != nil {
 		return nil, "", err
@@ -813,28 +820,60 @@ func readFlowMetadata(filename string) (tams.Flow, error) {
 	if filename == "" {
 		return nil, nil
 	}
+	var metadata tams.Flow
+	if err := readMetadataDocument(filename, &metadata); err != nil {
+		return nil, err
+	}
+	if metadata == nil {
+		return nil, errors.New("flow metadata must be a JSON object")
+	}
+	return metadata, nil
+}
+
+// readCollectedFlowMetadata reads per-role overrides for collected essences:
+// a JSON object whose keys are collection roles and whose values are Flow
+// metadata objects.
+func readCollectedFlowMetadata(filename string) (map[string]tams.Flow, error) {
+	if filename == "" {
+		return nil, nil
+	}
+	var metadata map[string]tams.Flow
+	if err := readMetadataDocument(filename, &metadata); err != nil {
+		return nil, err
+	}
+	if metadata == nil {
+		return nil, errors.New("collected Flow metadata must be a JSON object")
+	}
+	for role, override := range metadata {
+		if override == nil {
+			return nil, fmt.Errorf("collected Flow metadata for role %q must be a JSON object", role)
+		}
+	}
+	return metadata, nil
+}
+
+func readMetadataDocument(filename string, target any) error {
 	file, err := os.Open(filename)
 	if err != nil {
-		return nil, fmt.Errorf("open Flow metadata: %w", err)
+		return fmt.Errorf("open Flow metadata: %w", err)
 	}
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, (2<<20)+1))
 	if err != nil {
-		return nil, fmt.Errorf("read Flow metadata: %w", err)
+		return fmt.Errorf("read Flow metadata: %w", err)
 	}
 	if len(data) > 2<<20 {
-		return nil, errors.New("flow metadata exceeds 2 MiB")
+		return errors.New("flow metadata exceeds 2 MiB")
 	}
-	var metadata tams.Flow
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
-	if err := decoder.Decode(&metadata); err != nil {
-		return nil, fmt.Errorf("decode Flow metadata: %w", err)
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("decode Flow metadata: %w", err)
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
-		return nil, errors.New("flow metadata must contain exactly one JSON object")
+		return errors.New("flow metadata must contain exactly one JSON object")
 	}
-	return metadata, nil
+	return nil
 }
 
 func parseHeaders(values []string) (http.Header, error) {

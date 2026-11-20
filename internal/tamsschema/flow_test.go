@@ -122,7 +122,7 @@ func videoStream() media.Stream {
 		Index: 0, CodecName: "h264", CodecType: "video",
 		Width: 640, Height: 360, PixelFormat: "yuv420p",
 		AverageFrameRate: "30/1", RealFrameRate: "30/1",
-		StartTime: "0.000000", Duration: "10.000000", BitRate: "789000",
+		StartTime: "0.000000", Duration: "10.000000",
 	}
 }
 
@@ -130,7 +130,7 @@ func audioStream() media.Stream {
 	return media.Stream{
 		Index: 1, CodecName: "aac", CodecType: "audio",
 		SampleRate: "48000", Channels: 2,
-		StartTime: "0.000000", Duration: "10.000000", BitRate: "128000",
+		StartTime: "0.000000", Duration: "10.000000",
 	}
 }
 
@@ -153,7 +153,7 @@ func TestGeneratedFlowsMatchPinnedSchema(t *testing.T) {
 			name: "video",
 			probe: media.Probe{
 				Streams: []media.Stream{videoStream()},
-				Format:  media.Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Duration: "10.000000", BitRate: "800000"},
+				Format:  media.Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Duration: "10.000000"},
 			},
 			contentType: "video/mp4",
 		},
@@ -161,7 +161,7 @@ func TestGeneratedFlowsMatchPinnedSchema(t *testing.T) {
 			name: "audio",
 			probe: media.Probe{
 				Streams: []media.Stream{audioStream()},
-				Format:  media.Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Duration: "10.000000", BitRate: "128000"},
+				Format:  media.Format{Name: "mov,mp4,m4a,3gp,3g2,mj2", Duration: "10.000000"},
 			},
 			contentType: "audio/mp4",
 		},
@@ -169,17 +169,17 @@ func TestGeneratedFlowsMatchPinnedSchema(t *testing.T) {
 			name: "multi",
 			probe: media.Probe{
 				Streams: []media.Stream{videoStream(), audioStream()},
-				Format:  media.Format{Name: "mpegts", Duration: "10.000000", BitRate: "930000"},
+				Format:  media.Format{Name: "mpegts", Duration: "10.000000"},
 			},
 			contentType: "video/mp2t",
 		},
 		{
 			name: "data",
 			probe: media.Probe{
-				Streams: nil,
-				Format:  media.Format{Name: "json", Duration: "0"},
+				Streams: []media.Stream{{Index: 0, CodecName: "scte_35", CodecType: "data"}},
+				Format:  media.Format{Name: "mpegts", Duration: "0"},
 			},
-			contentType: "application/json",
+			contentType: "video/mp2t",
 		},
 		{
 			name: "still image",
@@ -187,9 +187,9 @@ func TestGeneratedFlowsMatchPinnedSchema(t *testing.T) {
 				Streams: []media.Stream{{
 					Index: 0, CodecName: "png", CodecType: "video", Width: 320, Height: 180,
 				}},
-				Format: media.Format{Name: "png_pipe", Duration: "0"},
+				Format: media.Format{Name: "mov,mp4", Duration: "0", Tags: map[string]string{"major_brand": "isom"}},
 			},
-			contentType: "image/png",
+			contentType: "video/mp4",
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -246,7 +246,7 @@ func TestMultiEssenceFlowCollectsMonoEssenceFlows(t *testing.T) {
 
 	probe := media.Probe{
 		Streams: []media.Stream{videoStream(), audioStream()},
-		Format:  media.Format{Name: "mpegts", Duration: "10.000000", BitRate: "930000"},
+		Format:  media.Format{Name: "mpegts", Duration: "10.000000"},
 	}
 	flow, info, err := media.BuildFlow(probe, testIdentity(), "video/mp2t", media.EssenceStorageMuxed)
 	if err != nil {
@@ -398,6 +398,28 @@ func TestSegmentRequestOmitsUnsetInitObjectID(t *testing.T) {
 	}
 }
 
+// TestInitObjectFieldsKeepTheirWireNames holds the names the 8.2 schemas give
+// an initialisation Object: init_object_id on a registration, and init_object
+// on a listed Segment.
+func TestInitObjectFieldsKeepTheirWireNames(t *testing.T) {
+	t.Parallel()
+	encoded, err := json.Marshal(tams.SegmentRequest{ObjectID: "object-1", InitObjectID: "init-object-1", Timerange: "[0:0_10:0)"})
+	if err != nil {
+		t.Fatalf("marshal SegmentRequest: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"init_object_id":"init-object-1"`) {
+		t.Fatalf("SegmentRequest does not name its initialisation Object: %s", encoded)
+	}
+	var segment tams.Segment
+	listed := `{"object_id":"object-1","timerange":"[0:0_10:0)","init_object":{"object_id":"init-object-1"}}`
+	if err := json.Unmarshal([]byte(listed), &segment); err != nil {
+		t.Fatalf("unmarshal Segment: %v", err)
+	}
+	if segment.InitObject == nil || (*segment.InitObject)["object_id"] != "init-object-1" {
+		t.Fatalf("Segment init_object = %v", segment.InitObject)
+	}
+}
+
 // TestVariableFrameRateExcludesFrameRate encodes ADR0041 and the wording the
 // video schema carries: frame_rate "MUST be set if vfr is false or omitted.
 // MUST NOT be set if vfr is true." ADR0041 rejected leaving the frame rate
@@ -460,7 +482,7 @@ func TestIndependentEssenceFlowsOwnTheirObjects(t *testing.T) {
 
 	probe := media.Probe{
 		Streams: []media.Stream{videoStream(), audioStream()},
-		Format:  media.Format{Name: "mpegts", Duration: "10.000000", BitRate: "930000"},
+		Format:  media.Format{Name: "mpegts", Duration: "10.000000"},
 	}
 	_, info, err := media.BuildFlow(probe, testIdentity(), "video/mp2t", media.EssenceStorageIndependent)
 	if err != nil {

@@ -50,29 +50,6 @@ func (s Snapshot) Hidden() bool {
 	return s.Phase == PhaseVerify && !s.TotalsFinal && s.CompletedObjects == 0 && s.CompletedBytes == 0
 }
 
-// Validate checks the invariants every Tracker snapshot satisfies.
-func (s Snapshot) Validate() error {
-	if s.Scope.InputIndex < 0 {
-		return errors.New("progress input index cannot be negative")
-	}
-	if !s.Phase.valid() {
-		return fmt.Errorf("unsupported progress phase %q", s.Phase)
-	}
-	if s.Revision == 0 {
-		return errors.New("progress revision must be positive")
-	}
-	if s.CompletedObjects < 0 || s.TotalObjects < 0 || s.CompletedBytes < 0 || s.TotalBytes < 0 {
-		return errors.New("progress counters cannot be negative")
-	}
-	if s.TotalsFinal && s.CompletedObjects > s.TotalObjects {
-		return fmt.Errorf("completed objects %d exceed final total %d", s.CompletedObjects, s.TotalObjects)
-	}
-	if s.TotalsFinal && s.CompletedBytes > s.TotalBytes {
-		return fmt.Errorf("completed bytes %d exceed final total %d", s.CompletedBytes, s.TotalBytes)
-	}
-	return nil
-}
-
 // Reporter receives semantic snapshots. Implementations must be safe for
 // concurrent use.
 type Reporter interface {
@@ -329,11 +306,11 @@ func renderSnapshot(snapshot Snapshot) string {
 }
 
 func displayLabel(input string) string {
-	input = sanitize(input)
+	input = Sanitize(input)
 	parsed, err := url.Parse(input)
 	if err == nil && parsed.Path != "" {
 		if base := path.Base(parsed.Path); base != "." && base != "/" {
-			return sanitize(base)
+			return Sanitize(base)
 		}
 	}
 	if input == "" {
@@ -342,7 +319,9 @@ func displayLabel(input string) string {
 	return input
 }
 
-func sanitize(value string) string {
+// Sanitize replaces control characters with spaces, so text taken from an
+// input name or a store cannot move the cursor or recolour a terminal.
+func Sanitize(value string) string {
 	return strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
 			return ' '

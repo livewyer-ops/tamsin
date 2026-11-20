@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -111,11 +112,8 @@ func TestProfileBackedFlowPlansExpandedReadsAndCompactWrites(t *testing.T) {
 	client.profiles[testVideoProfileID] = tams.Profile{
 		"id": testVideoProfileID, "label": "HD", "flow_metadata": metadata,
 	}
-	pipeline, err := New(Config{Concurrency: 1, DryRunMode: DryRunExact, TAMSFlowProfiles: []string{testVideoProfileID}},
+	pipeline := mustNew(t, Config{Concurrency: 1, DryRunMode: DryRunExact, TAMSFlowProfiles: []string{testVideoProfileID}},
 		client, fakeProber{}, nil, discardLogger(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	plans, err := pipeline.planFlowGraph(context.Background(), flowGraph{flows: []graphFlow{{
 		id: identity.FlowID, role: "single", flow: flow, ownsMedia: true,
 	}}})
@@ -135,6 +133,15 @@ func TestProfileBackedFlowPlansExpandedReadsAndCompactWrites(t *testing.T) {
 	}
 	if client.profileReads != 1 {
 		t.Fatalf("Profile reads = %d, want one", client.profileReads)
+	}
+	required := metadata["essence_parameters"].(map[string]any)
+	// A Profile can supply technical fields that the probe did not derive.
+	metadata["essence_parameters"] = maps.Clone(required)
+	metadata["essence_parameters"].(map[string]any)["init_segments"] = true
+	clear(pipeline.profileCache)
+	_, err = pipeline.planFlowGraph(t.Context(), flowGraph{flows: []graphFlow{{id: identity.FlowID, role: "single", flow: flow, ownsMedia: true}}})
+	if err == nil || !strings.Contains(err.Error(), "initialisation Objects") {
+		t.Fatalf("accepted unavailable initialisation Objects: %v", err)
 	}
 }
 
@@ -221,6 +228,58 @@ func TestProfileMismatchReportsNestedJSONPointerAndPresence(t *testing.T) {
 	}
 }
 
+// TestProfileAdoptsParametersTheProbeCannotEstablish pins the one-sided rule
+// inside essence_parameters: the BBC reference Profiles declare component
+// type, chroma subsampling and codec parameters no probe reports, and a Flow
+// must still be able to take such a Profile. What the probe did establish must
+// agree with the Profile, and the Profile must declare it.
+func TestProfileAdoptsParametersTheProbeCannotEstablish(t *testing.T) {
+	t.Parallel()
+	flow := tams.Flow{
+		"format": "urn:x-nmos:format:video", "codec": "video/h264", "container": "video/mp4",
+		"essence_parameters": map[string]any{
+			"frame_width": 1920, "frame_height": 1080,
+			"frame_rate": map[string]any{"numerator": int64(25), "denominator": int64(1)},
+		},
+	}
+	client := newFakeClient()
+	client.profiles[testVideoProfileID] = tams.Profile{
+		"id": testVideoProfileID,
+		"flow_metadata": map[string]any{
+			"format": "urn:x-nmos:format:video", "codec": "video/h264", "container": "video/mp4",
+			"essence_parameters": map[string]any{
+				"frame_width": json.Number("1920"), "frame_height": json.Number("1080"),
+				"frame_rate":     map[string]any{"numerator": json.Number("25"), "denominator": json.Number("1")},
+				"component_type": "YCbCr", "horiz_chroma_subs": json.Number("2"), "vert_chroma_subs": json.Number("2"),
+				"avc_parameters": map[string]any{"profile": json.Number("100"), "level": json.Number("40"), "flags": json.Number("0")},
+				"vfr":            false,
+			},
+		},
+	}
+	pipeline := &Pipeline{client: client, profileCache: make(map[string]tams.Profile)}
+	expanded, err := pipeline.expandFlowProfile(context.Background(), graphFlow{
+		id: "f3b1a8de-6c1e-4a0b-9d2f-1c7e5a904bb1", flow: flow, profileID: testVideoProfileID,
+	})
+	if err != nil {
+		t.Fatalf("a fuller Profile was refused: %v", err)
+	}
+	parameters, _ := expanded.flow["essence_parameters"].(map[string]any)
+	if parameters["component_type"] != "YCbCr" || parameters["avc_parameters"] == nil || parameters["vfr"] != false {
+		t.Fatalf("Profile parameters were not adopted: %#v", parameters)
+	}
+
+	// A parameter the probe established but the Profile does not declare
+	// would be silently lost in compact form, so it is still a mismatch.
+	flow["essence_parameters"].(map[string]any)["colorspace"] = "BT709"
+	delete(pipeline.profileCache, testVideoProfileID)
+	_, err = pipeline.expandFlowProfile(context.Background(), graphFlow{
+		id: "f3b1a8de-6c1e-4a0b-9d2f-1c7e5a904bb1", flow: flow, profileID: testVideoProfileID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "/flow_metadata/essence_parameters/colorspace") || !strings.Contains(err.Error(), "profile=<missing>") {
+		t.Fatalf("undeclared generated parameter accepted: %v", err)
+	}
+}
+
 func TestProfileMismatchMessageRedactsExtensionKeysAndValues(t *testing.T) {
 	t.Parallel()
 	mismatch := &jsonValueMismatch{
@@ -252,7 +311,7 @@ func TestEquivalentNumericFlowDoesNotCauseResumeWrite(t *testing.T) {
 	client := newFakeClient()
 	client.flows[flowID] = existing
 	pipeline := &Pipeline{client: client, config: Config{DryRunMode: DryRunOff}}
-	plan, err := pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: generated, ownsMedia: true})
+	plan, err := pipeline.planFlowWrite(context.Background(), graphFlow{id: flowID, flow: generated, ownsMedia: true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +334,7 @@ func TestPlanFlowWriteRejectsConflictingSourceBeforeMutation(t *testing.T) {
 			"id": flowID, "source_id": "9a2c4e60-71bd-4f3a-8e15-2d6b0c8a7f43",
 		},
 		ownsMedia: true,
-	})
+	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "already belongs to source_id") {
 		t.Fatalf("planFlowWrite() error = %v, want source ownership conflict", err)
 	}
@@ -317,13 +376,10 @@ func TestFlowProfileDryRunOnlyReadsServiceAndProfilesPerRun(t *testing.T) {
 		"id": testVideoProfileID, "label": "dry-run", "flow_metadata": metadata,
 	}
 	for run := range 2 {
-		pipeline, err := New(Config{
+		pipeline := mustNew(t, Config{
 			Concurrency: 1, Transfers: 2, DryRunMode: DryRunExact, EssenceStorage: media.EssenceStorageMuxed,
 			TAMSFlowProfiles: []string{testVideoProfileID},
 		}, client, fakeProber{}, nil, discardLogger(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
 		batch, runErr := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
 		if runErr != nil || batch.Succeeded != 1 {
 			t.Fatalf("run %d = %#v, %v", run, batch, runErr)

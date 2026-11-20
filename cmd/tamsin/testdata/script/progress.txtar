@@ -4,17 +4,15 @@
 
 [!unix] skip 'needs a POSIX shell for the ffprobe stub'
 
-chmod 0755 ffprobe
-
 # Default JSON mode remains a complete machine stream with no terminal bytes.
-exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error -d 0 --dry-run=exact -i input.mp4
+exec tamsin --profile essence-segments --ffprobe $FFPROBE_STUB --format json --log-level error -d 0 --dry-run=exact -i input.mp4
 ! stderr .
 cp stdout auto.ndjson
 checkevents auto.ndjson succeeded 1 0 planned
 
 # Explicitly disabled suppresses optional snapshots, not lifecycle or terminal
 # events.
-exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error --progress none -d 0 --dry-run=exact -i input.mp4
+exec tamsin --profile essence-segments --ffprobe $FFPROBE_STUB --format json --log-level error --progress none -d 0 --dry-run=exact -i input.mp4
 ! stderr .
 cp stdout none.ndjson
 checkevents none.ndjson succeeded 1 0 planned
@@ -23,7 +21,7 @@ exec cat none.ndjson
 
 # Plain progress remains accepted in JSON mode but cannot inject a second
 # progress language into the stream.
-exec tamsin --profile essence-segments --ffprobe $WORK/ffprobe --format json --log-level error --progress plain -d 0 --dry-run=exact -i input.mp4
+exec tamsin --profile essence-segments --ffprobe $FFPROBE_STUB --format json --log-level error --progress plain -d 0 --dry-run=exact -i input.mp4
 cp stdout plain.ndjson
 checkevents plain.ndjson succeeded 1 0 planned
 
@@ -36,18 +34,3 @@ stderr 'invalid progress mode'
 
 -- input.mp4 --
 pretend media bytes
--- ffprobe --
-#!/bin/sh
-if [ "$1" = "-version" ]; then echo "ffprobe version 5.1.9"; exit 0; fi
-for arg in "$@"; do
-  if [ "$arg" = "-show_frames" ]; then
-    printf '%s\n' \
-      'stream_index=0|best_effort_timestamp=0' \
-      'stream_index=0|best_effort_timestamp=40' \
-      'stream_index=0|best_effort_timestamp=80'
-    exit 0
-  fi
-done
-cat <<'JSON'
-{"streams":[{"index":0,"codec_name":"h264","codec_type":"video","width":64,"height":64,"avg_frame_rate":"25/1","r_frame_rate":"25/1","start_time":"0.000000","duration":"1.000000"}],"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2","start_time":"0.000000","duration":"1.000000"}}
-JSON

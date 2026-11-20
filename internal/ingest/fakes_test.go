@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
+	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,8 +22,10 @@ import (
 	"time"
 
 	"github.com/livewyer-ops/tamsin/internal/media"
+	"github.com/livewyer-ops/tamsin/internal/progress"
 	"github.com/livewyer-ops/tamsin/internal/source"
 	"github.com/livewyer-ops/tamsin/internal/tams"
+	"github.com/livewyer-ops/tamsin/internal/tamstime"
 )
 
 type presentationCountingProber struct {
@@ -29,7 +33,7 @@ type presentationCountingProber struct {
 }
 
 func (*presentationCountingProber) Probe(context.Context, string) (media.Probe, error) {
-	return media.Probe{Streams: []media.Stream{{
+	return media.Probe{Format: media.Format{Name: "mpegts"}, Streams: []media.Stream{{
 		CodecName: "h264", CodecType: "video", Width: 64, Height: 64, AverageFrameRate: "25/1",
 	}}}, nil
 }
@@ -47,7 +51,48 @@ func (p *presentationCountingProber) ProbePresentation(context.Context, string, 
 	return nil
 }
 
+func (*presentationCountingProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (*presentationCountingProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
+}
+
+// mustNew builds a Pipeline for a test that expects its configuration to be
+// accepted.
+func mustNew(tb testing.TB, config Config, client TAMSClient, prober media.Prober, segmenter media.Segmenter, logger *slog.Logger, reporter progress.Reporter) *Pipeline {
+	tb.Helper()
+	pipeline, err := New(config, client, prober, segmenter, logger, reporter)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return pipeline
+}
+
+// proberDefaults answers the Prober questions that most test probers do not
+// vary: a supported FFprobe, nothing to add to a presentation, no leading
+// pictures, and a key frame at the start of each stream.
+type proberDefaults struct{}
+
+func (proberDefaults) Version(context.Context) (string, error) {
+	return "ffprobe version 5.1 test", nil
+}
+
+func (proberDefaults) ProbePresentation(context.Context, string, *media.Probe) error {
+	return nil
+}
+
+func (proberDefaults) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (proberDefaults) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
+}
+
 type fakeProber struct {
+	proberDefaults
 	failSuffix string
 }
 
@@ -65,7 +110,7 @@ func (p fakeProber) Probe(_ context.Context, filename string) (media.Probe, erro
 
 // muxedProber reports a container holding two elementary streams, which is what
 // drives the multi-essence Flow path.
-type muxedProber struct{}
+type muxedProber struct{ proberDefaults }
 
 func (muxedProber) Probe(context.Context, string) (media.Probe, error) {
 	return media.Probe{
@@ -77,19 +122,11 @@ func (muxedProber) Probe(context.Context, string) (media.Probe, error) {
 	}, nil
 }
 
-func (muxedProber) Version(context.Context) (string, error) {
-	return "ffprobe version 5.1 test", nil
-}
-
 func (p muxedProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
 }
 
-func (muxedProber) ProbePresentation(context.Context, string, *media.Probe) error {
-	return nil
-}
-
-type multiAudioProber struct{}
+type multiAudioProber struct{ proberDefaults }
 
 func (multiAudioProber) Probe(context.Context, string) (media.Probe, error) {
 	return media.Probe{
@@ -102,19 +139,11 @@ func (multiAudioProber) Probe(context.Context, string) (media.Probe, error) {
 	}, nil
 }
 
-func (multiAudioProber) Version(context.Context) (string, error) {
-	return "ffprobe version 5.1 test", nil
-}
-
 func (p multiAudioProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
 }
 
-func (multiAudioProber) ProbePresentation(context.Context, string, *media.Probe) error {
-	return nil
-}
-
-type fourEssenceProber struct{}
+type fourEssenceProber struct{ proberDefaults }
 
 func (fourEssenceProber) Probe(context.Context, string) (media.Probe, error) {
 	return media.Probe{
@@ -128,28 +157,12 @@ func (fourEssenceProber) Probe(context.Context, string) (media.Probe, error) {
 	}, nil
 }
 
-func (fourEssenceProber) Version(context.Context) (string, error) {
-	return "ffprobe version 5.1 test", nil
-}
-
 func (p fourEssenceProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
 }
 
-func (fourEssenceProber) ProbePresentation(context.Context, string, *media.Probe) error {
-	return nil
-}
-
-func (fakeProber) Version(context.Context) (string, error) {
-	return "ffprobe version 5.1 test", nil
-}
-
 func (p fakeProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
-}
-
-func (fakeProber) ProbePresentation(context.Context, string, *media.Probe) error {
-	return nil
 }
 
 type oldVersionProber struct{ fakeProber }
@@ -158,7 +171,7 @@ func (oldVersionProber) Version(context.Context) (string, error) {
 	return "ffprobe version 4.4 unsupported", nil
 }
 
-type unknownContainerProber struct{}
+type unknownContainerProber struct{ proberDefaults }
 
 func (unknownContainerProber) Probe(context.Context, string) (media.Probe, error) {
 	return media.Probe{
@@ -169,32 +182,27 @@ func (unknownContainerProber) Probe(context.Context, string) (media.Probe, error
 	}, nil
 }
 
-func (unknownContainerProber) Version(context.Context) (string, error) {
-	return "ffprobe version 5.1 test", nil
-}
-
 func (p unknownContainerProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
-}
-
-func (unknownContainerProber) ProbePresentation(context.Context, string, *media.Probe) error {
-	return nil
 }
 
 type fakeSegmenter struct{}
 
 func (fakeSegmenter) Segment(_ context.Context, request media.SegmentRequest, sink media.SegmentSink) error {
+	return writeSegments(request, sink, 2, 1)
+}
+
+// writeSegments stands in for a render: for each requested stream it writes
+// that many files of that many bytes and reports each to the sink.
+func writeSegments(request media.SegmentRequest, sink media.SegmentSink, objects, size int) error {
 	for _, streamIndex := range request.StreamIndices {
 		prefix := "segment-"
 		if streamIndex != media.AllStreams {
-			prefix = "essence-" + strconv.Itoa(streamIndex) + "-"
+			prefix = fmt.Sprintf("essence-%d-", streamIndex)
 		}
-		paths := []string{
-			filepath.Join(request.Directory, prefix+"00000000.mp4"),
-			filepath.Join(request.Directory, prefix+"00000001.mp4"),
-		}
-		for index, path := range paths {
-			if err := os.WriteFile(path, []byte{byte(index + 1)}, 0o600); err != nil {
+		for index := range objects {
+			path := filepath.Join(request.Directory, fmt.Sprintf("%s%08d.mp4", prefix, index))
+			if err := os.WriteFile(path, bytes.Repeat([]byte{byte(index + 1)}, size), 0o600); err != nil {
 				return err
 			}
 			record := media.SegmentRecord{StreamIndex: streamIndex, Path: path}
@@ -295,24 +303,64 @@ type fakeClient struct {
 	registerSegmentsErr    error
 	registerSegmentsCommit int
 	onRegisterSegments     func()
-	listSegmentsErr        error
-	listSegmentsOverride   []tams.Segment
-	hasListingOverride     bool
-	listSegmentsCalls      int
-	deleteSegmentsErr      error
-	deleteSegmentsErrors   map[string]error
-	blockDeleteUntilDone   bool
+	// decorateFlowReads stands in for a store on a newer minor revision that
+	// returns Flow fields the pinned schemas do not know.
+	decorateFlowReads func(tams.Flow) tams.Flow
+	// allocationCap is the most identifiers one fresh allocation hands out,
+	// as a service that caps limit would.
+	allocationCap int
+	// sources are derived from written Flows as a store does; sourceWrites
+	// counts label, description and tag writes; sourceWriteErr fails them.
+	sources              map[string]tams.Source
+	sourceWrites         int
+	sourceWriteErr       error
+	sourceReadErr        error
+	listSegmentsErr      error
+	listSegmentsOverride []tams.Segment
+	hasListingOverride   bool
+	listSegmentsCalls    int
+	deleteSegmentsErr    error
+	deleteSegmentsErrors map[string]error
+	blockDeleteUntilDone bool
 	// onDownload fires as verification reads an Object back, which is the only
 	// point where a test can interrupt a run that has already registered.
 	onDownload func()
+	// occupiedObjectIDs mirrors the service rule that a client-supplied
+	// identifier stays in use once allocated until the Object is collected;
+	// rejectOccupiedIDs turns a repeat allocation of one into the 400 TAMS
+	// answers with. freshAllocations counts limit-based requests.
+	occupiedObjectIDs map[string]bool
+	rejectOccupiedIDs bool
+	freshAllocations  int
+	// uploadContentTypes records the Content-Type each upload carried, keyed by
+	// Object identifier.
+	uploadContentTypes map[string]string
+	// uploadDigests records the SHA-256 each upload destination carried.
+	uploadDigests map[string]string
+	// sourceMissingReads is how many reads of a Source answer 404 before the
+	// store has derived it.
+	sourceMissingReads int
+	// downloadErrors fails verification reads of particular URLs.
+	downloadErrors map[string]error
+	// expireFirstDownloads reports the first read of every URL as a
+	// presigned URL whose window closed, as a large readback can.
+	// onExpiredDownload fires as it does, before the Segment is listed again.
+	expireFirstDownloads bool
+	expiredDownloads     map[string]bool
+	onExpiredDownload    func()
 }
 
 func newFakeClient() *fakeClient {
 	return &fakeClient{
 		flows: make(map[string]tams.Flow), segments: make(map[string]map[string]tams.Segment),
 		objects: make(map[string][]byte), backends: []tams.StorageBackend{{ID: "storage", DefaultStorage: true}},
-		flowOrder: make(map[string]int),
-		profiles:  make(map[string]tams.Profile),
+		flowOrder:          make(map[string]int),
+		profiles:           make(map[string]tams.Profile),
+		sources:            make(map[string]tams.Source),
+		occupiedObjectIDs:  make(map[string]bool),
+		uploadContentTypes: make(map[string]string),
+		uploadDigests:      make(map[string]string),
+		downloadErrors:     make(map[string]error),
 	}
 }
 
@@ -370,6 +418,9 @@ func (c *fakeClient) Flow(_ context.Context, id string) (tams.Flow, error) {
 			StatusCode: http.StatusNotFound, Status: "404 Not Found",
 		}
 	}
+	if c.decorateFlowReads != nil {
+		return c.decorateFlowReads(maps.Clone(flow)), nil
+	}
 	return flow, nil
 }
 
@@ -403,7 +454,74 @@ func (c *fakeClient) PutFlow(_ context.Context, id string, flow tams.Flow) (tams
 		}
 	}
 	c.flows[id] = stored
+	if sourceID, _ := stored["source_id"].(string); sourceID != "" {
+		if _, derived := c.sources[sourceID]; !derived {
+			c.sources[sourceID] = tams.Source{"id": sourceID, "format": stored["format"], "tags": map[string]any{}}
+		}
+	}
 	return stored, nil
+}
+
+func (c *fakeClient) Source(_ context.Context, id string) (tams.Source, error) {
+	c.record("sourceRead:" + id)
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	if c.sourceReadErr != nil {
+		return nil, c.sourceReadErr
+	}
+	source, present := c.sources[id]
+	if c.sourceMissingReads > 0 {
+		c.sourceMissingReads--
+		present = false
+	}
+	if !present {
+		return nil, &tams.HTTPError{Method: http.MethodGet, URL: "sources/" + id, StatusCode: http.StatusNotFound, Status: "404 Not Found"}
+	}
+	clone := make(tams.Source, len(source))
+	for key, value := range source {
+		clone[key] = value
+	}
+	if tags, ok := source["tags"].(map[string]any); ok {
+		clone["tags"] = maps.Clone(tags)
+	}
+	return clone, nil
+}
+
+func (c *fakeClient) putSourceField(id string, apply func(tams.Source)) error {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	if c.sourceWriteErr != nil {
+		return c.sourceWriteErr
+	}
+	source, present := c.sources[id]
+	if !present {
+		return &tams.HTTPError{Method: http.MethodPut, URL: "sources/" + id, StatusCode: http.StatusNotFound, Status: "404 Not Found"}
+	}
+	c.sourceWrites++
+	apply(source)
+	return nil
+}
+
+func (c *fakeClient) PutSourceLabel(_ context.Context, id, label string) error {
+	c.record("sourceLabel:" + id)
+	return c.putSourceField(id, func(source tams.Source) { source["label"] = label })
+}
+
+func (c *fakeClient) PutSourceDescription(_ context.Context, id, description string) error {
+	c.record("sourceDescription:" + id)
+	return c.putSourceField(id, func(source tams.Source) { source["description"] = description })
+}
+
+func (c *fakeClient) PutSourceTag(_ context.Context, id, name string, value any) error {
+	c.record("sourceTag:" + id)
+	return c.putSourceField(id, func(source tams.Source) {
+		tags, _ := source["tags"].(map[string]any)
+		if tags == nil {
+			tags = map[string]any{}
+			source["tags"] = tags
+		}
+		tags[name] = value
+	})
 }
 
 func (c *fakeClient) record(call string) {
@@ -415,14 +533,33 @@ func (c *fakeClient) record(call string) {
 func (c *fakeClient) AllocateStorage(_ context.Context, flowID string, request tams.StorageRequest) (tams.StorageResponse, error) {
 	c.record(fmt.Sprintf("allocate:%d", len(request.ObjectIDs)))
 	c.lock.Lock()
+	defer c.lock.Unlock()
 	c.allocations++
 	status, _ := c.flows[flowID]["status"].(string)
 	c.allocationStatuses = append(c.allocationStatuses, status)
 	c.maxAllocationObjects = max(c.maxAllocationObjects, len(request.ObjectIDs))
-	c.lock.Unlock()
-	response := tams.StorageResponse{MediaObjects: make([]tams.AllocatedObject, len(request.ObjectIDs))}
-	for index := range request.ObjectIDs {
-		response.MediaObjects[index] = tams.AllocatedObject{ObjectID: request.ObjectIDs[index], PutURL: tams.PresignedURL{URL: "mem://" + request.ObjectIDs[index]}}
+	for _, id := range request.ObjectIDs {
+		if c.rejectOccupiedIDs && c.occupiedObjectIDs[id] {
+			return tams.StorageResponse{}, &tams.HTTPError{Method: http.MethodPost, URL: "flows/" + flowID + "/storage",
+				StatusCode: http.StatusBadRequest, Status: "400 Bad Request"}
+		}
+	}
+	ids := request.ObjectIDs
+	if request.Limit > 0 && len(ids) == 0 {
+		c.freshAllocations++
+		count := request.Limit
+		if c.allocationCap > 0 {
+			count = min(count, c.allocationCap)
+		}
+		ids = make([]string, count)
+		for index := range ids {
+			ids[index] = fmt.Sprintf("fresh-%d-%d", c.freshAllocations, index)
+		}
+	}
+	response := tams.StorageResponse{MediaObjects: make([]tams.AllocatedObject, len(ids))}
+	for index, id := range ids {
+		c.occupiedObjectIDs[id] = true
+		response.MediaObjects[index] = tams.AllocatedObject{ObjectID: id, PutURL: tams.PresignedURL{URL: "mem://" + id}}
 	}
 	return response, nil
 }
@@ -435,6 +572,8 @@ func (c *fakeClient) RegisterSegment(_ context.Context, flowID string, request t
 	}
 	c.segments[flowID][request.ObjectID] = tams.Segment{
 		ObjectID: request.ObjectID, Timerange: request.Timerange,
+		ObjectTimerange: request.ObjectTimerange, TSOffset: request.TSOffset,
+		LastDuration: request.LastDuration, KeyFrameCount: request.KeyFrameCount,
 		GetURLs: []tams.PresignedURL{{URL: "mem://" + request.ObjectID}},
 	}
 	return nil
@@ -526,13 +665,33 @@ func (c *fakeClient) ListSegments(ctx context.Context, flowID string, options ta
 		return override, nil
 	}
 	segments, err := c.Segments(ctx, flowID, options.ObjectID)
-	if err != nil || options.IncludeDownloadURLs {
-		return segments, err
+	if err != nil {
+		return nil, err
 	}
-	// Mirror the service: without presigned URLs requested, none come back.
+	// Mirror the service's overlap filter so a narrowed listing is exercised.
+	if options.Timerange != "" {
+		overlapping := segments[:0]
+		for _, segment := range segments {
+			overlaps, err := tamstime.TimeRangesOverlap(options.Timerange, segment.Timerange)
+			if err != nil {
+				return nil, err
+			}
+			if overlaps {
+				overlapping = append(overlapping, segment)
+			}
+		}
+		segments = overlapping
+	}
+	// Mirror the service: presigned URLs and the Object's own timerange come
+	// back only when they were asked for.
 	lean := make([]tams.Segment, len(segments))
 	for index, segment := range segments {
-		segment.GetURLs = nil
+		if !options.IncludeDownloadURLs {
+			segment.GetURLs = nil
+		}
+		if !options.IncludeObjectTimerange {
+			segment.ObjectTimerange = ""
+		}
 		lean[index] = segment
 	}
 	return lean, nil
@@ -580,6 +739,8 @@ func (c *fakeClient) UploadFile(_ context.Context, destination tams.PresignedURL
 		data[len(data)-1] ^= 0xff
 	}
 	c.objects[strings.TrimPrefix(destination.URL, "mem://")] = data
+	c.uploadContentTypes[strings.TrimPrefix(destination.URL, "mem://")] = destination.Headers["Content-Type"]
+	c.uploadDigests[strings.TrimPrefix(destination.URL, "mem://")] = destination.ContentSHA256
 	c.uploads++
 	return receipt, nil
 }
@@ -596,6 +757,24 @@ func (c *changedUploadClient) UploadFile(ctx context.Context, destination tams.P
 
 func (c *fakeClient) DownloadDigest(_ context.Context, source tams.PresignedURL, _ int64) (int64, string, error) {
 	c.record("verify")
+	c.lock.Lock()
+	downloadErr := c.downloadErrors[source.URL]
+	var expired func()
+	if c.expireFirstDownloads && !c.expiredDownloads[source.URL] {
+		if c.expiredDownloads == nil {
+			c.expiredDownloads = make(map[string]bool)
+		}
+		c.expiredDownloads[source.URL] = true
+		downloadErr = fmt.Errorf("%w: download URL window closed", tams.ErrPresignedURLExpired)
+		expired = c.onExpiredDownload
+	}
+	c.lock.Unlock()
+	if expired != nil {
+		expired()
+	}
+	if downloadErr != nil {
+		return 0, "", downloadErr
+	}
 	c.lock.Lock()
 	hook := c.onDownload
 	c.verified = append(c.verified, source.URL)
@@ -665,28 +844,7 @@ type sizedSegmenter struct {
 }
 
 func (s sizedSegmenter) Segment(_ context.Context, request media.SegmentRequest, sink media.SegmentSink) error {
-	for _, streamIndex := range request.StreamIndices {
-		prefix := "segment-"
-		if streamIndex != media.AllStreams {
-			prefix = fmt.Sprintf("essence-%d-", streamIndex)
-		}
-		for index := range s.objects {
-			path := filepath.Join(request.Directory, fmt.Sprintf("%s%08d.mp4", prefix, index))
-			if err := os.WriteFile(path, bytes.Repeat([]byte{byte(index + 1)}, s.bytes), 0o600); err != nil {
-				return err
-			}
-			record := media.SegmentRecord{StreamIndex: streamIndex, Path: path}
-			if request.Duration > 0 {
-				record.Timed = true
-				record.Start = int64(index) * int64(request.Duration)
-				record.End = record.Start + int64(request.Duration)
-			}
-			if err := sink(record); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return writeSegments(request, sink, s.objects, s.bytes)
 }
 
 func (sizedSegmenter) Version(context.Context) (string, error) {
@@ -695,7 +853,7 @@ func (sizedSegmenter) Version(context.Context) (string, error) {
 
 // essenceBitRateProber reports an essence bit rate that does not match what the
 // Segments will imply, so a test can tell which of the two was written.
-type essenceBitRateProber struct{}
+type essenceBitRateProber struct{ proberDefaults }
 
 func (essenceBitRateProber) Probe(context.Context, string) (media.Probe, error) {
 	return media.Probe{
@@ -714,10 +872,6 @@ func (essenceBitRateProber) Version(context.Context) (string, error) {
 
 func (p essenceBitRateProber) ProbeObject(ctx context.Context, filename string) (media.Probe, error) {
 	return p.Probe(ctx, filename)
-}
-
-func (essenceBitRateProber) ProbePresentation(context.Context, string, *media.Probe) error {
-	return nil
 }
 
 type versionedCountingSegmenter struct {
@@ -909,4 +1063,20 @@ func (r *objectRecorder) ObjectsCompleted(_ int, flowID string, objects []Object
 	}
 	r.objects[flowID] = append(r.objects[flowID], objects...)
 	return nil
+}
+
+func (fakeSegmenter) ProbeParameterSets(context.Context, string, int) (media.ParameterSets, error) {
+	return media.ParameterSets{}, nil
+}
+
+func (*recordingSegmenter) ProbeParameterSets(context.Context, string, int) (media.ParameterSets, error) {
+	return media.ParameterSets{}, nil
+}
+
+func (*failSecondEssenceSegmenter) ProbeParameterSets(context.Context, string, int) (media.ParameterSets, error) {
+	return media.ParameterSets{}, nil
+}
+
+func (sizedSegmenter) ProbeParameterSets(context.Context, string, int) (media.ParameterSets, error) {
+	return media.ParameterSets{}, nil
 }

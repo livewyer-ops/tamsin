@@ -25,6 +25,17 @@ import (
 	"github.com/livewyer-ops/tamsin/internal/observability"
 )
 
+// newTestClient builds a Client for a test that expects its configuration to
+// be accepted.
+func newTestClient(tb testing.TB, config Config) *Client {
+	tb.Helper()
+	client, err := New(config)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return client
+}
+
 func TestUploadStorageSHA256RecognizesOnlyStrongEvidence(t *testing.T) {
 	t.Parallel()
 	digest := bytes.Repeat([]byte{0x7f}, sha256.Size)
@@ -38,11 +49,14 @@ func TestUploadStorageSHA256RecognizesOnlyStrongEvidence(t *testing.T) {
 		wantErr  bool
 	}{
 		{name: "S3 response", response: http.Header{"X-Amz-Checksum-Sha256": []string{encoded}}, want: want},
-		{name: "content digest response", response: http.Header{"Content-Digest": []string{"sha-256=:" + encoded + ":"}}, want: want},
+		{name: "representation digest response", response: http.Header{"Repr-Digest": []string{"sha-256=:" + encoded + ":"}}, want: want},
 		{name: "Digest response", response: http.Header{"Digest": []string{"sha-512=ignored, sha-256=" + encoded}}, want: want},
+		// RFC 9530: a response's Content-Digest describes the response body,
+		// so a gateway that adds one says nothing about the stored Object.
+		{name: "content digest describes the response body", response: http.Header{"Content-Digest": []string{"sha-256=:" + encoded + ":"}}},
 		{name: "request header is not storage evidence"},
 		{name: "etag is not evidence", response: http.Header{"ETag": []string{"\"not-a-checksum\""}}},
-		{name: "malformed evidence", response: http.Header{"Content-Digest": []string{"sha-256=:bad:"}}, wantErr: true},
+		{name: "malformed evidence", response: http.Header{"Repr-Digest": []string{"sha-256=:bad:"}}, wantErr: true},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -52,6 +66,45 @@ func TestUploadStorageSHA256RecognizesOnlyStrongEvidence(t *testing.T) {
 				t.Fatalf("uploadStorageSHA256() = %q, %v; want %q, error=%t", got, err, testCase.want, testCase.wantErr)
 			}
 		})
+	}
+}
+
+func TestUploadSendsContentDigestOnlyOnUnsignedURLs(t *testing.T) {
+	t.Parallel()
+	content := []byte("media")
+	sum := sha256.Sum256(content)
+	want := "sha-256=:" + base64.StdEncoding.EncodeToString(sum[:]) + ":"
+	var (
+		mu      sync.Mutex
+		digests []string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.Copy(io.Discard, request.Body)
+		mu.Lock()
+		digests = append(digests, request.Header.Get("Content-Digest"))
+		mu.Unlock()
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	filename := filepath.Join(t.TempDir(), "object")
+	if err := os.WriteFile(filename, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := newTestClient(t, Config{Endpoint: "https://tams.example.test", ExternalTransport: server.Client().Transport, TransferIdleTimeout: time.Minute})
+	for _, destination := range []PresignedURL{
+		{URL: server.URL, ContentSHA256: hex.EncodeToString(sum[:])},
+		{URL: server.URL, ContentSHA256: hex.EncodeToString(sum[:]), Presigned: true},
+		{URL: server.URL, ContentSHA256: hex.EncodeToString(sum[:]), Headers: map[string]string{"Content-Digest": "sha-256=:instructed:"}},
+		{URL: server.URL},
+	} {
+		if _, err := client.UploadFile(context.Background(), destination, filename); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(digests) != 4 || digests[0] != want || digests[1] != "" || digests[2] != "sha-256=:instructed:" || digests[3] != "" {
+		t.Fatalf("Content-Digest per upload = %q; want the digest only on the unsigned URL without an instruction", digests)
 	}
 }
 
@@ -67,12 +120,9 @@ func TestUploadRequestChecksumDoesNotSuppressReadback(t *testing.T) {
 	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	client, err := New(Config{
+	client := newTestClient(t, Config{
 		Endpoint: "https://tams.example.test", ExternalTransport: server.Client().Transport, TransferIdleTimeout: time.Minute,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	receipt, err := client.UploadFile(context.Background(), PresignedURL{
 		URL: server.URL, Headers: map[string]string{"X-Amz-Checksum-Sha256": digest},
 	}, filename)
@@ -159,9 +209,9 @@ func TestRegisterSegmentsReturnsStructuredPartialResult(t *testing.T) {
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(writer).Encode(BulkSegmentFailure{FailedSegments: []FailedSegment{
-			{ObjectID: "object-b", Timerange: "[1:0_2:0)"},
-			// An omitted timerange is authoritative for every request carrying
-			// that Object ID.
+			// A service may respell the timerange it was sent.
+			{ObjectID: "object-b", Timerange: "1:0_2:0"},
+			// A unique Object ID identifies its request without a timerange.
 			{ObjectID: "object-c"},
 		}})
 	}))
@@ -212,10 +262,7 @@ func TestClientProfilePreservesLargeJSONNumbers(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL, Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Timeout: time.Second})
 	profile, err := client.Profile(context.Background(), profileID)
 	if err != nil {
 		t.Fatal(err)
@@ -341,10 +388,7 @@ func TestClientIngestOperations(t *testing.T) {
 	baseURL = server.URL
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL + "/v8.1", Timeout: 5 * time.Second, TransferIdleTimeout: time.Minute, Retries: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL + "/v8.1", Timeout: 5 * time.Second, TransferIdleTimeout: time.Minute, Retries: 1})
 	ctx := context.Background()
 	if _, err := client.Service(ctx); err != nil {
 		t.Fatal(err)
@@ -420,10 +464,7 @@ func TestClientRetriesSafeOperations(t *testing.T) {
 		_, _ = io.WriteString(writer, `{}`)
 	}))
 	defer server.Close()
-	client, err := New(Config{Endpoint: server.URL, Retries: 1, Timeout: time.Second, Observability: run})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Retries: 1, Timeout: time.Second, Observability: run})
 	if _, err := client.Service(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -446,13 +487,10 @@ func TestClientRetriesObjectDownload(t *testing.T) {
 		_, _ = io.WriteString(writer, "verified")
 	}))
 	defer server.Close()
-	client, err := New(Config{
+	client := newTestClient(t, Config{
 		Endpoint: "https://tams.example.test", Retries: 1, Timeout: time.Second, Observability: run,
 		TransferIdleTimeout: time.Minute,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	size, digest, err := client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL}, 8)
 	if err != nil {
 		t.Fatal(err)
@@ -665,12 +703,18 @@ func TestPresignedURLAcceptsBothHeaderShapes(t *testing.T) {
 			t.Fatalf("headers were not canonicalized for %s: %#v", payload, parsed.Headers)
 		}
 	}
-	var preferred PresignedURL
-	if err := json.Unmarshal([]byte(`{"url":"https://example.test","content-type":"top-level/type","headers":{"content-type":"headers/type"}}`), &preferred); err != nil {
+	var agreeing PresignedURL
+	if err := json.Unmarshal([]byte(`{"url":"https://example.test","content-type":"video/mp4","headers":{"content-type":"video/mp4"}}`), &agreeing); err != nil {
 		t.Fatal(err)
 	}
-	if got := preferred.Headers["Content-Type"]; got != "headers/type" {
-		t.Fatalf("headers Content-Type = %q, want headers object to override top-level field", got)
+	if got := agreeing.Headers["Content-Type"]; got != "video/mp4" {
+		t.Fatalf("agreeing Content-Type instructions = %q", got)
+	}
+	// The two spellings name one header, so a disagreement cannot be followed
+	// by silently preferring either.
+	var conflicting PresignedURL
+	if err := json.Unmarshal([]byte(`{"url":"https://example.test","content-type":"top-level/type","headers":{"content-type":"headers/type"}}`), &conflicting); err == nil {
+		t.Fatal("conflicting content-type instructions were accepted")
 	}
 	for _, payload := range []string{
 		`{"url":"https://example.test","headers":{"X-Test":"one","x-test":"two"}}`,
@@ -713,6 +757,9 @@ func TestClientNetworkErrorsDoNotLeakTransportCredentials(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "top-secret") {
 		t.Fatalf("network error leaked credentials: %v", err)
+	}
+	if !errors.Is(err, netio.ErrRequestFailed) || !strings.HasSuffix(err.Error(), ": request failed") {
+		t.Fatalf("the withheld transport error is not marked as a failed request: %v", err)
 	}
 }
 func TestClientWithholdsResponseBodies(t *testing.T) {
@@ -775,10 +822,7 @@ func TestCrossOriginStorageDoesNotReceiveTAMSCredentials(t *testing.T) {
 		clone.Header.Set("Authorization", "Bearer TAMS-secret")
 		return http.DefaultTransport.RoundTrip(clone)
 	})
-	client, err := New(Config{Endpoint: apiServer.URL, Transport: authenticated, TransferIdleTimeout: time.Minute})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: apiServer.URL, Transport: authenticated, TransferIdleTimeout: time.Minute})
 	filename := filepath.Join(t.TempDir(), "object.bin")
 	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
 		t.Fatal(err)
@@ -809,10 +853,7 @@ func TestClientsDoNotFollowCredentialedRedirects(t *testing.T) {
 		clone.Header.Set("Authorization", "Bearer TAMS-secret")
 		return http.DefaultTransport.RoundTrip(clone)
 	})
-	client, err := New(Config{Endpoint: redirector.URL, Transport: authenticated})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: redirector.URL, Transport: authenticated})
 	if _, err := client.Service(context.Background()); err == nil {
 		t.Fatal("TAMS redirect unexpectedly succeeded")
 	}
@@ -859,13 +900,10 @@ func TestTransfersOutliveTheMetadataTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{
+	client := newTestClient(t, Config{
 		Endpoint: server.URL, Timeout: 150 * time.Millisecond,
 		TransferIdleTimeout: 100 * time.Millisecond, Retries: 0,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	size, _, err := client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL}, 100)
 	if err != nil {
 		t.Fatalf("a healthy transfer outliving the metadata timeout must still complete: %v", err)
@@ -891,13 +929,10 @@ func TestTransferTimeoutIsHonouredWhenSet(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{
+	client := newTestClient(t, Config{
 		Endpoint: server.URL, Timeout: time.Minute,
 		TransferTimeout: 100 * time.Millisecond, Retries: 0,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, _, err := client.DownloadDigest(context.Background(), PresignedURL{URL: server.URL}, 100); err == nil {
 		t.Fatal("an explicit transfer timeout must still bound a transfer")
 	}
@@ -984,10 +1019,7 @@ func TestMetadataStillHasADeadline(t *testing.T) {
 	defer server.Close()
 	defer close(release)
 
-	client, err := New(Config{Endpoint: server.URL, Timeout: 100 * time.Millisecond, Retries: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Timeout: 100 * time.Millisecond, Retries: 0})
 	started := time.Now()
 	if _, err := client.Service(context.Background()); err == nil {
 		t.Fatal("a metadata request against an unresponsive service must time out")
@@ -1061,10 +1093,7 @@ func TestUploadReusesConnections(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Endpoint: server.URL, Timeout: 5 * time.Second, TransferIdleTimeout: time.Minute, Retries: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, Config{Endpoint: server.URL, Timeout: 5 * time.Second, TransferIdleTimeout: time.Minute, Retries: 1})
 	filename := filepath.Join(t.TempDir(), "object")
 	if err := os.WriteFile(filename, []byte("media bytes"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1097,6 +1126,7 @@ func TestParseServiceLimits(t *testing.T) {
 		document map[string]any
 		object   time.Duration
 		url      time.Duration
+		warnings int
 		wantErr  string
 	}{
 		{
@@ -1174,16 +1204,21 @@ func TestParseServiceLimits(t *testing.T) {
 			wantErr: "requires at least 300:0",
 		},
 		{
+			// The specification's own example does this. The client can only
+			// rely on the shorter lifetime, so it schedules against it and says so.
 			name: "presigned lifetime exceeds Object lifetime",
 			document: map[string]any{
 				"min_object_timeout": "300:0", "min_presigned_url_timeout": "301:0",
 			},
-			wantErr: "exceeds /min_object_timeout",
+			object: 5 * time.Minute, url: 5 * time.Minute, warnings: 1,
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			limits, err := ParseServiceLimits(testCase.document)
+			if len(limits.Warnings) != testCase.warnings {
+				t.Errorf("Warnings = %q, want %d", limits.Warnings, testCase.warnings)
+			}
 			if testCase.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), testCase.wantErr) {
 					t.Fatalf("ParseServiceLimits() error = %v, want containing %q", err, testCase.wantErr)
@@ -1268,5 +1303,97 @@ func TestTransferRequestErrorPreservesParentCause(t *testing.T) {
 	watch.Stop()
 	if !errors.Is(err, want) {
 		t.Fatalf("transferRequestError = %v, want parent cause %v", err, want)
+	}
+}
+
+// The metadata timeout bounds each attempt. A store that answers the first
+// request slowly still gets its retry.
+func TestMetadataTimeoutBoundsEachAttempt(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if calls.Add(1) == 1 {
+			select {
+			case <-request.Context().Done():
+			case <-time.After(2 * time.Second):
+			}
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"id":"flow"}`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, Config{Endpoint: server.URL, Timeout: 300 * time.Millisecond, Retries: 1})
+	flow, err := client.Flow(context.Background(), "flow")
+	if err != nil {
+		t.Fatalf("a slow first attempt left no time for the retry: %v", err)
+	}
+	if flow["id"] != "flow" || calls.Load() != 2 {
+		t.Fatalf("flow=%v calls=%d", flow, calls.Load())
+	}
+}
+
+func TestPartialDownloadCannotEstablishObjectSize(t *testing.T) {
+	// A range of a larger Object can be exactly as long as the Object the
+	// caller expects; it is still not that Object. The status and the header
+	// each say so on their own.
+	for _, part := range []struct {
+		status        int
+		span, payload string
+	}{
+		{http.StatusPartialContent, "bytes 0-3/16", "part"},
+		{http.StatusOK, "bytes 0-3/16", "part"},
+		{http.StatusPartialContent, "bytes 0-15/32", "sixteen bytes of"},
+		{http.StatusOK, "bytes 0-15/32", "sixteen bytes of"},
+		{http.StatusPartialContent, "", "sixteen bytes of"},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if part.span != "" {
+				w.Header().Set("Content-Range", part.span)
+			}
+			w.WriteHeader(part.status)
+			_, _ = io.WriteString(w, part.payload)
+		}))
+		client, err := New(Config{Endpoint: server.URL, TransferIdleTimeout: time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = client.DownloadDigest(t.Context(), PresignedURL{URL: server.URL}, 16)
+		server.Close()
+		if err == nil || !strings.Contains(err.Error(), "complete Object representation") {
+			t.Fatalf("HTTP %d with Content-Range %q: error = %v, want the incomplete representation named", part.status, part.span, err)
+		}
+		var integrity *ObjectSizeError
+		if errors.As(err, &integrity) {
+			t.Fatalf("HTTP %d with Content-Range %q treated as integrity evidence: %v", part.status, part.span, err)
+		}
+	}
+}
+
+func TestUnusableBulkRegistrationRequiresReconciliation(t *testing.T) {
+	for _, body := range []string{
+		"{}",
+		`{"failed_segments":[]}`,
+		`{"failed_segments":[{"object_id":"unknown"}]}`,
+		`{"failed_segments":[{"object_id":"a","timerange":null}]}`,
+		`{"failed_segments":[{"object_id":"shared"}]}`,
+		`{"failed_segments":[{"object_id":"a"},{"object_id":"a"}]}`,
+		`{"failed_segments":[{"object_id":"a","timerange":"[0:0]"}]}`,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) }))
+		client, err := New(Config{Endpoint: server.URL})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = client.RegisterSegments(t.Context(), "flow", []SegmentRequest{
+			{ObjectID: "a", Timerange: "[0:0_1:0)"},
+			{ObjectID: "shared", Timerange: "[1:0_2:0)"},
+			{ObjectID: "shared", Timerange: "[2:0_3:0)"},
+		})
+		server.Close()
+		var partial *PartialSegmentRegistrationError
+		if err == nil || errors.As(err, &partial) {
+			t.Fatalf("unusable bulk result %s: %v", body, err)
+		}
 	}
 }

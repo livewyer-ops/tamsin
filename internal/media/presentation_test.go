@@ -5,6 +5,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -62,16 +65,55 @@ func TestPacketTimestampClassificationUsesTheSameStrictRules(t *testing.T) {
 	}
 }
 
+// A transport stream's 33-bit timestamps wrap about every 26.5 hours. The
+// pictures either side of a wrap are one period apart, and only a transport
+// stream's timestamps are read that way.
+func TestCadenceScanFollowsATransportStreamAcrossAWrap(t *testing.T) {
+	t.Parallel()
+	const pictures = "stream_index=0|pts=8589927392\nstream_index=0|pts=8589930992\nstream_index=0|pts=0\nstream_index=0|pts=3600\n"
+	for _, testCase := range []struct {
+		format string
+		want   CadenceEvidence
+		last   int64
+	}{
+		{format: "mpegts", want: CadenceFixed, last: mpegTSWrap + 3600},
+		{format: "mov,mp4,m4a,3gp,3g2,mj2", want: CadenceUnknown, last: 3600},
+	} {
+		probe := Probe{Streams: []Stream{{CodecType: "video", TimeBase: "1/90000", AverageFrameRate: "25/1"}}}
+		probe.Format.Name = testCase.format
+		states := cadenceStates(&probe)
+		if err := scanPresentationTimestamps(strings.NewReader(pictures), states, "pts"); err != nil {
+			t.Fatal(err)
+		}
+		states[0].finish()
+		span := probe.Streams[0].Presentation
+		if probe.Streams[0].Cadence != testCase.want || span.Last != testCase.last {
+			t.Errorf("%s: cadence = %v, last = %d; want %v and %d", testCase.format, probe.Streams[0].Cadence, span.Last, testCase.want, testCase.last)
+		}
+		if testCase.want == CadenceFixed && (span.MinimumStep != 3600 || span.MaximumStep != 3600) {
+			t.Errorf("%s: steps = %d to %d, want 3600", testCase.format, span.MinimumStep, span.MaximumStep)
+		}
+	}
+}
+
 func TestCadenceTimelineRetainsBoundaryEvidence(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name          string
 		step, nextEnd int64
-		want          CadenceEvidence
+		// leading is when the second Object's packets show its leading
+		// pictures, against the zero of the first frame read from it.
+		leading []int64
+		want    CadenceEvidence
 	}{
-		{"fixed", 40, 2_000_000_000, CadenceFixed},
-		{"gap at boundary", 40, 2_040_000_000, CadenceVariable},
-		{"later different constant rate", 50, 2_250_000_000, CadenceVariable},
+		{"fixed", 40, 2_000_000_000, nil, CadenceFixed},
+		{"gap at boundary", 40, 2_040_000_000, nil, CadenceVariable},
+		{"leading pictures a decoder drops", 40, 2_080_000_000, []int64{-40, -80}, CadenceFixed},
+		{"leading pictures a decoder shows", 40, 2_000_000_000, []int64{40, 0}, CadenceFixed},
+		{"leading pictures at uneven steps", 40, 2_080_000_000, []int64{-30, -80}, CadenceVariable},
+		{"gap before the leading pictures", 40, 2_280_000_000, []int64{-40}, CadenceVariable},
+		{"gap between the leading pictures and the cut frame", 40, 2_240_000_000, []int64{-240}, CadenceVariable},
+		{"later different constant rate", 50, 2_250_000_000, nil, CadenceVariable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stream := Stream{CodecType: "video", TimeBase: "1/1000", AverageFrameRate: "25/1",
@@ -81,11 +123,29 @@ func TestCadenceTimelineRetainsBoundaryEvidence(t *testing.T) {
 				t.Fatalf("initial cadence=%v, %v", cadence, err)
 			}
 			stream.Presentation = PresentationSpan{First: 0, Last: tc.step * 24, LastDuration: tc.step, Frames: 25, MinimumStep: tc.step, MaximumStep: tc.step}
+			stream.LeadingPTS = tc.leading
 			cadence, err := timeline.Observe(stream, stream, tc.nextEnd)
 			if err != nil || cadence != tc.want {
 				t.Fatalf("second cadence=%v, want %v, err=%v", cadence, tc.want, err)
 			}
 		})
+	}
+}
+
+// The packets of a transport stream Object may be read past a timestamp wrap
+// that the frames decoded from it are read before.
+func TestCadenceTimelineReadsLeadingPicturesAcrossAWrap(t *testing.T) {
+	t.Parallel()
+	stream := Stream{CodecType: "video", TimeBase: "1/90000", AverageFrameRate: "25/1",
+		Presentation: PresentationSpan{First: 0, Last: 86400, LastDuration: 3600, Frames: 25, MinimumStep: 3600, MaximumStep: 3600}}
+	var timeline CadenceTimeline
+	if cadence, err := timeline.Observe(stream, stream, 1_000_000_000); err != nil || cadence != CadenceFixed {
+		t.Fatalf("initial cadence=%v, %v", cadence, err)
+	}
+	stream.Presentation.First, stream.Presentation.Last = 100, 86500
+	stream.LeadingPTS = []int64{mpegTSWrap + 100 - 3600, mpegTSWrap + 100 - 7200}
+	if cadence, err := timeline.Observe(stream, stream, 2_080_000_000); err != nil || cadence != CadenceFixed {
+		t.Fatalf("cadence=%v, %v; want the leading pictures found before the cut frame", cadence, err)
 	}
 }
 
@@ -116,22 +176,22 @@ func TestProbePresentationDistinguishesVariableCadence(t *testing.T) {
 	}
 	directory := t.TempDir()
 
-	fixed := filepath.Join(directory, "fixed.mkv")
+	fixed := filepath.Join(directory, "fixed.mp4")
 	buildFixture(t,
 		"-f", "lavfi", "-i", "testsrc=size=128x96:rate=30000/1001:duration=2",
-		"-c:v", "ffv1", fixed,
+		"-c:v", "libx264", "-bf", "0", "-video_track_timescale", "1000", fixed,
 	)
 	reordered := filepath.Join(directory, "reordered.mp4")
 	buildFixture(t,
 		"-f", "lavfi", "-i", "testsrc2=size=128x96:rate=25:duration=2",
 		"-c:v", "libx264", "-bf", "3", "-x264-params", "b-adapt=0", reordered,
 	)
-	variable := filepath.Join(directory, "variable.mkv")
+	variable := filepath.Join(directory, "variable.mp4")
 	buildFixture(t,
 		"-f", "lavfi", "-i", "testsrc=size=128x96:rate=24:duration=1",
 		"-f", "lavfi", "-i", "testsrc=size=128x96:rate=30:duration=1",
 		"-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
-		"-map", "[v]", "-fps_mode", "vfr", "-c:v", "ffv1", variable,
+		"-map", "[v]", "-fps_mode", "vfr", "-c:v", "libx264", "-bf", "0", variable,
 	)
 
 	for _, testCase := range []struct {
@@ -175,7 +235,7 @@ func TestProbePresentationDistinguishesVariableCadence(t *testing.T) {
 					got, testCase.want, packetProbe.Streams[0].AverageFrameRate, packetProbe.Streams[0].RealFrameRate)
 			}
 
-			flow, _, err := BuildFlow(packetProbe, testIdentity(), "video/matroska", EssenceStorageMuxed)
+			flow, _, err := BuildFlow(packetProbe, testIdentity(), "video/mp4", EssenceStorageMuxed)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -211,7 +271,7 @@ func TestProbeReadsDefensibleInterlaceEvidence(t *testing.T) {
 	}
 	for _, fixture := range fixtures {
 		t.Run(fixture.name, func(t *testing.T) {
-			path := filepath.Join(directory, fixture.name+".mpg")
+			path := filepath.Join(directory, fixture.name+".ts")
 			buildFixture(t,
 				"-f", "lavfi", "-i", "testsrc2=size=720x576:rate=50:duration=1",
 				"-vf", fixture.filter, "-c:v", "mpeg2video", "-flags", "+ilme+ildct", "-top", fixture.top, path,
@@ -220,7 +280,7 @@ func TestProbeReadsDefensibleInterlaceEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := interlaceMode(probe.Format, probe.Streams[0].FieldOrder); got != fixture.want {
+			if got := interlaceMode(probe.Streams[0].FieldOrder); got != fixture.want {
 				t.Fatalf("field_order=%q maps to %q, want %q", probe.Streams[0].FieldOrder, got, fixture.want)
 			}
 		})
@@ -250,5 +310,52 @@ func TestReorderedVideoSkipsPacketScan(t *testing.T) {
 	}
 	if probe.Streams[0].Cadence != CadenceFixed {
 		t.Fatal("decoded-frame evidence was not used")
+	}
+}
+
+// The decoded-frame scan decodes the whole input, so it asks for a thread for
+// each CPU up to four. The packet scan decodes nothing and asks for none.
+func TestFrameScanBoundsItsDecoderThreads(t *testing.T) {
+	for cpus, want := range map[int]int{1: 1, 2: 2, 4: 4, 8: 4} {
+		if got := frameScanThreads(cpus); got != want {
+			t.Errorf("frameScanThreads(%d) = %d, want %d", cpus, got, want)
+		}
+	}
+	// Keep executable creation outside parallel tests, as above.
+	executable := filepath.Join(t.TempDir(), "ffprobe")
+	script := `#!/bin/sh
+case " $* " in *' -show_frames '*) mode=frames; field=best_effort_timestamp;; *) mode=packets; field=pts;; esac
+printf '%s\n' "$@" > "$0.$mode"
+printf 'stream_index=0|%s=0\nstream_index=0|%s=40\n' "$field" "$field"
+`
+	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	recorded := func(mode string) []string {
+		data, err := os.ReadFile(executable + "." + mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Split(strings.TrimSpace(string(data)), "\n")
+	}
+	reordered := Probe{Streams: []Stream{{CodecType: "video", HasBFrames: 2, AverageFrameRate: "25/1"}}}
+	if err := (FFprobe{Executable: executable}).ProbePresentation(context.Background(), "fixture.mp4", &reordered); err != nil {
+		t.Fatal(err)
+	}
+	frames := recorded("frames")
+	at := slices.Index(frames, "-threads")
+	if at < 0 || at > slices.Index(frames, "fixture.mp4") {
+		t.Fatalf("frame scan arguments = %q, want -threads before the input", frames)
+	}
+	if want := strconv.Itoa(frameScanThreads(runtime.GOMAXPROCS(0))); frames[at+1] != want {
+		t.Fatalf("frame scan threads = %q, want %s", frames[at+1], want)
+	}
+
+	ordered := Probe{Streams: []Stream{{CodecType: "video", AverageFrameRate: "25/1"}}}
+	if err := (FFprobe{Executable: executable}).ProbePresentation(context.Background(), "fixture.mp4", &ordered); err != nil {
+		t.Fatal(err)
+	}
+	if packets := recorded("packets"); slices.Contains(packets, "-threads") {
+		t.Fatalf("packet scan arguments = %q, want no -threads", packets)
 	}
 }
