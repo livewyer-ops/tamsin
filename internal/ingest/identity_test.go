@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math/big"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -544,6 +545,14 @@ func (filenameSensitiveProber) ProbePresentation(context.Context, string, *media
 	return nil
 }
 
+func (filenameSensitiveProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (filenameSensitiveProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
+}
+
 type mutatingProber struct {
 	target      string
 	replacement []byte
@@ -571,4 +580,12 @@ func (p *mutatingProber) ProbeObject(ctx context.Context, filename string) (medi
 
 func (*mutatingProber) ProbePresentation(context.Context, string, *media.Probe) error {
 	return nil
+}
+
+func (*mutatingProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (*mutatingProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
 }

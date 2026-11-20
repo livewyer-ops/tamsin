@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"sync"
@@ -458,6 +459,14 @@ func (p *countingProber) ProbeObject(ctx context.Context, filename string) (medi
 
 func (*countingProber) ProbePresentation(context.Context, string, *media.Probe) error {
 	return nil
+}
+
+func (*countingProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (*countingProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
 }
 
 // TestMediaProcessBudgetIsGlobalAcrossInputs covers a bound that multiplied

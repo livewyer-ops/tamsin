@@ -1,6 +1,7 @@
 package media
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -50,8 +51,10 @@ func measureObjectPackets(reader io.Reader, probe *Probe) error {
 	type span struct {
 		first, end, last, decoded *big.Rat
 		samples, keyFrames        int
+		hiddenLead                int
 	}
 	bounds := make(map[int]span)
+	startsOnKey := make(map[int]bool)
 	transport := probe.Format.Name == "mpegts"
 	var previousPTS int64
 	havePTS := false
@@ -84,12 +87,26 @@ func measureObjectPackets(reader io.Reader, probe *Probe) error {
 				return err
 			}
 			stream, present := streams[packet.StreamIndex]
-			if !present || strings.Contains(packet.Flags, "D") {
+			if !present {
 				continue
 			}
+			if _, stored := startsOnKey[stream.Index]; !stored {
+				startsOnKey[stream.Index] = strings.Contains(packet.Flags, "K")
+			}
 			pts, ptsErr := packet.PTS.Int64()
-			duration, durationErr := packet.Duration.Int64()
 			tick, tickOK := new(big.Rat).SetString(stream.TimeBase)
+			if strings.Contains(packet.Flags, "D") {
+				// An edit list keeps this packet from being shown. One stored
+				// after the frame the Object was cut on that presents before
+				// it is a leading picture of an open GOP.
+				if bound := bounds[stream.Index]; stream.CodecType == "video" && bound.decoded != nil && ptsErr == nil && tickOK &&
+					new(big.Rat).Mul(new(big.Rat).SetInt64(pts), tick).Cmp(bound.decoded) < 0 {
+					bound.hiddenLead++
+					bounds[stream.Index] = bound
+				}
+				continue
+			}
+			duration, durationErr := packet.Duration.Int64()
 			// FFmpeg emits a two-byte empty mov_text sample to clear a cue.
 			// Its terminal, zero-duration sample has no duration field in FFprobe.
 			if stream.CodecType == "subtitle" && stream.CodecName == "mov_text" && packet.Size == "2" && packet.Duration == "" && ptsErr == nil && tickOK && tick.Sign() > 0 {
@@ -160,12 +177,12 @@ func measureObjectPackets(reader io.Reader, probe *Probe) error {
 		if !present {
 			if stream.CodecType == "subtitle" || stream.CodecType == "data" {
 				stream.Empty = true
-				stream.StartTime, stream.Duration = "", ""
+				stream.StartTime, stream.Duration, stream.StartPTS = "", "", nil
 				continue
 			}
 			return fmt.Errorf("stream %d has no object presentation timestamps", stream.Index)
 		}
-		stream.StartTime = bound.first.RatString()
+		stream.StartTime, stream.StartPTS = bound.first.RatString(), nil
 		stream.Duration = new(big.Rat).Sub(bound.end, bound.first).RatString()
 		if stream.CodecType == "audio" {
 			rate, err := strconv.ParseInt(stream.SampleRate, 10, 64)
@@ -178,62 +195,133 @@ func measureObjectPackets(reader io.Reader, probe *Probe) error {
 		stream.FirstDecodedTime = bound.decoded.RatString()
 		stream.SampleCount = bound.samples
 		stream.KeyFrames = bound.keyFrames
+		stream.HiddenLead = bound.hiddenLead
+		stream.MidGOP = stream.CodecType == "video" && !startsOnKey[stream.Index]
 	}
 	probe.Format.StartTime = ""
 	probe.Format.Duration = ""
 	return nil
 }
 
-// ProbeFirstKeyFrame finds where stream copy of a video stream actually
-// begins. FFmpeg's copy drops the frames before the first key frame, so a
-// capture that starts mid-GOP loses up to a GOP of leading frames; the
-// stream's start_time still names the first of them. The probe reads the
-// first seconds of the file only. It reports false when no key frame was
-// found within that window.
-func (p FFprobe) ProbeFirstKeyFrame(ctx context.Context, filename string, streamIndex int) (int64, bool, error) {
+// ProbeLeadingPictures reports whether a video stream has an open GOP after
+// its first key frame: a picture stored after a key frame that presents
+// before it. Packets are listed in stored order, so the whole stream is read
+// without decoding, and the scan stops at the first such picture. The first
+// key frame is left out because nothing precedes the Segment that starts on
+// it.
+func (p FFprobe) ProbeLeadingPictures(ctx context.Context, filename string, streamIndex int) (bool, error) {
 	executable := p.Executable
 	if executable == "" {
 		executable = "ffprobe"
 	}
 	arguments := append([]string{"-v", "error"}, inputOptions(filename)...)
-	arguments = append(arguments, "-select_streams", strconv.Itoa(streamIndex), "-read_intervals", "%+"+strconv.Itoa(int(keyFrameProbeWindow.Seconds())),
-		"-show_packets", "-show_entries", "packet=pts,pts_time,flags", "-of", "json", filename)
-	var (
-		found bool
-		at    int64
-	)
-	step, stderr, err := streamTool(ctx, executable, arguments, func(stdout io.Reader) error {
-		var listing struct {
-			Packets []struct {
-				PTSTime string `json:"pts_time"`
-				Flags   string `json:"flags"`
-			} `json:"packets"`
-		}
-		if err := json.NewDecoder(stdout).Decode(&listing); err != nil {
-			return err
-		}
-		for _, packet := range listing.Packets {
-			if !strings.Contains(packet.Flags, "K") || packet.PTSTime == "" || packet.PTSTime == "N/A" {
-				continue
-			}
-			seconds, err := ParseSeconds(packet.PTSTime)
-			if err != nil {
-				return fmt.Errorf("parse key frame time: %w", err)
-			}
-			at, found = seconds, true
-			return nil
-		}
-		return nil
-	})
+	arguments = append(arguments, "-select_streams", strconv.Itoa(streamIndex),
+		"-show_packets", "-show_entries", "packet=pts,flags", "-of", "compact=p=0:nk=0", filename)
+	step, stderr, err := streamTool(ctx, executable, arguments, scanLeadingPictures)
+	if errors.Is(err, errLeadingPicture) {
+		return true, nil
+	}
 	if step == toolStepWait && err != nil {
-		return 0, false, fmt.Errorf("probe first key frame: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return false, fmt.Errorf("probe leading pictures: %w: %s", err, strings.TrimSpace(string(stderr)))
 	}
-	if err != nil {
-		return 0, false, err
-	}
-	return at, found, nil
+	return false, err
 }
 
-// keyFrameProbeWindow bounds how far into a file the first key frame is
-// looked for; a GOP longer than this is not stream-copied sensibly anyway.
-const keyFrameProbeWindow = 10 * time.Second
+var errLeadingPicture = errors.New("leading picture found")
+
+func scanLeadingPictures(reader io.Reader) error {
+	keyFrames := 0
+	var keyFramePTS int64
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		var (
+			pts   int64
+			timed bool
+			key   bool
+		)
+		for _, field := range strings.Split(scanner.Text(), "|") {
+			name, value, _ := strings.Cut(field, "=")
+			switch name {
+			case "pts":
+				var err error
+				pts, err = strconv.ParseInt(value, 10, 64)
+				timed = err == nil
+			case "flags":
+				key = strings.Contains(value, "K")
+			}
+		}
+		switch {
+		case !timed:
+		case key:
+			keyFrames++
+			keyFramePTS = pts
+		case keyFrames > 1 && pts < keyFramePTS:
+			return errLeadingPicture
+		}
+	}
+	return scanner.Err()
+}
+
+// ProbeFirstKeyFrame finds where stream copy of a video stream actually
+// begins. FFmpeg's copy drops the frames before the first key frame, so a
+// capture that starts mid-GOP loses up to a GOP of leading frames; the
+// stream's start_time still names the first of them. Packets are read in
+// stored order and the read stops at the first key frame. Its time is its
+// timestamp in the stream's time base, because FFprobe's pts_time is rounded
+// to the microsecond. It reports false when the input ends, or
+// KeyFrameSearchLimit of the stream passes, without one.
+func (p FFprobe) ProbeFirstKeyFrame(ctx context.Context, filename string, stream Stream) (*big.Rat, bool, error) {
+	tick, ok := new(big.Rat).SetString(stream.TimeBase)
+	if !ok || tick.Sign() <= 0 {
+		return nil, false, fmt.Errorf("stream %d has no time base", stream.Index)
+	}
+	executable := p.Executable
+	if executable == "" {
+		executable = "ffprobe"
+	}
+	arguments := append([]string{"-v", "error"}, inputOptions(filename)...)
+	arguments = append(arguments, "-select_streams", strconv.Itoa(stream.Index), "-read_intervals", "%+"+strconv.Itoa(int(KeyFrameSearchLimit.Seconds())),
+		"-show_packets", "-show_entries", "packet=pts,flags", "-of", "compact=p=0:nk=0", filename)
+	var at int64
+	step, stderr, err := streamTool(ctx, executable, arguments, func(stdout io.Reader) error {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			var presented, flags string
+			for _, field := range strings.Split(scanner.Text(), "|") {
+				switch name, value, _ := strings.Cut(field, "="); name {
+				case "pts":
+					presented = value
+				case "flags":
+					flags = value
+				}
+			}
+			if !strings.Contains(flags, "K") || presented == "" || presented == "N/A" {
+				continue
+			}
+			pts, err := strconv.ParseInt(presented, 10, 64)
+			if err != nil {
+				return fmt.Errorf("parse key frame timestamp: %w", err)
+			}
+			at = pts
+			return errKeyFrame
+		}
+		return scanner.Err()
+	})
+	if errors.Is(err, errKeyFrame) {
+		return tick.Mul(tick, new(big.Rat).SetInt64(at)), true, nil
+	}
+	if ctx.Err() != nil {
+		return nil, false, ctx.Err()
+	}
+	if step == toolStepWait && err != nil {
+		return nil, false, fmt.Errorf("probe first key frame: %w: %s", err, strings.TrimSpace(string(stderr)))
+	}
+	return nil, false, err
+}
+
+var errKeyFrame = errors.New("key frame found")
+
+// KeyFrameSearchLimit bounds how much of a stream is read for its first key
+// frame. A longer wait than this for a picture that can be decoded is not
+// one a stream copy should start from.
+const KeyFrameSearchLimit = 5 * time.Minute

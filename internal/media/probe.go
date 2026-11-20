@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"os/exec"
 	"regexp"
@@ -88,6 +89,14 @@ type Stream struct {
 	SampleCount    int    `json:"-"`
 	KeyFrames      int    `json:"-"`
 	LastSampleTime string `json:"-"`
+	// HiddenLead counts the leading pictures of an open GOP that an MP4
+	// Object stores but its edit list keeps from being shown: pictures stored
+	// after the frame the Object was cut on that present before it.
+	HiddenLead int `json:"-"`
+	// MidGOP is set when the first packet an Object stores for a video
+	// stream is not a key frame, so the stream cannot be decoded from that
+	// Object alone until its next key frame.
+	MidGOP bool `json:"-"`
 	// FirstDecodedTime is the presentation time of the stream's first packet
 	// in decode order: the frame a Segment was cut on. Frames presented before
 	// it (the leading pictures of an open GOP) belong to the same Object.
@@ -98,6 +107,11 @@ type Stream struct {
 	Disposition      struct {
 		AttachedPicture int `json:"attached_pic"`
 	} `json:"disposition"`
+	// StartPTS is the source stream's start in its own time base. FFprobe
+	// prints start_time to the microsecond; this names the instant exactly.
+	// It is cleared once a rendered Object's packets have been measured,
+	// because StartTime then holds the exact measured start.
+	StartPTS *int64 `json:"start_pts"`
 }
 
 type Format struct {
@@ -124,6 +138,13 @@ type Prober interface {
 	Probe(context.Context, string) (Probe, error)
 	ProbeObject(context.Context, string) (Probe, error)
 	ProbePresentation(context.Context, string, *Probe) error
+	// ProbeFirstKeyFrame reports the presentation time of a video stream's
+	// first key frame in exact seconds, and false when it has none within
+	// the search limit.
+	ProbeFirstKeyFrame(ctx context.Context, filename string, stream Stream) (*big.Rat, bool, error)
+	// ProbeLeadingPictures reports whether a video stream has an open GOP
+	// after its first key frame.
+	ProbeLeadingPictures(ctx context.Context, filename string, streamIndex int) (bool, error)
 	Version(context.Context) (string, error)
 }
 

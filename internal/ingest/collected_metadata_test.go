@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -170,6 +171,14 @@ func (p timecodeProber) ProbeObject(ctx context.Context, filename string) (media
 
 func (timecodeProber) ProbePresentation(context.Context, string, *media.Probe) error { return nil }
 
+func (timecodeProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (timecodeProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
+}
+
 func TestEssenceCountIgnoresUndescribableDataTracks(t *testing.T) {
 	t.Parallel()
 	probe, err := timecodeProber{}.Probe(context.Background(), "")
@@ -211,6 +220,14 @@ func (p offAirProber) ProbeObject(ctx context.Context, filename string) (media.P
 }
 
 func (offAirProber) ProbePresentation(context.Context, string, *media.Probe) error { return nil }
+
+func (offAirProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (offAirProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
+}
 
 func TestUnqualifiedTracksRequirePreserve(t *testing.T) {
 	for name, prober := range map[string]media.Prober{"timecode": timecodeProber{}, "off-air": offAirProber{}} {

@@ -6,12 +6,34 @@ import (
 	"math"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/livewyer-ops/tamsin/internal/media"
 )
+
+// placeRendered places rendered Segments as a segmented ingest does: through
+// the rolling preparer, with a muxed render anchored where its reference
+// stream begins.
+func placeRendered(ctx context.Context, pipeline *Pipeline, flowInfo media.FlowInfo, stream int, start int64,
+	records []media.SegmentRecord) ([]preparedObject, error) {
+	reference := start
+	if stream == media.AllStreams {
+		reference += flowInfo.ReferenceOffset
+	}
+	preparer := newRollingObjectPreparer(pipeline, "test-flow", stream, start, reference)
+	objects := make([]preparedObject, 0, len(records))
+	for _, record := range records {
+		object, err := preparer.prepare(ctx, record, nil)
+		if err != nil {
+			return objects, err
+		}
+		objects = append(objects, object)
+	}
+	return objects, nil
+}
 
 func TestEmittedObjectPresentationTiming(t *testing.T) {
 	for _, tool := range []string{"ffmpeg", "ffprobe"} {
@@ -56,12 +78,6 @@ func TestEmittedObjectPresentationTiming(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				staged, cleanup, err := pipeline.prepareObjectsForStream(ctx, "test-flow",
-					stagedFile{path: input}, media.FlowInfo{}, stream, start, records)
-				defer cleanup()
-				if err != nil {
-					t.Fatal(err)
-				}
 				rolling := newRollingObjectPreparer(pipeline, "test-flow", stream, start, start)
 				streamed := newRollingObjectPreparer(pipeline, "test-flow", stream, start, start)
 				var previous *preparedObject
@@ -78,11 +94,9 @@ func TestEmittedObjectPresentationTiming(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					for _, candidate := range []preparedObject{staged[index], cached} {
-						if candidate.timerange != object.timerange || candidate.tsOffset != object.tsOffset ||
-							candidate.objectTimerange != object.objectTimerange {
-							t.Fatalf("timing differs across ingest paths: %#v / %#v", candidate, object)
-						}
+					if cached.timerange != object.timerange || cached.tsOffset != object.tsOffset ||
+						cached.objectTimerange != object.objectTimerange {
+						t.Fatalf("timing differs across ingest paths: %#v / %#v", cached, object)
 					}
 					// ts_offset maps the reference stream's first presentation
 					// timestamp onto the Segment start exactly; the Object's own
@@ -175,9 +189,7 @@ func TestMP4SegmentsFollowTheNominalRate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			objects, cleanup, err := pipeline.prepareObjectsForStream(ctx, "test-flow",
-				stagedFile{path: input}, media.FlowInfo{}, stream, start, records)
-			defer cleanup()
+			objects, err := placeRendered(ctx, pipeline, media.FlowInfo{}, stream, start, records)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -217,7 +229,9 @@ func TestMP4SegmentsFollowTheNominalRate(t *testing.T) {
 // two B-frames between anchors. FFmpeg cuts on the I-frame but the leading
 // B-frames that present before it travel in the same Object, so the manifest
 // shows an 80 ms gap at every boundary that is not a gap in the source. The
-// Segments must abut and the Flow must span exactly the source.
+// Segments must abut and the Flow must span exactly the source. The same
+// video rendered as MP4 does not show those B-frames, so its second cut is
+// refused instead of placed after a hole.
 func TestOpenGOPSegmentsAbut(t *testing.T) {
 	for _, tool := range []string{"ffmpeg", "ffprobe"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -278,9 +292,7 @@ func TestOpenGOPSegmentsAbut(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			objects, cleanup, err := pipeline.prepareObjectsForStream(ctx, "test-flow",
-				stagedFile{path: input}, flowInfo, stream, start, records)
-			defer cleanup()
+			objects, err := placeRendered(ctx, pipeline, flowInfo, stream, start, records)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -299,6 +311,42 @@ func TestOpenGOPSegmentsAbut(t *testing.T) {
 			}
 			if span := last.start + last.duration - videoStart; absInt64(span-int64(8*time.Second)) > manifestTolerance {
 				t.Fatalf("flow spans %s, want 8 s", media.Timestamp(span))
+			}
+		})
+		t.Run(name+" as MP4", func(t *testing.T) {
+			mp4 := filepath.Join(t.TempDir(), "opengop.mp4")
+			if output, err := exec.Command("ffmpeg", "-v", "error", "-i", input, "-c:v", "copy", "-c:a", "aac", mp4).CombinedOutput(); err != nil {
+				t.Fatalf("fixture: %v: %s", err, output)
+			}
+			var records []media.SegmentRecord
+			if err := (media.FFmpeg{}).Segment(ctx, media.SegmentRequest{
+				Input: mp4, Duration: 2 * time.Second, Format: media.SegmentFormatSource, BitExact: true,
+				SourceContainer: media.SegmentContainer{Muxer: "mp4", Extension: ".mp4"},
+				StreamIndices:   []int{stream}, Directory: t.TempDir(),
+			}, func(record media.SegmentRecord) error {
+				records = append(records, record)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			pipeline, err := New(Config{Concurrency: 1, SegmentDuration: 2 * time.Second},
+				newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			probe, err := pipeline.probePreparedInput(ctx, stagedFile{path: mp4})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, flowInfo, err := media.BuildFlow(probe, media.Identity{}, "video/mp4", media.EssenceStorageMuxed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			objects, err := placeRendered(ctx, pipeline, flowInfo, stream, 0, records)
+			failure := DescribeFailure(Result{}, err)
+			if err == nil || failure.Code != FailureCodeMediaUnsupported || failure.Message != FailureMessageMediaOpenGOP ||
+				!strings.Contains(err.Error(), "leading pictures of an open GOP") {
+				t.Fatalf("placed %d MP4 Objects with %v (%+v), want the open-GOP refusal", len(objects), err, failure)
 			}
 		})
 	}
@@ -328,10 +376,6 @@ func TestMidGOPCaptureIsAnchoredOnItsFirstKeyFrame(t *testing.T) {
 		"-f", "mpegts", input).CombinedOutput(); err != nil {
 		t.Fatalf("fixture: %v: %s", err, output)
 	}
-	keyFrame, found, err := (media.FFprobe{}).ProbeFirstKeyFrame(ctx, input, 0)
-	if err != nil || !found {
-		t.Fatalf("first key frame: %d, %t, %v", keyFrame, found, err)
-	}
 	const start = int64(time.Minute)
 	pipeline, err := New(Config{Concurrency: 1, SegmentDuration: 2 * time.Second, Start: start},
 		newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
@@ -346,14 +390,22 @@ func TestMidGOPCaptureIsAnchoredOnItsFirstKeyFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstPacketOffset := flowInfo.ReferenceOffset
-	if err := pipeline.anchorOnKeyFrames(ctx, input, probe, &flowInfo); err != nil {
+	video := slices.IndexFunc(probe.Streams, func(stream media.Stream) bool { return stream.CodecType == "video" })
+	at, found, err := (media.FFprobe{}).ProbeFirstKeyFrame(ctx, input, probe.Streams[video])
+	if err != nil || !found {
+		t.Fatalf("first key frame: %v, %t, %v", at, found, err)
+	}
+	keyFrame, err := media.PresentationOffset(probe, flowInfo.Start, at)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if flowInfo.ReferenceOffset != keyFrame-flowInfo.Start || flowInfo.ReferenceOffset <= firstPacketOffset {
-		t.Fatalf("reference offset = %s, first packet %s, key frame %s from container start %s",
-			media.Timestamp(flowInfo.ReferenceOffset), media.Timestamp(firstPacketOffset),
-			media.Timestamp(keyFrame), media.Timestamp(flowInfo.Start))
+	firstPacketOffset := flowInfo.ReferenceOffset
+	if err := pipeline.anchorOnKeyFrames(ctx, input, "mpegts", probe, &flowInfo); err != nil {
+		t.Fatal(err)
+	}
+	if flowInfo.ReferenceOffset != keyFrame || flowInfo.ReferenceOffset <= firstPacketOffset {
+		t.Fatalf("reference offset = %s, first packet %s, key frame %s after the container start",
+			media.Timestamp(flowInfo.ReferenceOffset), media.Timestamp(firstPacketOffset), media.Timestamp(keyFrame))
 	}
 	for _, essence := range flowInfo.Collected {
 		if essence.Flow["format"] == "urn:x-nmos:format:video" && essence.Offset != flowInfo.ReferenceOffset {
@@ -371,8 +423,7 @@ func TestMidGOPCaptureIsAnchoredOnItsFirstKeyFrame(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	objects, cleanup, err := pipeline.prepareObjectsForStream(ctx, "test-flow", stagedFile{path: input}, flowInfo, media.AllStreams, start, records)
-	defer cleanup()
+	objects, err := placeRendered(ctx, pipeline, flowInfo, media.AllStreams, start, records)
 	if err != nil {
 		t.Fatal(err)
 	}

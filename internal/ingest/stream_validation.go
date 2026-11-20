@@ -51,6 +51,12 @@ func (e *rollingExecution) validateSegment(record media.SegmentRecord, state *ro
 			break
 		}
 	}
+	// Hidden pictures also disturb the cadence read below, so the cut is
+	// refused for what it is before that comparison can misreport it.
+	hiddenLead, midGOP := media.VideoCut(probe)
+	if err := state.preparer.cursor.refuseUnsafeCut(record, hiddenLead, midGOP); err != nil {
+		return nil, false, err
+	}
 	cadenceReady := true
 	for index := range probe.Streams {
 		stream := &probe.Streams[index]

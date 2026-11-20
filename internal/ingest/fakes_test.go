@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -47,6 +48,14 @@ func (p *presentationCountingProber) ProbeObject(ctx context.Context, filename s
 func (p *presentationCountingProber) ProbePresentation(context.Context, string, *media.Probe) error {
 	p.presentations.Add(1)
 	return nil
+}
+
+func (*presentationCountingProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (*presentationCountingProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
 }
 
 type fakeProber struct {
@@ -91,6 +100,14 @@ func (muxedProber) ProbePresentation(context.Context, string, *media.Probe) erro
 	return nil
 }
 
+func (muxedProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (muxedProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
+}
+
 type multiAudioProber struct{}
 
 func (multiAudioProber) Probe(context.Context, string) (media.Probe, error) {
@@ -114,6 +131,14 @@ func (p multiAudioProber) ProbeObject(ctx context.Context, filename string) (med
 
 func (multiAudioProber) ProbePresentation(context.Context, string, *media.Probe) error {
 	return nil
+}
+
+func (multiAudioProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (multiAudioProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
 }
 
 type fourEssenceProber struct{}
@@ -142,6 +167,14 @@ func (fourEssenceProber) ProbePresentation(context.Context, string, *media.Probe
 	return nil
 }
 
+func (fourEssenceProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (fourEssenceProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
+}
+
 func (fakeProber) Version(context.Context) (string, error) {
 	return "ffprobe version 5.1 test", nil
 }
@@ -152,6 +185,12 @@ func (p fakeProber) ProbeObject(ctx context.Context, filename string) (media.Pro
 
 func (fakeProber) ProbePresentation(context.Context, string, *media.Probe) error {
 	return nil
+}
+
+func (fakeProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) { return false, nil }
+
+func (fakeProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
 }
 
 type oldVersionProber struct{ fakeProber }
@@ -181,6 +220,14 @@ func (p unknownContainerProber) ProbeObject(ctx context.Context, filename string
 
 func (unknownContainerProber) ProbePresentation(context.Context, string, *media.Probe) error {
 	return nil
+}
+
+func (unknownContainerProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (unknownContainerProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
 }
 
 type fakeSegmenter struct{}
@@ -870,6 +917,14 @@ func (p essenceBitRateProber) ProbeObject(ctx context.Context, filename string) 
 
 func (essenceBitRateProber) ProbePresentation(context.Context, string, *media.Probe) error {
 	return nil
+}
+
+func (essenceBitRateProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (essenceBitRateProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
 }
 
 type versionedCountingSegmenter struct {

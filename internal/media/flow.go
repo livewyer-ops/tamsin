@@ -390,7 +390,7 @@ func collectEssenceFlows(streams, undescribed []Stream, probe Probe, identity Id
 		if formatCounts[role] > 1 {
 			itemRole = role + " " + strconv.Itoa(formatTrackIndex)
 		}
-		offset, err := streamOffset(stream, start)
+		offset, err := streamOffset(streams, stream, start)
 		if err != nil {
 			return nil, err
 		}
@@ -449,9 +449,65 @@ func parseStreamID(value string) (int64, bool) {
 	return id, err == nil && id >= 0
 }
 
-func streamOffset(stream Stream, containerStart int64) (int64, error) {
+// tickTime returns the presentation time, in exact seconds, of a timestamp in
+// a stream's own time base.
+func tickTime(stream Stream, pts int64) (*big.Rat, bool) {
+	tick, ok := new(big.Rat).SetString(stream.TimeBase)
+	if !ok || tick.Sign() <= 0 {
+		return nil, false
+	}
+	return tick.Mul(tick, new(big.Rat).SetInt64(pts)), true
+}
+
+// containerOrigin returns the container start in exact seconds. FFprobe
+// prints start times to the microsecond, but the stream that begins the
+// container records that instant in its own ticks: it is the earliest stream
+// whose start rounds to the printed value. Without such a stream the printed
+// value stands.
+func containerOrigin(streams []Stream, containerStart int64) *big.Rat {
+	printed := big.NewRat(containerStart, nanosecondsPerSecond)
+	origin, found := printed, false
+	for _, stream := range streams {
+		if stream.StartPTS == nil {
+			continue
+		}
+		start, ok := tickTime(stream, *stream.StartPTS)
+		if !ok {
+			continue
+		}
+		if distance := new(big.Rat).Sub(start, printed); distance.Abs(distance).Cmp(big.NewRat(1, 2_000_000)) > 0 {
+			continue
+		}
+		if !found || start.Cmp(origin) < 0 {
+			origin, found = start, true
+		}
+	}
+	return origin
+}
+
+// PresentationOffset returns how long after the container start an instant
+// given in exact seconds presents. The container start is read in stream
+// ticks too and the difference is rounded once, so the result does not carry
+// the microsecond rounding of FFprobe's printed times.
+func PresentationOffset(probe Probe, containerStart int64, at *big.Rat) (int64, error) {
+	offset := new(big.Rat).Sub(at, containerOrigin(contentStreams(probe.Streams), containerStart))
+	return ParseSeconds(offset.RatString())
+}
+
+// streamOffset is how long after containerStart a stream begins, never less
+// than zero.
+func streamOffset(streams []Stream, stream Stream, containerStart int64) (int64, error) {
 	if stream.StartTime == "" || stream.StartTime == "N/A" {
 		return 0, nil
+	}
+	if stream.StartPTS != nil {
+		if start, ok := tickTime(stream, *stream.StartPTS); ok {
+			offset, err := ParseSeconds(start.Sub(start, containerOrigin(streams, containerStart)).RatString())
+			if err != nil {
+				return 0, fmt.Errorf("calculate stream start offset: %w", err)
+			}
+			return max(offset, 0), nil
+		}
 	}
 	streamStart, err := ParseSeconds(stream.StartTime)
 	if err != nil {
@@ -513,7 +569,7 @@ func ProbeTiming(probe Probe) (start, duration int64, err error) {
 // first video stream, otherwise the first content stream) begins.
 func referenceOffset(streams []Stream, containerStart int64) (int64, error) {
 	if reference := referenceStream(streams); reference != nil {
-		return streamOffset(*reference, containerStart)
+		return streamOffset(streams, *reference, containerStart)
 	}
 	return 0, nil
 }
@@ -614,6 +670,25 @@ func ReferenceVideoStream(probe Probe) (int, bool) {
 	return reference.Index, true
 }
 
+// VideoCut reports what the cut that began an Object cost its video.
+// hiddenLead counts the leading pictures its video streams store but do not
+// show. midGOP is set when a video stream other than the reference stream
+// begins between its key frames: the segmenter cuts on the reference stream's
+// key frames, which says nothing of where another video stream's fall.
+func VideoCut(probe Probe) (hiddenLead int, midGOP bool) {
+	streams := contentStreams(probe.Streams)
+	reference := referenceStream(streams)
+	for index := range streams {
+		stream := &streams[index]
+		if stream.CodecType != "video" {
+			continue
+		}
+		hiddenLead += stream.HiddenLead
+		midGOP = midGOP || (stream != reference && stream.MidGOP)
+	}
+	return hiddenLead, midGOP
+}
+
 func referenceStream(streams []Stream) *Stream {
 	for index := range streams {
 		if streams[index].CodecType == "video" {
@@ -702,7 +777,7 @@ func probeDuration(probe Probe, streams []Stream, start int64) (int64, error) {
 		if duration < 0 {
 			return 0, fmt.Errorf("stream %d duration cannot be negative", stream.Index)
 		}
-		offset, err := streamOffset(stream, start)
+		offset, err := streamOffset(streams, stream, start)
 		if err != nil {
 			return 0, err
 		}

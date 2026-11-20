@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"errors"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,14 @@ func (p profilePolicyProber) ProbeObject(ctx context.Context, filename string) (
 
 func (profilePolicyProber) ProbePresentation(context.Context, string, *media.Probe) error {
 	return nil
+}
+
+func (profilePolicyProber) ProbeLeadingPictures(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (profilePolicyProber) ProbeFirstKeyFrame(context.Context, string, media.Stream) (*big.Rat, bool, error) {
+	return new(big.Rat), true, nil
 }
 
 func TestNamedProfilesAreVersionedMediaContracts(t *testing.T) {

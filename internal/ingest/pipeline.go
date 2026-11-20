@@ -535,7 +535,10 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 		media.ApplyRenderedTrackMapping(&flowInfo)
 		// Stream copy begins at the first key frame, which is where the
 		// rendered Flow must be anchored.
-		if err := p.anchorOnKeyFrames(ctx, staged.path, probe, &flowInfo); err != nil {
+		if err := p.anchorOnKeyFrames(ctx, staged.path, segmentContainer.Muxer, probe, &flowInfo); err != nil {
+			return Result{}, withFailure(FailureCodeMediaAnalysisFailed, FailureMessageMediaAnalysisFailed, true, err)
+		}
+		if err := p.refuseUnsafeCuts(ctx, staged, segmentContainer.Muxer, probe, flowInfo); err != nil {
 			return Result{}, withFailure(FailureCodeMediaAnalysisFailed, FailureMessageMediaAnalysisFailed, true, err)
 		}
 	}
@@ -816,6 +819,12 @@ type objectMeasurement struct {
 	// lead is how far before the frame it was cut on the Object presents:
 	// the leading pictures of an open GOP.
 	lead int64
+	// hiddenLead counts such pictures that an MP4 Object stores but does not
+	// show.
+	hiddenLead int
+	// midGOP is set when the Object begins a video stream other than its
+	// reference stream between that stream's key frames.
+	midGOP bool
 }
 
 // ingestIndependently extracts each elementary stream into its own Media
@@ -1309,6 +1318,7 @@ func measureObject(probe media.Probe, size int64, checksum string) (objectMeasur
 		entry.lastObjectSample = max(entry.lastObjectSample, last)
 	}
 	entry.lead = reference.Lead
+	entry.hiddenLead, entry.midGOP = media.VideoCut(probe)
 	// A regularised reference stream presents its last sample for a whole
 	// period, which can reach past the rounded timestamps every stream
 	// recorded. The Object's own range must still contain the Segment.

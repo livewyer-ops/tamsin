@@ -1,8 +1,15 @@
 package media
 
 import (
+	"context"
+	"errors"
+	"math/big"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestObjectPacketBounds(t *testing.T) {
@@ -97,5 +104,260 @@ func TestTransportStreamTracksShareOnePresentationClock(t *testing.T) {
 	start, duration, err := ProbeTiming(probe)
 	if err != nil || start != -21333333 || duration != 64000000 {
 		t.Fatalf("mixed-epoch bounds: start=%d duration=%d error=%v", start, duration, err)
+	}
+}
+
+// TestVideoCutEvidence covers what an Object's packets say about the cut that
+// began it. Only a video packet stored after the first shown frame and
+// presenting before it is a hidden leading picture of an open GOP, and only a
+// video stream other than the reference stream is held to beginning on a key
+// frame.
+func TestVideoCutEvidence(t *testing.T) {
+	t.Parallel()
+	const shown = `{"stream_index":0,"pts":0,"duration":40,"flags":"K__"},{"stream_index":0,"pts":120,"duration":40,"flags":"___"},{"stream_index":0,"pts":40,"duration":40,"flags":"___"},{"stream_index":0,"pts":80,"duration":40,"flags":"___"}`
+	for name, tc := range map[string]struct {
+		packets string
+		hidden  int
+		midGOP  bool
+	}{
+		"closed GOP":                                                     {packets: shown},
+		"leading pictures after the cut":                                 {packets: `{"stream_index":0,"pts":0,"duration":40,"flags":"K__"},{"stream_index":0,"pts":-40,"duration":40,"flags":"_D_"},{"stream_index":0,"pts":-80,"duration":40,"flags":"_D_"},{"stream_index":0,"pts":40,"duration":40,"flags":"___"}`, hidden: 2},
+		"discarded before the first shown":                               {packets: `{"stream_index":0,"pts":-80,"duration":40,"flags":"KD_"},{"stream_index":0,"pts":-40,"duration":40,"flags":"_D_"},` + shown},
+		"discarded after the last shown":                                 {packets: shown + `,{"stream_index":0,"pts":160,"duration":40,"flags":"_D_"}`},
+		"discarded audio priming":                                        {packets: `{"stream_index":1,"pts":0,"duration":21,"flags":"K__"},{"stream_index":1,"pts":-21,"duration":21,"flags":"KD_"},` + shown},
+		"the reference stream is cut on its key frames by the segmenter": {packets: `{"stream_index":0,"pts":0,"duration":40,"flags":"___"},{"stream_index":0,"pts":40,"duration":40,"flags":"K__"}`},
+		"a second video stream on a key frame":                           {packets: shown + `,{"stream_index":2,"pts":0,"duration":40,"flags":"K__"},{"stream_index":2,"pts":40,"duration":40,"flags":"___"}`},
+		"a second video stream between key frames":                       {packets: shown + `,{"stream_index":2,"pts":0,"duration":40,"flags":"___"},{"stream_index":2,"pts":40,"duration":40,"flags":"K__"}`, midGOP: true},
+		"a second video stream whose first stored picture is hidden":     {packets: shown + `,{"stream_index":2,"pts":-80,"duration":40,"flags":"_D_"},{"stream_index":2,"pts":80,"duration":40,"flags":"___"},{"stream_index":2,"pts":0,"duration":40,"flags":"___"}`, midGOP: true},
+		"leading pictures of a second video stream":                      {packets: shown + `,{"stream_index":2,"pts":0,"duration":40,"flags":"K__"},{"stream_index":2,"pts":-40,"duration":40,"flags":"_D_"},{"stream_index":2,"pts":40,"duration":40,"flags":"___"}`, hidden: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			probe := Probe{Streams: []Stream{
+				{Index: 0, CodecType: "video", TimeBase: "1/1000"},
+				{Index: 1, CodecType: "audio", TimeBase: "1/1000", SampleRate: "48000"},
+			}}
+			packets := tc.packets
+			if !strings.Contains(packets, `"stream_index":1`) {
+				packets += `,{"stream_index":1,"pts":0,"duration":21,"flags":"K__"}`
+			}
+			if strings.Contains(packets, `"stream_index":2`) {
+				probe.Streams = append(probe.Streams, Stream{Index: 2, CodecType: "video", TimeBase: "1/1000"})
+			}
+			if err := measureObjectPackets(strings.NewReader(`{"packets":[`+packets+`]}`), &probe); err != nil {
+				t.Fatal(err)
+			}
+			if hidden, midGOP := VideoCut(probe); hidden != tc.hidden || midGOP != tc.midGOP || probe.Streams[1].HiddenLead != 0 || probe.Streams[1].MidGOP {
+				t.Fatalf("VideoCut() = %d hidden, mid-GOP %t (audio: %d, %t); want %d, %t",
+					hidden, midGOP, probe.Streams[1].HiddenLead, probe.Streams[1].MidGOP, tc.hidden, tc.midGOP)
+			}
+		})
+	}
+}
+
+func TestLeadingPictureScan(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		packets string
+		open    bool
+	}{
+		"closed GOPs":                  {"pts=0|flags=K__\npts=120|flags=___\npts=40|flags=___\npts=80|flags=___\npts=160|flags=K__\npts=280|flags=___\npts=200|flags=___", false},
+		"open GOP after the first":     {"pts=0|flags=K__\npts=80|flags=___\npts=40|flags=___\npts=200|flags=K__\npts=120|flags=___\npts=160|flags=___", true},
+		"open GOP on the first only":   {"pts=80|flags=K__\npts=0|flags=___\npts=40|flags=___\npts=200|flags=___\npts=120|flags=___\npts=240|flags=K__\npts=280|flags=___", false},
+		"packets before the first key": {"pts=0|flags=___\npts=40|flags=___\npts=80|flags=K__\npts=120|flags=___\npts=160|flags=K__\npts=200|flags=___", false},
+		"untimed packet after a key":   {"pts=0|flags=K__\npts=40|flags=___\npts=80|flags=K__\npts=N/A|flags=___\npts=120|flags=___", false},
+		"negative leading picture":     {"pts=-80|flags=K__\npts=-40|flags=___\npts=40|flags=K__\npts=0|flags=___", true},
+		"no packets":                   {"", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			err := scanLeadingPictures(strings.NewReader(tc.packets))
+			if (err == errLeadingPicture) != tc.open || (err != nil && err != errLeadingPicture) {
+				t.Fatalf("scan = %v, want open=%t", err, tc.open)
+			}
+		})
+	}
+}
+
+// TestProbeLeadingPicturesOnRealMedia reads MPEG-2 video, which FFmpeg
+// encodes with open GOPs unless told otherwise, and the same video closed.
+func TestProbeLeadingPicturesOnRealMedia(t *testing.T) {
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip("requires " + tool)
+		}
+	}
+	directory := t.TempDir()
+	for name, tc := range map[string]struct {
+		arguments []string
+		open      bool
+	}{
+		"open":   {nil, true},
+		"closed": {[]string{"-flags", "+cgop", "-sc_threshold", "1000000000"}, false},
+	} {
+		input := filepath.Join(directory, name+".mp4")
+		buildFixture(t, append(append([]string{"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4", "-f", "lavfi", "-i", "testsrc2=size=128x96:rate=25:duration=4",
+			"-map", "0:a", "-map", "1:v", "-c:a", "aac", "-c:v", "mpeg2video", "-g", "12", "-bf", "2"}, tc.arguments...), input)...)
+		// Audio is stream 0, so the scan must select the video by its index.
+		open, err := (FFprobe{}).ProbeLeadingPictures(context.Background(), input, 1)
+		if err != nil || open != tc.open {
+			t.Errorf("%s GOP video: leading pictures = %t, %v; want %t", name, open, err, tc.open)
+		}
+		if open, err := (FFprobe{}).ProbeLeadingPictures(context.Background(), input, 0); err != nil || open {
+			t.Errorf("%s GOP video: audio stream reported leading pictures (%t, %v)", name, open, err)
+		}
+	}
+	if _, err := (FFprobe{}).ProbeLeadingPictures(context.Background(), filepath.Join(directory, "missing.mp4"), 0); err == nil {
+		t.Error("a missing input was read as having no open GOP")
+	}
+}
+
+// TestFirstKeyFrameSearch reads captures that begin mid-GOP. The search
+// follows the stream to its first key frame however long the GOP, and gives
+// up, without a result, at the end of the input or at KeyFrameSearchLimit.
+func TestFirstKeyFrameSearch(t *testing.T) {
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip("requires " + tool)
+		}
+	}
+	directory := t.TempDir()
+	capture := func(name string, encode, cut []string) string {
+		full, input := filepath.Join(directory, name+"-full.mp4"), filepath.Join(directory, name+".mp4")
+		buildFixture(t, append(append([]string{"-f", "lavfi", "-i"}, encode...), full)...)
+		buildFixture(t, append(append([]string{"-i", full, "-ss", "0.5"}, cut...), "-c", "copy", "-copyinkf", input)...)
+		return input
+	}
+	// x264 places a key frame every 250 frames by default: 10.4 s at 24 fps.
+	long := []string{"testsrc2=size=128x96:rate=24:duration=30", "-c:v", "libx264", "-preset", "veryfast"}
+	// One frame a second keeps a GOP of more than five minutes small.
+	sparse := []string{"testsrc2=size=64x64:rate=1:duration=400", "-c:v", "libx264", "-preset", "veryfast",
+		"-g", "331", "-keyint_min", "331", "-sc_threshold", "0", "-bf", "0"}
+	for name, tc := range map[string]struct {
+		input string
+		// earliest is the least presentation time the file's first key frame
+		// must have for the case to be real; negative means it has none.
+		earliest time.Duration
+		found    bool
+	}{
+		"key frame after ten seconds":     {capture("long", long, nil), 9 * time.Second, true},
+		"input ends before a key frame":   {capture("short", long, []string{"-t", "5"}), -1, false},
+		"key frame past the search limit": {capture("sparse", sparse, nil), KeyFrameSearchLimit, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The expected time is the key frame's integer timestamp in the
+			// stream's time base; FFprobe's printed time is rounded.
+			listing, err := exec.Command("ffprobe", "-v", "error", "-select_streams", "0", "-show_entries", "packet=pts,flags:stream=time_base",
+				"-of", "csv=p=1", tc.input).Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var (
+				stream   Stream
+				keyFrame *big.Rat
+			)
+			for _, line := range strings.Split(string(listing), "\n") {
+				fields := strings.Split(line, ",")
+				switch {
+				case fields[0] == "stream":
+					stream.TimeBase = fields[1]
+				case fields[0] == "packet" && keyFrame == nil && strings.Contains(fields[2], "K"):
+					ticks, err := strconv.ParseInt(fields[1], 10, 64)
+					if err != nil {
+						t.Fatal(err)
+					}
+					keyFrame = big.NewRat(ticks, 1)
+				}
+			}
+			tick, ok := new(big.Rat).SetString(stream.TimeBase)
+			if !ok {
+				t.Fatalf("the fixture's time base is %q", stream.TimeBase)
+			}
+			var first *big.Rat
+			if keyFrame != nil {
+				first = keyFrame.Mul(keyFrame, tick)
+			}
+			if (first == nil) != (tc.earliest < 0) || (first != nil && first.Cmp(big.NewRat(int64(tc.earliest), int64(time.Second))) < 0) {
+				t.Fatalf("the fixture's first key frame is at %v s, want none or one after %s", first, tc.earliest)
+			}
+			at, found, err := (FFprobe{}).ProbeFirstKeyFrame(context.Background(), tc.input, stream)
+			if err != nil || found != tc.found || (found && at.Cmp(first) != 0) {
+				t.Fatalf("ProbeFirstKeyFrame() = %v, %t, %v; want found=%t at %v", at, found, err, tc.found, first)
+			}
+		})
+	}
+	stream := Stream{TimeBase: "1/12288"}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, found, err := (FFprobe{}).ProbeFirstKeyFrame(cancelled, filepath.Join(directory, "long.mp4"), stream); !errors.Is(err, context.Canceled) || found {
+		t.Fatalf("a cancelled search returned found=%t, %v", found, err)
+	}
+	if _, _, err := (FFprobe{}).ProbeFirstKeyFrame(context.Background(), filepath.Join(directory, "missing.mp4"), stream); err == nil || errors.Is(err, context.Canceled) {
+		t.Fatalf("a missing input returned %v", err)
+	}
+	if _, _, err := (FFprobe{}).ProbeFirstKeyFrame(context.Background(), filepath.Join(directory, "long.mp4"), Stream{}); err == nil {
+		t.Fatal("a stream without a time base was searched")
+	}
+}
+
+// TestOffsetsAreReadInStreamTicks covers a container whose streams begin
+// between microseconds. FFprobe prints 0.040250 and 0.003333 for these
+// starts, and offsets worked from the printed values would be a third of a
+// microsecond out.
+func TestOffsetsAreReadInStreamTicks(t *testing.T) {
+	t.Parallel()
+	video, audio := int64(966), int64(160)
+	probe := Probe{Format: Format{StartTime: "0.003333"}, Streams: []Stream{
+		{Index: 0, CodecType: "video", TimeBase: "1/24000", StartTime: "0.040250", StartPTS: &video},
+		{Index: 1, CodecType: "audio", TimeBase: "1/48000", StartTime: "0.003333", StartPTS: &audio},
+	}}
+	start, err := probeStart(probe, probe.Streams)
+	if err != nil || start != 3333000 {
+		t.Fatalf("container start = %d, %v", start, err)
+	}
+	// 966/24000 s less 160/48000 s is 36916666.67 ns.
+	if offset, err := referenceOffset(probe.Streams, start); err != nil || offset != 36916667 {
+		t.Fatalf("video offset = %d, %v; want 36916667", offset, err)
+	}
+	if offset, err := streamOffset(probe.Streams, probe.Streams[1], start); err != nil || offset != 0 {
+		t.Fatalf("audio offset = %d, %v; want none", offset, err)
+	}
+	// 295302/24000 s less 160/48000 s is 12300916666.67 ns.
+	if offset, err := PresentationOffset(probe, start, big.NewRat(295302, 24000)); err != nil || offset != 12300916667 {
+		t.Fatalf("key frame offset = %d, %v; want 12300916667", offset, err)
+	}
+	// A start beyond the nanosecond timeline is an error, not a wrapped value.
+	beyond := int64(9223372036855)
+	distant := Stream{Index: 0, CodecType: "video", TimeBase: "1/1000", StartTime: "9223372036.855", StartPTS: &beyond}
+	if offset, err := streamOffset([]Stream{distant}, distant, 0); err == nil {
+		t.Fatalf("a stream start beyond the timeline range gave offset %d", offset)
+	}
+	if offset, err := PresentationOffset(Probe{Streams: []Stream{distant}}, 0, big.NewRat(beyond, 1000)); err == nil {
+		t.Fatalf("a key frame beyond the timeline range gave offset %d", offset)
+	}
+	// Two streams that both print 0.000001: the earlier begins the container
+	// and the later keeps its 300 ns after it.
+	earlier, later := int64(6), int64(9)
+	close := []Stream{
+		{Index: 0, CodecType: "video", TimeBase: "1/10000000", StartTime: "0.000001", StartPTS: &later},
+		{Index: 1, CodecType: "video", TimeBase: "1/10000000", StartTime: "0.000001", StartPTS: &earlier},
+	}
+	for index, want := range []int64{300, 0} {
+		if offset, err := streamOffset(close, close[index], 1000); err != nil || offset != want {
+			t.Fatalf("stream %d offset = %d, %v; want %d", index, offset, err, want)
+		}
+	}
+	// Without ticks the printed times are all there is.
+	printed := []Stream{{Index: 0, CodecType: "video", StartTime: "0.040250"}, {Index: 1, CodecType: "audio", StartTime: "0.003333"}}
+	if offset, err := referenceOffset(printed, start); err != nil || offset != 36917000 {
+		t.Fatalf("printed video offset = %d, %v; want 36917000", offset, err)
+	}
+	// A measured Object's start replaces the source ticks.
+	object := Probe{Streams: []Stream{{Index: 0, CodecType: "video", TimeBase: "1/24000", StartPTS: &video}}}
+	if err := measureObjectPackets(strings.NewReader(`{"packets":[{"stream_index":0,"pts":80,"duration":1001,"flags":"K__"}]}`), &object); err != nil {
+		t.Fatal(err)
+	}
+	if object.Streams[0].StartPTS != nil || object.Streams[0].StartTime != "1/300" {
+		t.Fatalf("measured stream starts at %q with source ticks %v, want 1/300 and none", object.Streams[0].StartTime, object.Streams[0].StartPTS)
 	}
 }

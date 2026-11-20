@@ -58,6 +58,26 @@ func newTimelineCursor(untimedStart, firstTimedStart int64, logger *slog.Logger)
 	return &timelineCursor{untimedStart: untimedStart, firstTimedStart: firstTimedStart, position: untimedStart, logger: logger}
 }
 
+// refuseUnsafeCut refuses a cut after the first that loses pictures. An
+// Object that begins a video stream between its key frames cannot show that
+// stream until the next one. An Object that stores leading pictures it does
+// not show leaves a hole where they would have begun, because the Segment
+// before it ends there.
+func (c *timelineCursor) refuseUnsafeCut(record media.SegmentRecord, hiddenLead int, midGOP bool) error {
+	if !record.Timed || !c.placed {
+		return nil
+	}
+	if midGOP {
+		return withFailure(FailureCodeMediaUnsupported, FailureMessageMediaCutMidGOP, true,
+			fmt.Errorf("segment cut at %s begins a video stream between its key frames", media.Timestamp(record.Start)))
+	}
+	if hiddenLead != 0 {
+		return openGOPCut(fmt.Errorf("segment cut at %s stores %d leading pictures of an open GOP that its MP4 Object does not show",
+			media.Timestamp(record.Start), hiddenLead))
+	}
+	return nil
+}
+
 // place returns the Flow position for record and advances past the Segment's
 // reference-stream span.
 func (c *timelineCursor) place(record media.SegmentRecord, measured objectMeasurement) (int64, error) {
@@ -67,6 +87,9 @@ func (c *timelineCursor) place(record media.SegmentRecord, measured objectMeasur
 		case !c.placed:
 			position = c.firstTimedStart
 		default:
+			if err := c.refuseUnsafeCut(record, measured.hiddenLead, measured.midGOP); err != nil {
+				return 0, err
+			}
 			// The manifest entry starts at the frame the cut was made on. An
 			// open GOP presents frames before that frame from the same Object,
 			// so the Object's presentation begins lead earlier than its entry;
