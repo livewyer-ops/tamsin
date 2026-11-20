@@ -193,6 +193,11 @@ func TestVersionedImageTagsAreNotOverwritten(t *testing.T) {
 
 func checkImageTagAbsence(t *testing.T, script string) {
 	t.Helper()
+	checker, err := filepath.Abs(filepath.Join(repositoryRoot, "scripts", "check-image-tag-absent.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script = "mkdir scripts && ln -s \"$TAG_CHECK\" scripts/check-image-tag-absent.sh\n" + script
 	for _, test := range []struct {
 		name, output, status string
 		allowed              bool
@@ -206,7 +211,7 @@ func checkImageTagAbsence(t *testing.T, script string) {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := runWorkflowShell(t, script, "printf '%s\\n' \"$LOOKUP_OUTPUT\" >&2\nexit \"$LOOKUP_STATUS\"\n",
 				"RUNTIME_IMAGE=ghcr.io/example/app:1.0.0", "GITHUB_REPOSITORY=Example/App", "VERSION=1.0.0",
-				"LOOKUP_OUTPUT="+test.output, "LOOKUP_STATUS="+test.status)
+				"LOOKUP_OUTPUT="+test.output, "LOOKUP_STATUS="+test.status, "TAG_CHECK="+checker)
 			if (err == nil) != test.allowed {
 				t.Fatalf("tag check error=%v, allowed=%v", err, test.allowed)
 			}

@@ -37,15 +37,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Check immutable tag
         id: immutable-tag
-        run: |
-          if lookup=$(docker buildx imagetools inspect "$RUNTIME_IMAGE" 2>&1); then
-            echo "Runtime tag already exists; increment its revision before rebuilding." >&2
-            exit 1
-          fi
-          case "$lookup" in
-            "ERROR: $RUNTIME_IMAGE: not found") ;;
-            *) printf 'Cannot establish that the runtime tag is absent: %s\n' "$lookup" >&2; exit 1 ;;
-          esac
+        run: bash scripts/check-image-tag-absent.sh "$RUNTIME_IMAGE"
       - name: Build and publish runtime
         id: runtime
         run: |

@@ -7,6 +7,9 @@ TAMSIN_E2E_VERSION ?= 8.1 8.2
 VERSION ?= dev
 COMMIT ?= $(shell commit=$$(git rev-parse HEAD 2>/dev/null) || commit=unknown; test -z "$$(git status --porcelain --untracked-files=no 2>/dev/null)" || commit=$$commit-dirty; printf '%s' "$$commit")
 BUILD_DATE ?= 1970-01-01T00:00:00Z
+# The release binaries, as GOOS-GOARCH. The release workflow publishes whatever
+# `make dist` writes to dist/.
+DIST_TARGETS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64
 LDFLAGS := -s -w -X github.com/livewyer-ops/tamsin/internal/version.Version=$(VERSION) -X github.com/livewyer-ops/tamsin/internal/version.Commit=$(COMMIT) -X github.com/livewyer-ops/tamsin/internal/version.Date=$(BUILD_DATE)
 
 .PHONY: all build clean verify format-check mod-check lint test coverage vuln smoke dist image image-smoke e2e e2e-existing
@@ -54,12 +57,12 @@ verify: format-check mod-check lint test vuln smoke
 
 dist:
 	@mkdir -p dist
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o dist/tamsin-linux-amd64 ./cmd/tamsin
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o dist/tamsin-linux-arm64 ./cmd/tamsin
-	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o dist/tamsin-darwin-amd64 ./cmd/tamsin
-	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o dist/tamsin-darwin-arm64 ./cmd/tamsin
+	@set -e; for target in $(DIST_TARGETS); do \
+		echo "building dist/tamsin-$$target"; \
+		GOOS=$${target%-*} GOARCH=$${target#*-} CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o dist/tamsin-$$target ./cmd/tamsin; \
+	done
 	./scripts/build-third-party-licenses.sh
-	(cd dist && sha256sum tamsin-linux-amd64 tamsin-linux-arm64 tamsin-darwin-amd64 tamsin-darwin-arm64 tamsin-third-party-licenses.tar.gz > SHA256SUMS)
+	(cd dist && sha256sum $(addprefix tamsin-,$(DIST_TARGETS)) tamsin-third-party-licenses.tar.gz > SHA256SUMS)
 
 image:
 	docker build --pull --build-arg VERSION='$(VERSION)' --build-arg COMMIT='$(COMMIT)' --build-arg BUILD_DATE='$(BUILD_DATE)' $(if $(FFMPEG_RUNTIME_IMAGE),--build-arg FFMPEG_RUNTIME_IMAGE='$(FFMPEG_RUNTIME_IMAGE)') -t $(IMAGE) .
