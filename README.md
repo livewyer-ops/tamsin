@@ -5,14 +5,14 @@
 [![TAMS 8.2](https://img.shields.io/badge/BBC%20TAMS-8.2-5B2C6F)](docs/compatibility.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-TAMSin is a command-line utility for ingesting media into a
-[BBC Time-addressable Media Store](https://github.com/bbc/tams). It creates
-Flow graphs, uploads and registers Media Objects, and verifies the stored bytes.
-It runs as a standalone client. [TAMOSS](https://github.com/livewyer-ops/tamoss)
-is one compatible store; Go and Kubernetes are not required to run TAMSin.
+TAMSin ingests MP4 and MPEG-TS media into [TAMS](https://github.com/bbc/tams)
+as time-addressable Segments, so clients can retrieve the part of a programme
+they need. It runs as a standalone command-line client and verifies the stored
+bytes. [TAMOSS](https://github.com/livewyer-ops/tamoss) is one compatible store.
+You can run TAMSin without Go or Kubernetes.
 
-Version `8.2.0-in3` accepts MP4 and MPEG-TS. Upgrading renews generated Flow
-IDs. Read the [compatibility notes](docs/compatibility.md#media-policy-exception) before
+Upgrading to `8.2.0-in3` renews generated Flow IDs. Read the
+[compatibility notes](docs/compatibility.md#media-policy-exception) before
 resuming an ingest from an earlier version.
 
 ## Features
@@ -66,29 +66,37 @@ Run `tamsin --version`. If your shell cannot find it, see [PATH setup](docs/oper
 
 ## Quick start
 
-To store an MP4 or MPEG-TS file as one Object with its original bytes, use
-`--profile preserve`. Point `ENDPOINT` at a TAMS 8.2 or 8.1 service. Supply a
-bearer token authorised to ingest in `TAMSIN_AUTH_TOKEN` through secret injection or an
-[interactive prompt](docs/configuration.md#authentication).
+Use `essence-segments` to give each track its own Flow. TAMSin targets
+10 seconds per Segment so readers can retrieve a time range from an individual
+track. Set `ENDPOINT` to your TAMS 8.2 or 8.1 service and supply a bearer
+token authorised to ingest in `TAMSIN_AUTH_TOKEN` through secret injection or
+an [interactive prompt](docs/configuration.md#authentication).
 
 ```sh
 ENDPOINT=https://tams.example.com
 export TAMSIN_AUTH_MODE=bearer
+tamsin ingest --profile essence-segments -i programme.mp4 -o "$ENDPOINT"
+```
+
+The first ingest reports `INGESTED AND VERIFIED`. Repeat the command with the
+same file and settings to verify the stored Objects. The receipt reports
+`RESUMED AND VERIFIED` with zero media bytes uploaded.
+
+Use `preserve` when you need the original file byte for byte.
+
+```sh
 tamsin ingest --profile preserve -i programme.mp4 -o "$ENDPOINT"
 ```
 
-The first ingest reports `INGESTED AND VERIFIED`. Run the same command again
-with the same file to read back the stored Object. The receipt reports
-`RESUMED AND VERIFIED` with zero media bytes uploaded. [Your first ingest](docs/first-ingest.md)
-walks through readiness checks, a generated audio sample and an exact dry run.
+[Your first ingest](docs/first-ingest.md) walks through whole-file ingest and
+verification with a generated audio sample.
 
 Allow temporary disk space and processing time, including for exact dry runs.
 Video analysis can scan the entire input even with `preserve`, and default
 verification may download uploaded Objects again. See
 [resource budgets and verification costs](docs/operations.md).
 
-When readers need short time ranges or individual tracks, choose a
-[profile for that access pattern](#profiles). For remote media, follow
+See [Profiles](#profiles) for other packaging options. For remote media, follow
 [Ingest an HTTP or S3 input](docs/configuration.md#ingest-an-http-or-s3-input).
 
 ### Using Docker
@@ -102,7 +110,7 @@ docker run --rm \
   --mount "type=bind,src=$PWD/programme.mp4,dst=/media/programme.mp4,readonly" \
   -e TAMSIN_ENDPOINT="$ENDPOINT" -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_TOKEN \
   ghcr.io/livewyer-ops/tamsin:8.2.0-in3 \
-  ingest --profile preserve --input /media/programme.mp4
+  ingest --profile essence-segments --input /media/programme.mp4
 ```
 
 The input must be readable by UID 65532 and the endpoint reachable from the
