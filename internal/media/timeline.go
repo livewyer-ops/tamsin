@@ -21,11 +21,20 @@ func ParseSeconds(value string) (int64, error) {
 	if !ok {
 		return 0, fmt.Errorf("invalid seconds value %q", value)
 	}
-	scaled := new(big.Rat).Mul(rational, big.NewRat(nanosecondsPerSecond, 1))
+	nanoseconds, ok := roundNanoseconds(rational)
+	if !ok {
+		return 0, fmt.Errorf("seconds value %q exceeds supported timeline range", value)
+	}
+	return nanoseconds, nil
+}
+
+// roundNanoseconds rounds a time in seconds to the nearest nanosecond, ties
+// away from zero. It reports false for a time the timeline cannot hold.
+func roundNanoseconds(seconds *big.Rat) (int64, bool) {
+	scaled := new(big.Rat).Mul(seconds, big.NewRat(nanosecondsPerSecond, 1))
 	numerator := scaled.Num()
 	denominator := scaled.Denom()
 	quotient, remainder := new(big.Int).QuoRem(numerator, denominator, new(big.Int))
-	// Round to the nearest nanosecond; ties round away from zero.
 	if new(big.Int).Lsh(new(big.Int).Abs(remainder), 1).Cmp(denominator) >= 0 {
 		if numerator.Sign() < 0 {
 			quotient.Sub(quotient, big.NewInt(1))
@@ -33,10 +42,7 @@ func ParseSeconds(value string) (int64, error) {
 			quotient.Add(quotient, big.NewInt(1))
 		}
 	}
-	if !quotient.IsInt64() {
-		return 0, fmt.Errorf("seconds value %q exceeds supported timeline range", value)
-	}
-	return quotient.Int64(), nil
+	return quotient.Int64(), quotient.IsInt64()
 }
 func ParseTimestamp(value string) (int64, error) {
 	value = strings.TrimSpace(value)
@@ -145,20 +151,28 @@ func transportTicks(ns int64) int64 {
 	return ns/nanosecondsPerSecond*90000 + rem/nanosecondsPerSecond
 }
 
+// TransportTicks counts the ticks of the 90 kHz clock in a time, to the nearest.
+func TransportTicks(nanoseconds int64) int64 {
+	return transportTicks(nanoseconds)
+}
+
 func mpegTSPhase(ns int64) int64 {
 	ticks := transportTicks(ns) & (mpegTSWrap - 1)
 	return (ticks*nanosecondsPerSecond + 45000) / 90000
 }
 
 // TransportPosition restores the rollover count closest to the expected
-// position. FFprobe can return a signed or an unwrapped timestamp.
+// position. FFprobe can return a signed or an unwrapped timestamp, so the
+// reference is first reduced to its tick on the wire: one tick in one
+// rollover epoch is then one nanosecond value, however it was reported.
 func TransportPosition(expected, reference int64) (int64, error) {
-	wraps := (transportTicks(expected) - transportTicks(reference) + mpegTSWrap/2) >> 33
+	phase := mpegTSPhase(reference)
+	wraps := (transportTicks(expected) - transportTicks(phase) + mpegTSWrap/2) >> 33
 	shift, err := transportWrapTime(wraps)
 	if err != nil {
 		return 0, err
 	}
-	return TimestampShift(reference, shift)
+	return TimestampShift(phase, shift)
 }
 
 // TransportEpoch is the rollover base for the first presented sample in
@@ -168,5 +182,9 @@ func TransportEpoch(position int64) (int64, error) {
 }
 
 func transportWrapTime(wraps int64) (int64, error) {
-	return ParseSeconds(new(big.Rat).SetFrac64(wraps*mpegTSWrap, 90000).RatString())
+	shift, ok := roundNanoseconds(new(big.Rat).SetFrac64(wraps*mpegTSWrap, 90000))
+	if !ok {
+		return 0, errors.New("transport timestamp rollover exceeds supported timeline range")
+	}
+	return shift, nil
 }

@@ -344,20 +344,34 @@ func TestSharedObjectDispositionsFollowItsTimerange(t *testing.T) {
 // and ends with the Flows, Segments and Objects of a run that never stopped.
 func TestRetryAfterFailedRenderMatchesAnUninterruptedRun(t *testing.T) {
 	requireEncoders(t, "aac", "libx264")
-	input := streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=96x64:rate=25:duration=14",
-		"-f", "lavfi", "-i", "sine=sample_rate=48000:duration=14",
-		"-c:v", "libx264", "-preset", "veryfast", "-x264-params", "keyint=50:min-keyint=50:scenecut=0:bframes=2:open-gop=0", "-c:a", "aac")
+	fixture := func(frameRate, sampleRate string) string {
+		return streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=96x64:rate="+frameRate+":duration=14",
+			"-f", "lavfi", "-i", "sine=sample_rate="+sampleRate+":duration=14",
+			"-c:v", "libx264", "-preset", "veryfast", "-x264-params", "keyint=50:min-keyint=50:scenecut=0:bframes=2:open-gop=0", "-c:a", "aac")
+	}
 	// The tool lets FFmpeg render 7.25 s and close its outputs, then reports a failure.
 	tool := filepath.Join(t.TempDir(), "ffmpeg")
 	script := "#!/bin/sh\ncase \" $* \" in\n*' -segment_list '*) ffmpeg -t 7.25 \"$@\" || exit $?; exit 23 ;;\n*) exec ffmpeg \"$@\" ;;\nesac\n"
 	if err := os.WriteFile(tool, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, storage := range []media.EssenceStorage{media.EssenceStorageMuxed, media.EssenceStorageIndependent} {
-		t.Run(string(storage), func(t *testing.T) {
+	for _, render := range []struct {
+		name, input string
+		format      media.SegmentFormat
+		storage     media.EssenceStorage
+	}{
+		{"muxed", fixture("25", "48000"), media.SegmentFormatSource, media.EssenceStorageMuxed},
+		{"independent", fixture("25", "48000"), media.SegmentFormatSource, media.EssenceStorageIndependent},
+		// A Segment of these rates ends where the Object after it begins,
+		// which a failed render has still closed.
+		{"muxed MPEG-TS at 23.976 fps", fixture("24000/1001", "44100"), media.SegmentFormatMPEGTS, media.EssenceStorageMuxed},
+		{"independent MPEG-TS at 23.976 fps and 44.1 kHz", fixture("24000/1001", "44100"), media.SegmentFormatMPEGTS, media.EssenceStorageIndependent},
+	} {
+		t.Run(render.name, func(t *testing.T) {
+			input, storage := render.input, render.storage
 			run := func(client *fakeClient, executable string) BatchResult {
 				t.Helper()
-				pipeline, err := New(Config{InputMode: InputStage, SegmentDuration: 2 * time.Second, SegmentFormat: media.SegmentFormatSource,
+				pipeline, err := New(Config{InputMode: InputStage, SegmentDuration: 2 * time.Second, SegmentFormat: render.format,
 					EssenceStorage: storage, VerificationMode: VerificationReadback, TempDirectory: t.TempDir()},
 					client, media.FFprobe{}, media.FFmpeg{Executable: executable}, discardLogger(), nil)
 				if err != nil {

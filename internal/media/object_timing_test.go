@@ -106,6 +106,94 @@ func TestTransportStreamTracksShareOnePresentationClock(t *testing.T) {
 	if err != nil || start != -21333333 || duration != 64000000 {
 		t.Fatalf("mixed-epoch bounds: start=%d duration=%d error=%v", start, duration, err)
 	}
+	// Each stream's packets are named on that one clock, and the reference
+	// stream's are what a Segment is placed by.
+	if audio := probe.Streams[1]; audio.FirstPTS != -1920 || !slices.Equal(audio.LastPTS, []int64{-1920, 0, 1920}) {
+		t.Fatalf("audio packets run from tick %d and end with %v, want -1920, 0 and 1920", audio.FirstPTS, audio.LastPTS)
+	}
+	reference, err := ProbeReference(probe)
+	if err != nil || !reference.Ticks || reference.Audio || reference.FirstPTS != 0 || !slices.Equal(reference.LastPTS, []int64{0}) {
+		t.Fatalf("reference = %+v, %v, want the one video packet at tick 0", reference, err)
+	}
+	// Three AAC frames of 1024 samples at 48 kHz are 1920 ticks apart.
+	probe.Streams = probe.Streams[1:]
+	if reference, err = ProbeReference(probe); err != nil || !reference.Ticks || !reference.Audio || reference.FirstPTS != -1920 ||
+		reference.CyclePackets != 1 || reference.CycleTicks != 1920 {
+		t.Fatalf("audio reference = %+v, %v, want packets from tick -1920 that are 1920 ticks apart", reference, err)
+	}
+}
+
+// TestPacketCycle covers the packet period read from a measured MPEG-TS
+// stream: a video stream's frame period, and for audio the whole number of
+// samples nearest the mean step between its packets.
+func TestPacketCycle(t *testing.T) {
+	// first and last are the ticks nearest the first and the last of count
+	// packets that are ticks over packets apart.
+	last := func(packets, ticks int64, count int64) []int64 {
+		return []int64{(2*(count-1)*ticks + packets) / (2 * packets)}
+	}
+	for _, tc := range []struct {
+		name           string
+		stream         Stream
+		packets, ticks int64
+	}{
+		{"29.97 fps", Stream{CodecType: "video", AverageFrameRate: "30000/1001"}, 1, 3003},
+		{"23.976 fps", Stream{CodecType: "video", AverageFrameRate: "24000/1001"}, 4, 15015},
+		{"59.94 fps", Stream{CodecType: "video", AverageFrameRate: "60000/1001"}, 2, 3003},
+		{"video of no stated rate", Stream{CodecType: "video", AverageFrameRate: "0/0", RealFrameRate: "0/0"}, 0, 0},
+		{"48 kHz AAC", Stream{CodecType: "audio", SampleRate: "48000", SampleCount: 94, LastPTS: last(1, 1920, 94)}, 1, 1920},
+		{"44.1 kHz AAC", Stream{CodecType: "audio", SampleRate: "44100", SampleCount: 86, LastPTS: last(49, 102400, 86)}, 49, 102400},
+		{"44.1 kHz AAC in three packets", Stream{CodecType: "audio", SampleRate: "44100", SampleCount: 3, LastPTS: last(49, 102400, 3)}, 49, 102400},
+		{"44.1 kHz MPEG audio", Stream{CodecType: "audio", SampleRate: "44100", SampleCount: 40, LastPTS: last(49, 115200, 40)}, 49, 115200},
+		{"one audio packet", Stream{CodecType: "audio", SampleRate: "44100", SampleCount: 1, LastPTS: []int64{0}}, 0, 0},
+		{"subtitles", Stream{CodecType: "subtitle", SampleCount: 4, LastPTS: []int64{9000}}, 0, 0},
+	} {
+		if packets, ticks := packetCycle(tc.stream); packets != tc.packets || ticks != tc.ticks {
+			t.Errorf("%s: %d packets last %d ticks, want %d and %d", tc.name, packets, ticks, tc.packets, tc.ticks)
+		}
+	}
+}
+
+// TestPictureCycle covers which source stream gives a render its frame
+// period: the one it is cut on, and only where that is video.
+func TestPictureCycle(t *testing.T) {
+	source := []Stream{
+		{Index: 0, CodecType: "audio", SampleRate: "48000"},
+		{Index: 1, CodecType: "video", AverageFrameRate: "24000/1001"},
+		{Index: 2, CodecType: "video", AverageFrameRate: "25/1"},
+	}
+	for _, tc := range []struct {
+		name           string
+		streams        []Stream
+		index          int
+		packets, ticks int64
+	}{
+		{"a multiplex, cut on its first video", source, AllStreams, 4, 15015},
+		{"a video essence", source, 2, 1, 3600},
+		{"an audio essence", source, 0, 0, 0},
+		{"a multiplex without video", source[:1], AllStreams, 0, 0},
+		{"no stream", nil, AllStreams, 0, 0},
+	} {
+		if packets, ticks := PictureCycle(tc.streams, tc.index); packets != tc.packets || ticks != tc.ticks {
+			t.Errorf("%s: %d pictures last %d ticks, want %d and %d", tc.name, packets, ticks, tc.packets, tc.ticks)
+		}
+	}
+}
+
+// TestLatestPacketsAreKeptInTheOrderTheyAreShown covers the timestamps a
+// measurement keeps of a stream's last packets, which video stores out of
+// the order it shows them in.
+func TestLatestPacketsAreKeptInTheOrderTheyAreShown(t *testing.T) {
+	var latest []int64
+	// Each group of three is stored as it is decoded: the last shown first.
+	for group := range int64(40) {
+		for _, pts := range []int64{2, 0, 1} {
+			latest = keepLatest(latest, 3*group+pts)
+		}
+	}
+	if len(latest) != latestPackets || !slices.IsSorted(latest) || latest[0] != 120-latestPackets || latest[latestPackets-1] != 119 {
+		t.Fatalf("latest = %v, want the last %d of 120 in order", latest, latestPackets)
+	}
 }
 
 // TestVideoCutEvidence covers what an Object's packets say about the cut that

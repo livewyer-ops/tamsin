@@ -827,6 +827,19 @@ type objectMeasurement struct {
 	// midGOP is set when the Object begins a video stream other than its
 	// reference stream between that stream's key frames.
 	midGOP bool
+	// firstPTS is when the reference stream's first packet is shown and
+	// lastPTS when its last ones are, in order, on the 90 kHz clock of an
+	// MPEG-TS Object, which ticks says this is. cyclePackets of its packets
+	// last cycleTicks ticks, where that is known. audio says the reference
+	// stream is audio. observed says the period is the step the packets
+	// take and no rate that is stated.
+	firstPTS                 int64
+	lastPTS                  []int64
+	cyclePackets, cycleTicks int64
+	ticks, audio, observed   bool
+	// next is the Object after this one in its output, where it was measured
+	// ahead of its turn.
+	next *objectMeasurement
 }
 
 // ingestIndependently extracts each elementary stream into its own Media
@@ -1302,6 +1315,8 @@ func measureObject(probe media.Probe, size int64, checksum string) (objectMeasur
 	entry.referenceStart, entry.referenceSpan, entry.measuredSpan = reference.Start, reference.Span, reference.MeasuredSpan
 	entry.period, entry.regular = reference.Period, reference.Regular
 	entry.keyFrames, entry.lastSample, entry.measured = reference.KeyFrames, reference.LastSample, reference.Measured
+	entry.firstPTS, entry.lastPTS, entry.ticks, entry.audio = reference.FirstPTS, reference.LastPTS, reference.Ticks, reference.Audio
+	entry.cyclePackets, entry.cycleTicks = reference.CyclePackets, reference.CycleTicks
 	entry.lastObjectSample = entry.lastSample
 	for _, stream := range probe.Streams {
 		if stream.Empty || stream.Disposition.AttachedPicture != 0 || stream.LastSampleTime == "" {

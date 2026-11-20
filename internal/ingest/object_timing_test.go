@@ -4,14 +4,19 @@ import (
 	"bytes"
 	"context"
 	"math"
+	"math/big"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/livewyer-ops/tamsin/internal/media"
+	"github.com/livewyer-ops/tamsin/internal/source"
+	"github.com/livewyer-ops/tamsin/internal/tams"
 )
 
 // placeRendered places rendered Segments as a segmented ingest does: through
@@ -537,5 +542,237 @@ func TestTransportAudioPrerollPrecedesFirstPicture(t *testing.T) {
 	video, audio := probe.Streams[0].StartTime, probe.Streams[1].StartTime
 	if video != "0.000000" || audio != "-0.021333" {
 		t.Fatalf("video starts at %s and audio at %s, want zero and 1024 samples of AAC preroll at 48 kHz", video, audio)
+	}
+}
+
+// TestMPEGTSSegmentsFollowTheTransportClock renders sources whose sample
+// periods are not whole nanoseconds, and some not whole ticks of the 90 kHz
+// clock, and holds every Segment to the clock its Object carries. A Segment
+// begins on its Object's first sample, every sample of the Object falls
+// inside it once ts_offset has restored the rollover count, Segments that
+// abut in the source abut on the Flow, a gap in the source stays a gap, and
+// the Flow ends where the last sample does. Each source is placed from a
+// Flow start at zero and from one two seconds before the clock's 33-bit
+// rollover.
+func TestMPEGTSSegmentsFollowTheTransportClock(t *testing.T) {
+	requireEncoders(t, "aac", "libx264")
+	const (
+		wrap = int64(1) << 33
+		// rollover is how long the clock takes to wrap, to the nanosecond.
+		rollover = int64(95443_717688889)
+	)
+	ticks := func(nanoseconds int64) int64 {
+		return new(big.Int).Div(new(big.Int).Add(new(big.Int).Mul(big.NewInt(nanoseconds), big.NewInt(90000)), big.NewInt(500_000_000)), big.NewInt(1_000_000_000)).Int64()
+	}
+	// position is where a tick is on the Flow as AppNote 0002 restores it:
+	// the rollovers before it, which ts_offset carries, then its 33 bits.
+	position := func(tick int64) int64 {
+		return tick/wrap*rollover + (tick%wrap*1_000_000_000+45000)/90000
+	}
+	video := func(rate string) string {
+		return streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=128x96:rate="+rate+":duration=12",
+			"-c:v", "libx264", "-preset", "veryfast", "-x264-params", "keyint=50:min-keyint=50:scenecut=0:bframes=2")
+	}
+	audio := func(rate string) string {
+		return streamFixture(t, ".mp4", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate="+rate+":duration=12", "-c:a", "aac")
+	}
+	// late shows every picture from the fourth key frame on that many ticks
+	// later. MPEG-TS input is timed in the ticks themselves.
+	late := func(filename string, ticks int) string {
+		transport := streamFixture(t, ".ts", "-i", filename, "-c", "copy")
+		shift := "+if(gte(N\\,150)\\," + strconv.Itoa(ticks) + "\\,0)"
+		return streamFixture(t, ".ts", "-i", transport, "-c", "copy", "-bsf:v", "setts=pts=PTS"+shift+":dts=DTS"+shift)
+	}
+	ntsc, film := video("30000/1001"), video("24000/1001")
+	for _, fixture := range []struct {
+		name, filename, format string
+		cut                    time.Duration
+		// storage is independent unless it says otherwise.
+		storage media.EssenceStorage
+		// period is the sample period in ticks where it is a whole number of
+		// them. Where it is not, the clock rounds each sample and period is
+		// zero.
+		period int64
+		// priming is how many ticks before the Flow the first Object begins.
+		priming int64
+		// gap is the hole the source has at one boundary, in ticks.
+		gap int64
+		// samples counts the packets the Flow shows.
+		samples int
+		// duration is what the reference stream lasts, gap included, where
+		// its last sample lasts a known time.
+		duration int64
+		// arguments and metadata make the render a custom one.
+		arguments []string
+		metadata  tams.Flow
+	}{
+		// 360 pictures of 3003 ticks.
+		{name: "29.97 fps video", filename: ntsc, format: "urn:x-nmos:format:video", cut: time.Second, period: 3003, samples: 360, duration: 12_012_000_000},
+		// An AAC frame of 1024 samples is 1920 ticks, and one frame primes the decoder.
+		{name: "48 kHz audio", filename: audio("48000"), format: "urn:x-nmos:format:audio", cut: 2 * time.Second, period: 1920, priming: 1920, samples: 563, duration: 12_000_000_000},
+		// Six pictures are missing.
+		{name: "29.97 fps video with a gap", filename: late(ntsc, 18018), format: "urn:x-nmos:format:video", cut: time.Second, period: 3003, gap: 18018, samples: 360, duration: 12_212_200_000},
+		// The shortest gap the clock can carry is not taken for its rounding.
+		{name: "29.97 fps video with a gap of one tick", filename: late(ntsc, 1), format: "urn:x-nmos:format:video", cut: time.Second, period: 3003, gap: 1, samples: 360, duration: 12_012_011_111},
+		// 288 pictures of 3753.75 ticks.
+		{name: "23.976 fps video", filename: film, format: "urn:x-nmos:format:video", cut: time.Second, samples: 288, duration: 12_012_000_000},
+		// 720 pictures of 1501.5 ticks.
+		{name: "59.94 fps video", filename: video("60000/1001"), format: "urn:x-nmos:format:video", cut: time.Second, samples: 720, duration: 12_012_000_000},
+		// An AAC frame is 2089.8 ticks, which FFmpeg rounds up and FFprobe down.
+		{name: "44.1 kHz audio", filename: audio("44100"), format: "urn:x-nmos:format:audio", cut: 2 * time.Second, priming: 2090, samples: 517, duration: 12_000_000_000},
+		// Six pictures are missing, which is 22522.5 ticks.
+		{name: "23.976 fps video with a gap", filename: late(film, 22523), format: "urn:x-nmos:format:video", cut: time.Second, gap: 22523, samples: 288, duration: 12_262_255_556},
+		// One tick is a gap here too, though the clock moves a picture by as much.
+		{name: "23.976 fps video with a gap of one tick", filename: late(film, 1), format: "urn:x-nmos:format:video", cut: time.Second, gap: 1, samples: 288, duration: 12_012_011_111},
+		// One picture an Object: the cadence is carried from each to the next.
+		{name: "23.976 fps video of one picture a Segment", format: "urn:x-nmos:format:video", cut: 40 * time.Millisecond, samples: 12, duration: 500_500_000,
+			filename: streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=128x96:rate=24000/1001:duration=0.5", "-c:v", "libx264", "-preset", "veryfast", "-g", "1")},
+		// 200 pictures of 1800 ticks, then 100 of 3600. The rate FFprobe states
+		// for the whole source is one that no two pictures keep, and the rate
+		// it states for an Object of the slower part is the faster one, so
+		// that Object is paced by the step its own pictures take.
+		{name: "50 fps video that slows to 25 fps", format: "urn:x-nmos:format:video", cut: time.Second, samples: 300,
+			filename: streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=128x96:rate=50:duration=8", "-vf", "select=if(lt(t\\,4)\\,1\\,not(mod(n\\,2)))", "-fps_mode", "vfr",
+				"-c:v", "libx264", "-preset", "veryfast", "-x264-params", "keyint=50:min-keyint=50:scenecut=0:bframes=0")},
+		// 99 pictures of 3600 ticks, then 202 of 1800, the first of them one
+		// before a key frame. The Object that ends there is not taken to run
+		// a slow picture's length past its last.
+		{name: "25 fps video that quickens to 50 fps before a cut", format: "urn:x-nmos:format:video", cut: time.Second, samples: 301,
+			filename: streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=128x96:rate=50:duration=8", "-vf", "select=if(lt(n\\,198)\\,not(mod(n\\,2))\\,1)", "-fps_mode", "vfr",
+				"-c:v", "libx264", "-preset", "veryfast", "-x264-params", "keyint=50:min-keyint=50:scenecut=0:bframes=0")},
+		// A render that changes the rate is not paced by its source's: 20
+		// pictures of 1800 ticks, one an Object, from a source of 25 fps.
+		{name: "25 fps video rendered at 50 fps, one picture a Segment", format: "urn:x-nmos:format:video", storage: media.EssenceStorageMuxed,
+			cut: 20 * time.Millisecond, period: 1800, samples: 20, duration: 400_000_000,
+			filename:  streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=128x96:rate=25:duration=0.4", "-c:v", "libx264", "-preset", "veryfast"),
+			arguments: []string{"-vf", "fps=50", "-c:v", "libx264", "-preset", "veryfast", "-x264-params", "keyint=1:min-keyint=1:scenecut=0:bframes=0"},
+			metadata: tams.Flow{"codec": "video/h264", "essence_parameters": map[string]any{
+				"frame_width": 128, "frame_height": 96, "frame_rate": map[string]any{"numerator": 50, "denominator": 1}}}},
+		// An Object whose own pictures keep the rate it states is paced by
+		// that rate: 144 pictures of 3753.75 ticks from a source of 25 fps,
+		// 25 to an Object, so that each Object begins between two ticks.
+		{name: "25 fps video rendered at 23.976 fps", format: "urn:x-nmos:format:video", storage: media.EssenceStorageMuxed,
+			cut: time.Second, samples: 144, duration: 6_006_000_000,
+			filename:  streamFixture(t, ".mp4", "-f", "lavfi", "-i", "testsrc2=size=128x96:rate=25:duration=6", "-c:v", "libx264", "-preset", "veryfast"),
+			arguments: []string{"-vf", "fps=24000/1001", "-c:v", "libx264", "-preset", "veryfast", "-x264-params", "keyint=25:min-keyint=25:scenecut=0:bframes=2"},
+			metadata: tams.Flow{"codec": "video/h264", "essence_parameters": map[string]any{
+				"frame_width": 128, "frame_height": 96, "frame_rate": map[string]any{"numerator": 24000, "denominator": 1001}}}},
+		// A multiplex is cut and placed on its video.
+		{name: "23.976 fps video muxed with 44.1 kHz audio", format: "urn:x-nmos:format:multi", storage: media.EssenceStorageMuxed, cut: time.Second, samples: 288, duration: 12_012_000_000,
+			filename: streamFixture(t, ".mp4", "-i", film, "-i", audio("44100"), "-map", "0:v", "-map", "1:a", "-c", "copy")},
+	} {
+		for _, start := range []int64{0, 95441_717688889} {
+			t.Run(fixture.name+"/from "+media.Timestamp(start), func(t *testing.T) {
+				client := newFakeClient()
+				storage, stream := media.EssenceStorageIndependent, "v:0"
+				if fixture.storage != "" {
+					storage = fixture.storage
+				}
+				if fixture.format == "urn:x-nmos:format:audio" {
+					stream = "a:0"
+				}
+				pipeline, err := New(Config{Start: start, TempDirectory: t.TempDir(), SegmentDuration: fixture.cut,
+					SegmentFormat: media.SegmentFormatMPEGTS, EssenceStorage: storage, FFmpegArgs: fixture.arguments, FlowMetadata: fixture.metadata},
+					client, media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				batch, err := pipeline.Run(t.Context(), []source.Item{localSource(fixture.filename)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if batch.Succeeded != 1 {
+					t.Fatalf("run failed: %+v: %s", batch.Results[0].Failure, batch.Results[0].Error)
+				}
+				segments := flowSegments(t, client, fixture.format)
+				if len(segments) < 5 {
+					t.Fatalf("%d Segments, want several boundaries", len(segments))
+				}
+				directory := t.TempDir()
+				previous, gaps, samples := start, 0, 0
+				for index, segment := range segments {
+					from, to := segmentBounds(t, segment.Timerange)
+					switch {
+					case from == previous:
+					case fixture.gap > 0 && ticks(from)-ticks(previous) == fixture.gap:
+						gaps++
+					default:
+						t.Fatalf("Segment %d begins at %s, %d ns from the end of the one before", index, media.Timestamp(from), from-previous)
+					}
+					previous = to
+					first := ticks(from)
+					if from != position(first) {
+						t.Fatalf("Segment %d begins at %s, which is not a tick of the clock", index, media.Timestamp(from))
+					}
+					offset := ""
+					if first >= wrap {
+						offset = media.Timestamp(rollover)
+					}
+					if segment.TSOffset != offset {
+						t.Fatalf("Segment %d has ts_offset %q, want %q", index, segment.TSOffset, offset)
+					}
+					if _, shown := segmentBounds(t, segment.ObjectTimerange); shown+first/wrap*rollover < to {
+						t.Fatalf("Segment %d is %s, and its Object's own range %s ends before it", index, segment.Timerange, segment.ObjectTimerange)
+					}
+					path := filepath.Join(directory, strconv.Itoa(index)+".ts")
+					client.lock.Lock()
+					object := client.objects[segment.ObjectID]
+					client.lock.Unlock()
+					if err := os.WriteFile(path, object, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					output, err := exec.Command("ffprobe", "-v", "error", "-select_streams", stream, "-show_entries", "packet=pts", "-of", "csv=p=0", path).Output()
+					if err != nil {
+						t.Fatal(err)
+					}
+					// Each packet is read by how far after the Segment's first
+					// tick it is shown, whichever side of a rollover FFprobe
+					// reports it on. Every one is inside the Segment, and one
+					// is on its first tick.
+					earliest, latest := wrap, int64(-1)
+					for _, line := range strings.Fields(string(output)) {
+						pts, err := strconv.ParseInt(strings.TrimRight(line, ","), 10, 64)
+						if err != nil {
+							t.Fatal(err)
+						}
+						after := ((pts-first)%wrap + wrap) % wrap
+						if index == 0 && fixture.priming > 0 && after == wrap-fixture.priming {
+							continue
+						}
+						if at := position(first + after); after >= wrap/2 || at >= to {
+							t.Fatalf("Segment %d is %s and its Object shows a sample at tick %d, %d ticks from its start", index, segment.Timerange, pts, after)
+						}
+						earliest, latest = min(earliest, after), max(latest, after)
+						samples++
+					}
+					if earliest != 0 {
+						t.Fatalf("Segment %d begins on tick %d, and its Object's first sample is %d ticks later", index, first%wrap, earliest)
+					}
+					// A multiplex's last Segment runs to the end of its last stream.
+					if stream == "v:0" && (storage != media.EssenceStorageMuxed || index < len(segments)-1) {
+						if last := media.Timestamp(to - position(first+latest)); segment.LastDuration != last {
+							t.Fatalf("Segment %d has last_duration %s, and its last picture is shown %s before it ends", index, segment.LastDuration, last)
+						}
+					}
+					if fixture.period > 0 && index < len(segments)-1 && (ticks(to)-first)%fixture.period != 0 {
+						t.Fatalf("Segment %d spans %d ticks, want whole samples of %d", index, ticks(to)-first, fixture.period)
+					}
+				}
+				if (fixture.gap > 0) != (gaps == 1) {
+					t.Fatalf("the Segments leave %d gaps, want the one of %d ticks the source has, if it has one", gaps, fixture.gap)
+				}
+				if samples != fixture.samples {
+					t.Fatalf("the Segments show %d samples, want %d", samples, fixture.samples)
+				}
+				// A period that is not whole ticks ends between two, and the Flow on the nearer.
+				end, slack := start+fixture.duration, int64(0)
+				if fixture.period == 0 {
+					slack = 11112 / 2
+				}
+				if fixture.duration > 0 && (previous < end-slack || previous > end+slack) || previous != position(ticks(previous)) {
+					t.Fatalf("the Flow ends at %s, want the tick at %s", media.Timestamp(previous), media.Timestamp(end))
+				}
+			})
+		}
 	}
 }

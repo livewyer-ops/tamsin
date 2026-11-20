@@ -89,6 +89,11 @@ type Stream struct {
 	SampleCount    int    `json:"-"`
 	KeyFrames      int    `json:"-"`
 	LastSampleTime string `json:"-"`
+	// FirstPTS is, in the stream's time base, when the first of those samples'
+	// packets is shown. LastPTS is when the last of them are, in the order
+	// they are shown, at most latestPackets of them.
+	FirstPTS int64   `json:"-"`
+	LastPTS  []int64 `json:"-"`
 	// HiddenLead counts the leading pictures of an open GOP that an MP4
 	// Object stores but its edit list keeps from being shown: pictures stored
 	// after the frame the Object was cut on that present before it.

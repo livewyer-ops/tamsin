@@ -141,6 +141,10 @@ type SegmentRecord struct {
 	MPEGTS            bool
 	FlowStart         int64
 	ProgrammeDuration int64
+	// NextPath is the Segment that follows this one in its output, which
+	// FFmpeg has closed by the time this one is passed on. It is empty for
+	// the last.
+	NextPath string
 	// RepeatsParameterSets is set for an output whose H.264 video had the
 	// parameter sets of its sample description written before every key
 	// frame. They are the right ones only while the stream never changes them.
@@ -403,8 +407,11 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 				record := SegmentRecord{StreamIndex: output.streamIndex, Path: path, Start: start, End: end, Timed: true, FlowStart: request.FlowStart, ProgrammeDuration: request.ProgrammeDuration, MPEGTS: outputContainer.Muxer == "mpegts", RepeatsParameterSets: output.repeats}
 				// A Segment is passed on once the next one is listed, which
 				// shows it is not the last.
-				if pending != nil && !emit(*pending) {
-					return
+				if pending != nil {
+					pending.NextPath = path
+					if !emit(*pending) {
+						return
+					}
 				}
 				pending = &record
 				previousStart = start

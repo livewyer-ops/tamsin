@@ -27,6 +27,19 @@ type rollingObjectPreparer struct {
 	// flowPosition is where the last placed Segment ends on the Flow timeline.
 	flowPosition int64
 	rates        *media.SegmentBitRateAccumulator
+	// ahead is the probe of the Object at aheadPath, the one after the last
+	// prepared. It was read to place that one and is kept for its own turn.
+	ahead     media.Probe
+	aheadPath string
+	// cyclePackets pictures of the source's video last cycleTicks ticks of the
+	// 90 kHz clock, where the stream placed is video of a known rate.
+	cyclePackets, cycleTicks int64
+}
+
+// timedBy gives the preparer the frame period of the source it places.
+func (p *rollingObjectPreparer) timedBy(source []media.Stream) *rollingObjectPreparer {
+	p.cyclePackets, p.cycleTicks = media.PictureCycle(source, p.streamIndex)
+	return p
 }
 
 // newRollingObjectPreparer places a stream's Segments from start. A muxed
@@ -57,6 +70,9 @@ func (p *rollingObjectPreparer) prepare(ctx context.Context, record media.Segmen
 	if record.Timed && record.End <= record.Start {
 		return preparedObject{}, errors.New("renderer emitted a non-positive segment interval")
 	}
+	if measured == nil && p.aheadPath != "" && record.Path == p.aheadPath {
+		measured = &p.ahead
+	}
 	if measured == nil {
 		probe, probeErr := p.pipeline.probeObject(ctx, record.Path)
 		if probeErr != nil {
@@ -67,6 +83,18 @@ func (p *rollingObjectPreparer) prepare(ctx context.Context, record media.Segmen
 	measurement, err := measureObject(*measured, size, checksum)
 	if err != nil {
 		return preparedObject{}, err
+	}
+	measurement.pace(p.cyclePackets, p.cycleTicks)
+	// An MPEG-TS Segment ends where the next Object's first sample is, which
+	// only that Object's own timestamps say. An Object that cannot be read
+	// fails on its own turn, so the Segments before it are kept.
+	if record.MPEGTS && record.Timed && record.NextPath != "" {
+		if probe, probeErr := p.pipeline.probeObject(ctx, record.NextPath); probeErr == nil {
+			if next, measureErr := measureObject(probe, 0, ""); measureErr == nil {
+				measurement.next = &next
+				p.ahead, p.aheadPath = probe, record.NextPath
+			}
+		}
 	}
 	object, err := p.cursor.object(p.flowID, record.Path, record, measurement)
 	if err != nil {
@@ -411,7 +439,7 @@ func (p *Pipeline) ingestMuxedRolling(ctx context.Context, staged stagedFile, fl
 	}
 	state := &rollingFlowState{
 		flowID: root.id, resultIndex: len(result.Flows) - 1, flow: root.flow,
-		preparer: newRollingObjectPreparer(p, root.id, media.AllStreams, p.config.Start, p.config.Start+flowInfo.ReferenceOffset),
+		preparer: newRollingObjectPreparer(p, root.id, media.AllStreams, p.config.Start, p.config.Start+flowInfo.ReferenceOffset).timedBy(flowInfo.Streams),
 	}
 	window := p.rollingStagingWindow(staged)
 	execution := newRollingExecution(p, ctx, &result, storageID, window, state)
@@ -469,7 +497,7 @@ func (p *Pipeline) ingestIndependentRolling(ctx context.Context, staged stagedFi
 		states = append(states, &rollingFlowState{
 			role: member.role, flowID: member.id, resultIndex: len(result.Flows), flow: member.flow,
 			preparer: newRollingObjectPreparer(
-				p, member.id, essence.StreamIndex, p.config.Start+essence.Offset, p.config.Start+essence.Offset),
+				p, member.id, essence.StreamIndex, p.config.Start+essence.Offset, p.config.Start+essence.Offset).timedBy(flowInfo.Streams),
 		})
 		result.Flows = append(result.Flows, flowResult)
 		graph.flows = append(graph.flows, member)

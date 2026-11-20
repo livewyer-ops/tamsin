@@ -174,3 +174,105 @@ func TestMeasuredObjectsCarrySegmentHints(t *testing.T) {
 		t.Fatalf("unmeasured object carries hints: %#v", object)
 	}
 }
+
+// TestCadenceHoldsTheNextPacketToTheStreamsPeriod covers when the Object
+// after an MPEG-TS Object is taken to begin with the stream's next packet. A
+// period of whole ticks is kept only at that many, so a gap of one tick is a
+// gap. A period the clock rounds is kept at either rounding until the run is
+// a cycle long, and from then on at the one tick the cycle names.
+func TestCadenceHoldsTheNextPacketToTheStreamsPeriod(t *testing.T) {
+	t.Parallel()
+	// run shows packets at the nearest tick to each multiple of the period,
+	// ticks over packets, as FFmpeg does.
+	run := func(packets, ticks int64, count int) cadence {
+		run := cadence{packets: packets, ticks: ticks}
+		for index := range int64(count) {
+			run.add((2*index*ticks + packets) / (2 * packets))
+		}
+		return run
+	}
+	for _, tc := range []struct {
+		name       string
+		run        cadence
+		tick       int64
+		keeps      bool
+		due, known int64
+	}{
+		// 29.97 fps: 3003 ticks a picture.
+		{name: "the whole period", run: run(1, 3003, 50), tick: 50 * 3003, keeps: true, due: 50 * 3003, known: 1},
+		{name: "a tick more than the whole period", run: run(1, 3003, 50), tick: 50*3003 + 1, due: 50 * 3003, known: 1},
+		{name: "a tick less than the whole period", run: run(1, 3003, 50), tick: 50*3003 - 1, due: 50 * 3003, known: 1},
+		// 23.976 fps: 3753.75 ticks a picture, 15015 for four. The fiftieth
+		// picture after tick 0 is due at 187687.5, which rounds up.
+		{name: "the tick the cycle names", run: run(4, 15015, 50), tick: 187688, keeps: true, due: 187688, known: 1},
+		{name: "a tick after it, which another rounding could give", run: run(4, 15015, 50), tick: 187689, due: 187688, known: 1},
+		{name: "a tick before it, which another rounding could give", run: run(4, 15015, 50), tick: 187687, due: 187688, known: 1},
+		{name: "one picture, whose period no step has borne out", run: run(1, 3003, 1), tick: 3003, keeps: true},
+		{name: "four pictures, a step short of a cycle", run: run(4, 15015, 4), tick: 15015, keeps: true},
+		{name: "five pictures, which span a cycle", run: run(4, 15015, 5), tick: 18769, keeps: true, due: 18769, known: 1},
+		// Three pictures do not make a cycle: the fourth is at 11261.25.
+		{name: "either rounding, before a cycle is seen", run: run(4, 15015, 3), tick: 11262, keeps: true},
+		{name: "the other rounding, before a cycle is seen", run: run(4, 15015, 3), tick: 11261, keeps: true},
+		{name: "past either rounding, before a cycle is seen", run: run(4, 15015, 3), tick: 11263},
+		// 44.1 kHz AAC: 49 frames in 102400 ticks.
+		{name: "an audio frame on its tick", run: run(49, 102400, 86), tick: 179722, keeps: true, due: 179722, known: 1},
+		{name: "an audio frame a tick late", run: run(49, 102400, 86), tick: 179723, due: 179722, known: 1},
+		{name: "a stream whose period is not known", run: cadence{shown: []int64{0, 3003}}, tick: 6006},
+		{name: "a run with no packet", run: cadence{packets: 1, ticks: 3003}, tick: 3003},
+	} {
+		if keeps := tc.run.keeps(tc.tick); keeps != tc.keeps {
+			t.Errorf("%s: keeps = %t, want %t", tc.name, keeps, tc.keeps)
+		}
+		if due, known := tc.run.next(); known != (tc.known == 1) || due != tc.due {
+			t.Errorf("%s: next = %d, %t, want %d, %t", tc.name, due, known, tc.due, tc.known == 1)
+		}
+	}
+	// A pause inside an Object ends the run, so the packets before it do not
+	// vouch for a later step of the same length as their mean.
+	paused := run(1, 3600, 10)
+	paused.add(9*3600 + 22050)
+	paused.add(9*3600 + 22050 + 3600)
+	if paused.keeps(9*3600+22050+3600+4050) || !paused.keeps(9*3600+22050+2*3600) {
+		t.Error("a run resumed after a pause keeps a step that is not its period, or refuses its period")
+	}
+}
+
+// TestObjectIsPacedByAPeriodItsPacketsKeep covers which period an Object's
+// pictures are held to: the one it states where two of its packets or more
+// keep it, the step they all take where they keep no stated one, and its
+// source's otherwise.
+func TestObjectIsPacedByAPeriodItsPacketsKeep(t *testing.T) {
+	t.Parallel()
+	every := func(step int64, count int) []int64 {
+		shown := make([]int64, count)
+		for index := range shown {
+			shown[index] = int64(index) * step
+		}
+		return shown
+	}
+	film := []int64{0, 3754, 7508, 11261, 15015, 18769}
+	for _, tc := range []struct {
+		name                  string
+		audio                 bool
+		stated, source, paced [2]int64
+		shown                 []int64
+		observed              bool
+	}{
+		{name: "pictures at the stated 23.976 fps", stated: [2]int64{4, 15015}, source: [2]int64{1, 3600}, shown: film, paced: [2]int64{4, 15015}},
+		{name: "two pictures at the stated rate", stated: [2]int64{4, 15015}, source: [2]int64{1, 3600}, shown: film[:2], paced: [2]int64{4, 15015}},
+		{name: "pictures at half the stated rate, which is the source's", stated: [2]int64{8, 15015}, source: [2]int64{4, 15015}, shown: film, paced: [2]int64{4, 15015}},
+		{name: "one picture", stated: [2]int64{8, 15015}, source: [2]int64{4, 15015}, shown: film[:1], paced: [2]int64{4, 15015}},
+		{name: "one picture of a source that states no rate", stated: [2]int64{8, 15015}, shown: film[:1], paced: [2]int64{8, 15015}},
+		{name: "many pictures one step apart at no stated rate", stated: [2]int64{1, 1800}, source: [2]int64{1, 2394}, shown: every(3600, 16), paced: [2]int64{1, 3600}, observed: true},
+		{name: "too few pictures one step apart to tell", stated: [2]int64{1, 1800}, source: [2]int64{1, 2394}, shown: every(3600, 15), paced: [2]int64{1, 2394}},
+		{name: "many pictures one step apart at the source's rate", stated: [2]int64{1, 1800}, source: [2]int64{1, 3600}, shown: every(3600, 16), paced: [2]int64{1, 3600}},
+		{name: "a pause among pictures at no stated rate", stated: [2]int64{1, 1800}, shown: append(every(3600, 16), 76050, 79650), paced: [2]int64{1, 1800}},
+		{name: "audio, which states no frame rate", audio: true, stated: [2]int64{49, 102400}, source: [2]int64{1, 3600}, shown: every(2090, 16), paced: [2]int64{49, 102400}},
+	} {
+		m := objectMeasurement{audio: tc.audio, cyclePackets: tc.stated[0], cycleTicks: tc.stated[1], lastPTS: tc.shown}
+		m.pace(tc.source[0], tc.source[1])
+		if paced := [2]int64{m.cyclePackets, m.cycleTicks}; paced != tc.paced || m.observed != tc.observed {
+			t.Errorf("%s: paced by %v, observed %t, want %v, %t", tc.name, paced, m.observed, tc.paced, tc.observed)
+		}
+	}
+}

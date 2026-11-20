@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,25 @@ func (p FFprobe) ProbeObject(ctx context.Context, filename string) (Probe, error
 	return probe, err
 }
 
+// latestPackets is how many of a stream's last packets an Object's
+// measurement names. 49 AAC frames at 44.1 kHz are the longest run of a common
+// rate that it takes for the 90 kHz clock to land on a whole tick again.
+const latestPackets = 64
+
+// keepLatest adds a presentation timestamp to the latest of a stream, which
+// are kept in the order they are shown.
+func keepLatest(latest []int64, pts int64) []int64 {
+	at, _ := slices.BinarySearch(latest, pts)
+	if len(latest) < latestPackets {
+		return slices.Insert(latest, at, pts)
+	}
+	if at > 0 {
+		copy(latest, latest[1:at])
+		latest[at-1] = pts
+	}
+	return latest
+}
+
 type objectPacket struct {
 	StreamIndex int         `json:"stream_index"`
 	PTS         json.Number `json:"pts"`
@@ -53,6 +73,8 @@ func measureObjectPackets(reader io.Reader, probe *Probe) error {
 		samples, keyFrames        int
 		hiddenLead                int
 		leading                   []int64
+		firstPTS                  int64
+		tail                      []int64
 	}
 	bounds := make(map[int]span)
 	startsOnKey := make(map[int]bool)
@@ -158,6 +180,10 @@ func measureObjectPackets(reader io.Reader, probe *Probe) error {
 			} else if stream.CodecType == "video" && first.Cmp(bound.decoded) < 0 && len(bound.leading) <= maxLeadingPictures {
 				bound.leading = append(bound.leading, pts)
 			}
+			if bound.samples == 0 || pts < bound.firstPTS {
+				bound.firstPTS = pts
+			}
+			bound.tail = keepLatest(bound.tail, pts)
 			bound.samples++
 			if strings.Contains(packet.Flags, "K") {
 				bound.keyFrames++
@@ -197,6 +223,7 @@ func measureObjectPackets(reader io.Reader, probe *Probe) error {
 		stream.LastSampleTime = bound.last.RatString()
 		stream.FirstDecodedTime = bound.decoded.RatString()
 		stream.SampleCount = bound.samples
+		stream.FirstPTS, stream.LastPTS = bound.firstPTS, bound.tail
 		stream.KeyFrames = bound.keyFrames
 		stream.HiddenLead = bound.hiddenLead
 		stream.LeadingPTS = bound.leading

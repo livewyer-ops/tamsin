@@ -594,6 +594,18 @@ type ReferenceTiming struct {
 	Samples, KeyFrames int
 	LastSample         int64
 	Measured           bool
+	// FirstPTS is when the stream's first packet is shown and LastPTS when its
+	// last ones are, in order, in ticks of the 90 kHz clock, for a measured
+	// stream that is timed in them, as every MPEG-TS stream is; Ticks says
+	// they are set. Audio says the stream is audio, whose LastSample is the
+	// last sample of its last packet and not that packet's own time.
+	FirstPTS     int64
+	LastPTS      []int64
+	Ticks, Audio bool
+	// CyclePackets packets of the stream last CycleTicks ticks exactly: its
+	// packet period as a fraction of whole numbers, 4 pictures in 15015 ticks
+	// at 23.976 fps. Both are zero where the period is not known.
+	CyclePackets, CycleTicks int64
 	// Lead is how long before the frame the Segment was cut on the stream
 	// begins presenting: the leading pictures of an open GOP, zero for a
 	// closed one. It is valid only when Measured.
@@ -619,7 +631,12 @@ func ProbeReference(probe Probe) (ReferenceTiming, error) {
 		start, span, err := probeTiming(probe, streams)
 		return ReferenceTiming{Start: start, Span: span}, err
 	}
-	timing := ReferenceTiming{Samples: reference.SampleCount, KeyFrames: reference.KeyFrames, Measured: reference.LastSampleTime != ""}
+	timing := ReferenceTiming{Samples: reference.SampleCount, KeyFrames: reference.KeyFrames, Measured: reference.LastSampleTime != "",
+		Audio: reference.CodecType == "audio"}
+	if timing.Measured && reference.TimeBase == "1/90000" {
+		timing.FirstPTS, timing.LastPTS, timing.Ticks = reference.FirstPTS, reference.LastPTS, true
+		timing.CyclePackets, timing.CycleTicks = packetCycle(*reference)
+	}
 	var err error
 	if timing.Start, err = ParseSeconds(reference.StartTime); err != nil {
 		return ReferenceTiming{}, fmt.Errorf("parse reference stream start time: %w", err)
@@ -646,8 +663,14 @@ func ProbeReference(probe Probe) (ReferenceTiming, error) {
 	if reference.CodecType == "video" && timing.Samples > 0 {
 		if numerator, denominator, ok := streamFrameRate(*reference); ok && numerator > 0 && denominator > 0 {
 			period := new(big.Rat).SetFrac64(denominator, numerator)
-			timing.Period = ratNanoseconds(period)
-			nominal := ratNanoseconds(new(big.Rat).Mul(period, big.NewRat(int64(timing.Samples), 1)))
+			var representable bool
+			if timing.Period, representable = roundNanoseconds(period); !representable {
+				return ReferenceTiming{}, fmt.Errorf("reference stream %d frame period exceeds supported timeline range", reference.Index)
+			}
+			nominal, representable := roundNanoseconds(new(big.Rat).Mul(period, big.NewRat(int64(timing.Samples), 1)))
+			if !representable {
+				return ReferenceTiming{}, fmt.Errorf("reference stream %d nominal span exceeds supported timeline range", reference.Index)
+			}
 			// A quarter period separates timestamp rounding, which is at most a
 			// couple of container ticks, from a sample missing inside the Object,
 			// which is a whole period and must keep the measured span.
@@ -661,6 +684,61 @@ func ProbeReference(probe Probe) (ReferenceTiming, error) {
 		}
 	}
 	return timing, nil
+}
+
+// PictureCycle gives the frame period of the video stream a render is cut
+// on, the reference stream of a multiplex or the one stream of an essence,
+// as packetCycle does. A whole source states its frame rate better than one
+// short Object of it does: FFprobe gives a lone H.264 picture its field rate.
+func PictureCycle(streams []Stream, streamIndex int) (packets, ticks int64) {
+	streams = contentStreams(streams)
+	reference := referenceStream(streams)
+	for index := range streams {
+		if streams[index].Index == streamIndex {
+			reference = &streams[index]
+		}
+	}
+	if reference == nil || reference.CodecType != "video" {
+		return 0, 0
+	}
+	return packetCycle(*reference)
+}
+
+// packetCycle gives the packet period of a measured stream timed in 90 kHz
+// ticks as a fraction: that many packets last that many ticks. A video
+// stream's is its frame period. An audio stream's is a whole number of
+// samples, the mean of the steps between its packets, which the clock rounds
+// by too little to move it to another number.
+func packetCycle(stream Stream) (packets, ticks int64) {
+	period := new(big.Rat)
+	switch stream.CodecType {
+	case "video":
+		numerator, denominator, ok := streamFrameRate(stream)
+		if !ok {
+			return 0, 0
+		}
+		period.SetFrac(new(big.Int).Mul(big.NewInt(90000), big.NewInt(denominator)), big.NewInt(numerator))
+	case "audio":
+		rate, err := strconv.ParseInt(stream.SampleRate, 10, 64)
+		steps := int64(stream.SampleCount - 1)
+		// Either end of the run is rounded by up to half a tick.
+		if err != nil || rate <= 0 || steps*45000 <= rate {
+			return 0, 0
+		}
+		span := new(big.Int).Mul(big.NewInt(stream.LastPTS[len(stream.LastPTS)-1]-stream.FirstPTS), big.NewInt(rate))
+		samples := new(big.Rat).SetFrac(span, big.NewInt(90000*steps))
+		frame := new(big.Int).Quo(new(big.Int).Add(new(big.Int).Mul(samples.Num(), big.NewInt(2)), samples.Denom()), new(big.Int).Mul(samples.Denom(), big.NewInt(2)))
+		if frame.Sign() <= 0 {
+			return 0, 0
+		}
+		period.SetFrac(new(big.Int).Mul(frame, big.NewInt(90000)), big.NewInt(rate))
+	default:
+		return 0, 0
+	}
+	if period.Sign() <= 0 || !period.Num().IsInt64() || !period.Denom().IsInt64() {
+		return 0, 0
+	}
+	return period.Denom().Int64(), period.Num().Int64()
 }
 
 // ReferenceVideoStream is the index of the stream a muxed render is cut and
@@ -704,20 +782,6 @@ func referenceStream(streams []Stream) *Stream {
 		}
 	}
 	return nil
-}
-
-// ratNanoseconds rounds a duration in seconds to the nearest nanosecond.
-func ratNanoseconds(seconds *big.Rat) int64 {
-	scaled := new(big.Rat).Mul(seconds, big.NewRat(nanosecondsPerSecond, 1))
-	quotient, remainder := new(big.Int).QuoRem(scaled.Num(), scaled.Denom(), new(big.Int))
-	if new(big.Int).Lsh(new(big.Int).Abs(remainder), 1).Cmp(scaled.Denom()) >= 0 {
-		if scaled.Num().Sign() < 0 {
-			quotient.Sub(quotient, big.NewInt(1))
-		} else {
-			quotient.Add(quotient, big.NewInt(1))
-		}
-	}
-	return quotient.Int64()
 }
 
 func probeTiming(probe Probe, streams []Stream) (start, duration int64, err error) {

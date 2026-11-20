@@ -266,8 +266,8 @@ func TestLastSegmentWaitsForFFmpegExit(t *testing.T) {
 				}()
 				select {
 				case record := <-seen:
-					if record.Final || record.Start != 0 {
-						t.Fatalf("first record = %+v, want the Segment at 0 and not final", record)
+					if record.Final || record.Start != 0 || filepath.Base(record.NextPath) != "second.mp4" {
+						t.Fatalf("first record = %+v, want the Segment at 0, not final, and the one after it named", record)
 					}
 				case <-ctx.Done():
 					t.Fatal("the first Segment never arrived")
@@ -308,8 +308,8 @@ func TestLastSegmentWaitsForFFmpegExit(t *testing.T) {
 						t.Fatalf("failed run = %v with records %+v, want the exit status and no further record", err, last)
 					}
 				default:
-					if err != nil || len(last) != 1 || last[0].Final != storage.muxed || last[0].Start != int64(2*time.Second) {
-						t.Fatalf("clean run = %v with records %+v, want the Segment at 2 s, final for a multiplex", err, last)
+					if err != nil || len(last) != 1 || last[0].Final != storage.muxed || last[0].Start != int64(2*time.Second) || last[0].NextPath != "" {
+						t.Fatalf("clean run = %v with records %+v, want the Segment at 2 s, final for a multiplex, with none after it", err, last)
 					}
 				}
 			})
