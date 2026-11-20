@@ -22,13 +22,15 @@ is inferred from the other.
 
 Use `--profile NAME` or pin the contract as `--profile NAME@1`. An individual
 media flag is applied after the profile. If it changes a profile setting, or if
-`--ffmpeg-arg` is supplied, the resolved result is reported as `custom@1`. A
-custom treatment using `--ffmpeg-arg` is limited to a single essence and
-requires explicit output `codec` and complete `essence_parameters` in
-`--flow-metadata`. Changing only a packaging setting such as Segment duration
-does not impose that restriction. Multi-stream transcodes must be performed
-before ingest because one override cannot describe each output essence
-truthfully.
+`--ffmpeg-arg` is supplied, the resolved result is reported as `custom@1`.
+
+For new workflows that change a codec or apply a filter, prepare the file
+with FFmpeg first. Ingest the result with `preserve` to keep those bytes, or
+choose a segmented profile for time-range access. Existing workflows can pass
+`--ffmpeg-arg` for a single-essence render by supplying the output `codec`
+and complete `essence_parameters` in `--flow-metadata`. This limit applies
+to FFmpeg passthrough. Packaging overrides such as Segment duration also
+work with multiple tracks.
 
 ```sh
 tamsin --profile preserve -i master.mp4 -o https://tams.example.com

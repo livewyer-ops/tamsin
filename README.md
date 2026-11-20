@@ -19,7 +19,7 @@ resuming an ingest from an earlier version.
 
 - Ingest files, directories, manifests, HTTP, S3 and standard input.
 - Segment seekable HTTP and S3 inputs without downloading a complete local copy.
-- Choose from five explicit packaging treatments, with FFmpeg passthrough for specialist options.
+- Store a complete file, separate its tracks or cut it into time-addressable Segments.
 - Resume using deterministic identities, with SHA-256 verification by default.
 - Run interactively or from jobs and applications, with human receipts or streamed NDJSON results.
 
@@ -66,55 +66,43 @@ Run `tamsin --version`. If your shell cannot find it, see [PATH setup](docs/oper
 
 ## Quick start
 
-For a worked example with a generated audio sample, follow
-[Your first ingest](docs/first-ingest.md).
-
-You need:
-
-- A [supported media file](docs/profiles.md); replace `./programme.ts` below with its path.
-- A TAMS 8.2 service, or a compatible 8.1 service, and credentials authorised to ingest.
-
-If you need a store for evaluation, see
-[TAMOSS](https://github.com/livewyer-ops/tamoss#quickstart).
-
-Supply `TAMSIN_AUTH_TOKEN` through secret injection or an
-[interactive prompt](docs/configuration.md#authentication), then set your endpoint:
+To store an MP4 or MPEG-TS file as one Object with its original bytes, use
+`--profile preserve`. Point `ENDPOINT` at a TAMS 8.2 or 8.1 service. Supply a
+bearer token authorised to ingest in `TAMSIN_AUTH_TOKEN` through secret injection or an
+[interactive prompt](docs/configuration.md#authentication).
 
 ```sh
-export TAMSIN_ENDPOINT=https://tams.example.com
+ENDPOINT=https://tams.example.com
 export TAMSIN_AUTH_MODE=bearer
-
-tamsin doctor --online --profile essence-segments &&
-tamsin ingest --profile essence-segments --dry-run=exact --input ./programme.ts &&
-tamsin ingest --profile essence-segments --input ./programme.ts &&
-tamsin ingest --profile essence-segments --input ./programme.ts
+tamsin ingest --profile preserve -i programme.mp4 -o "$ENDPOINT"
 ```
 
-Doctor checks readiness without writing to TAMS. The exact dry run renders
-locally and reports `PLANNED - NO CHANGES MADE`. A first successful ingest reports
-`INGESTED AND VERIFIED`; repeating the same input and treatment reports
-`RESUMED AND VERIFIED`, verifying existing Objects without uploading duplicates.
-Each successful command exits `0`; the chain stops on failure.
+The first ingest reports `INGESTED AND VERIFIED`. Run the same command again
+with the same file to read back the stored Object. The receipt reports
+`RESUMED AND VERIFIED` with zero media bytes uploaded. [Your first ingest](docs/first-ingest.md)
+walks through readiness checks, a generated audio sample and an exact dry run.
 
 Allow temporary disk space and processing time, including for exact dry runs.
 Video analysis can scan the entire input even with `preserve`, and default
 verification may download uploaded Objects again. See
 [resource budgets and verification costs](docs/operations.md).
 
-For remote media, follow [Ingest an HTTP or S3 input](docs/configuration.md#ingest-an-http-or-s3-input).
+When readers need short time ranges or individual tracks, choose a
+[profile for that access pattern](#profiles). For remote media, follow
+[Ingest an HTTP or S3 input](docs/configuration.md#ingest-an-http-or-s3-input).
 
 ### Using Docker
 
 The image includes FFmpeg and FFprobe, runs as a non-root user, and supports
 linux/amd64 and linux/arm64, with SBOM and provenance attestations.
-Using the same endpoint and credential environment as above:
+Mount the same file and pass the endpoint and credentials to the container.
 
 ```sh
 docker run --rm \
-  --mount "type=bind,src=$PWD/programme.ts,dst=/media/programme.ts,readonly" \
-  -e TAMSIN_ENDPOINT -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_TOKEN \
+  --mount "type=bind,src=$PWD/programme.mp4,dst=/media/programme.mp4,readonly" \
+  -e TAMSIN_ENDPOINT="$ENDPOINT" -e TAMSIN_AUTH_MODE -e TAMSIN_AUTH_TOKEN \
   ghcr.io/livewyer-ops/tamsin:8.2.0-in3 \
-  ingest --profile essence-segments --input /media/programme.ts
+  ingest --profile preserve --input /media/programme.mp4
 ```
 
 The input must be readable by UID 65532 and the endpoint reachable from the
@@ -139,10 +127,9 @@ video, audio, image or data stream. Built-in treatments are versioned as `@1`:
 | `essence-segments` | One Flow per essence | 10 seconds | You need time-range access to individual streams |
 | `mpegts-segments` | One Flow per essence | 2 seconds, MPEG-TS | Your downstream system requires short MPEG-TS Objects |
 
-Durations are nominal: stream-copy boundaries follow source keyframes.
-`--ffmpeg-arg` supports explicit single-essence custom treatments with supplied
-output metadata. These treatments are distinct from service-owned TAMS 8.2 Flow
-Profiles assigned through `--tams-flow-profile`. Run `tamsin profiles` or read
+Stream-copy cuts follow source keyframes. If you need to change the codec,
+transcode with FFmpeg before ingest. To assign an existing TAMS 8.2 Flow
+Profile, use `--tams-flow-profile`. Run `tamsin profiles` or read
 [profiles and supported media](docs/profiles.md) for the choices and limits.
 
 ## Automation

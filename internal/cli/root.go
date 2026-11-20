@@ -133,11 +133,15 @@ func requestedIngestFormat(arguments []string) (found, jsonRequested bool) {
 	return found, jsonRequested
 }
 
+const preserveExample = `  ENDPOINT=https://tams.example.com
+  tamsin ingest --profile preserve -i programme.mp4 -o "$ENDPOINT"`
+
 func (a *application) rootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "tamsin [flags] [input] [TAMS endpoint]",
 		Short:         "Ingest media into a Time-addressable Media Store",
-		Long:          "TAMSin resolves local, manifest, HTTP, and S3 inputs, creates TAMS Flows, and uploads verified Media Objects.",
+		Long:          "Store a whole MP4 or MPEG-TS file in TAMS with --profile preserve. Run 'tamsin profiles' to choose a treatment for time-range or per-track access.",
+		Example:       preserveExample,
 		Version:       version.String(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -201,10 +205,11 @@ func retiredAPICommand() *cobra.Command {
 
 func (a *application) ingestCommand() *cobra.Command {
 	command := &cobra.Command{
-		Use:   "ingest [flags] [input] [TAMS endpoint]",
-		Short: "Create one Flow graph per resolved input and ingest its media",
-		Args:  usageArgs(cobra.MaximumNArgs(2)),
-		RunE:  a.runIngest,
+		Use:     "ingest [flags] [input] [TAMS endpoint]",
+		Short:   "Create one Flow graph per resolved input and ingest its media",
+		Example: preserveExample,
+		Args:    usageArgs(cobra.MaximumNArgs(2)),
+		RunE:    a.runIngest,
 	}
 	addIngestFlags(command)
 	return command
@@ -373,7 +378,7 @@ func addTreatmentFlags(command *cobra.Command) {
 		"override the profile's Flow Segment container: source or mpegts")
 	flags.String("essence-storage", "",
 		"override how the profile stores a muxed input: independent (one Flow per essence) or muxed (keep the multiplex)")
-	flags.StringArray("ffmpeg-arg", nil, "additional explicit FFmpeg argument (repeatable)")
+	flags.StringArray("ffmpeg-arg", nil, "FFmpeg argument for a single-essence custom render with explicit output metadata (repeatable)")
 }
 
 func addReadinessFlags(command *cobra.Command) {

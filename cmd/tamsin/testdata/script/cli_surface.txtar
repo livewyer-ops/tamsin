@@ -6,7 +6,7 @@ exec tamsin --version
 stdout 'tamsin'
 
 exec tamsin --help
-stdout 'creates TAMS Flows, and uploads verified Media Objects'
+stdout 'tamsin ingest --profile preserve -i programme\.mp4 -o "[$]ENDPOINT"'
 stdout 'ingest'
 stdout 'doctor'
 stdout 'profiles'
@@ -67,6 +67,7 @@ exec tamsin completion powershell
 # A required profile supplies the complete policy, so the structured overrides
 # advertise no defaults of their own.
 exec tamsin ingest --help
+stdout 'tamsin ingest --profile preserve -i programme\.mp4 -o "[$]ENDPOINT"'
 stdout 'override the profile''s target Flow Segment duration'
 ! stdout 'default 10s'
 ! stdout 'default "source"'
