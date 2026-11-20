@@ -376,6 +376,11 @@ type fakeClient struct {
 	// uploadContentTypes records the Content-Type each upload carried, keyed by
 	// Object identifier.
 	uploadContentTypes map[string]string
+	// uploadDigests records the SHA-256 each upload destination carried.
+	uploadDigests map[string]string
+	// sourceMissingReads is how many reads of a Source answer 404 before the
+	// store has derived it.
+	sourceMissingReads int
 	// downloadErrors fails verification reads of particular URLs.
 	downloadErrors map[string]error
 	// expireFirstDownloads reports the first read of every URL as a
@@ -395,6 +400,7 @@ func newFakeClient() *fakeClient {
 		sources:            make(map[string]tams.Source),
 		occupiedObjectIDs:  make(map[string]bool),
 		uploadContentTypes: make(map[string]string),
+		uploadDigests:      make(map[string]string),
 		downloadErrors:     make(map[string]error),
 	}
 }
@@ -505,6 +511,10 @@ func (c *fakeClient) Source(_ context.Context, id string) (tams.Source, error) {
 		return nil, c.sourceReadErr
 	}
 	source, present := c.sources[id]
+	if c.sourceMissingReads > 0 {
+		c.sourceMissingReads--
+		present = false
+	}
 	if !present {
 		return nil, &tams.HTTPError{Method: http.MethodGet, URL: "sources/" + id, StatusCode: http.StatusNotFound, Status: "404 Not Found"}
 	}
@@ -713,13 +723,16 @@ func (c *fakeClient) ListSegments(ctx context.Context, flowID string, options ta
 		}
 		segments = overlapping
 	}
-	if options.IncludeDownloadURLs {
-		return segments, nil
-	}
-	// Mirror the service: without presigned URLs requested, none come back.
+	// Mirror the service: presigned URLs and the Object's own timerange come
+	// back only when they were asked for.
 	lean := make([]tams.Segment, len(segments))
 	for index, segment := range segments {
-		segment.GetURLs = nil
+		if !options.IncludeDownloadURLs {
+			segment.GetURLs = nil
+		}
+		if !options.IncludeObjectTimerange {
+			segment.ObjectTimerange = ""
+		}
 		lean[index] = segment
 	}
 	return lean, nil
@@ -768,6 +781,7 @@ func (c *fakeClient) UploadFile(_ context.Context, destination tams.PresignedURL
 	}
 	c.objects[strings.TrimPrefix(destination.URL, "mem://")] = data
 	c.uploadContentTypes[strings.TrimPrefix(destination.URL, "mem://")] = destination.Headers["Content-Type"]
+	c.uploadDigests[strings.TrimPrefix(destination.URL, "mem://")] = destination.ContentSHA256
 	c.uploads++
 	return receipt, nil
 }

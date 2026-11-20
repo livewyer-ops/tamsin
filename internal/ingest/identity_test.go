@@ -318,7 +318,7 @@ func TestStreamFlowIdentityExcludesLaterMeasurementsButIncludesOverrides(t *test
 	}
 }
 
-func TestMediaInterpretationIdentityIncludesPhase2GraphFacts(t *testing.T) {
+func TestMediaInterpretationIdentityIncludesCodecAndContainerMapping(t *testing.T) {
 	flow := tams.Flow{"format": "urn:x-nmos:format:multi", "container": "video/mp2t"}
 	info := media.FlowInfo{
 		Format: "urn:x-nmos:format:multi", Container: "video/mp2t",

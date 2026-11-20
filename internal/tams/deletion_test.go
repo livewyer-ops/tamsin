@@ -499,10 +499,15 @@ func TestUnfinishedDeletionSaysWhatWasLastSeen(t *testing.T) {
 		deadline time.Duration
 		deletes  int32
 		seen     string
+		// spelling is how the store writes the timerange back. A store may
+		// respell it, and it is still the same range.
+		spelling string
 	}{
 		{name: "acknowledged and still listed", status: http.StatusNoContent, deadline: 200 * time.Millisecond, deletes: 1, seen: "segment still listed after"},
 		{name: "failing and still listed", status: http.StatusServiceUnavailable, retries: 1, deadline: 600 * time.Millisecond, deletes: 2, seen: "segment still listed after"},
 		{name: "accepted and still pending", status: http.StatusAccepted, deadline: 200 * time.Millisecond, deletes: 1, seen: "wait for segment deletion request"},
+		{name: "still listed under another spelling", status: http.StatusNoContent, deadline: 200 * time.Millisecond, deletes: 1, seen: "segment still listed after", spelling: "-0:0_1:0"},
+		{name: "still pending under another spelling", status: http.StatusAccepted, deadline: 200 * time.Millisecond, deletes: 1, seen: "wait for segment deletion request", spelling: "-0:0_1:0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -511,6 +516,10 @@ func TestUnfinishedDeletionSaysWhatWasLastSeen(t *testing.T) {
 			// Over a socket it can pass inside a listing, which is a
 			// different error with a test of its own.
 			synctest.Test(t, func(t *testing.T) {
+				pending, listed := pending, timerange
+				if tc.spelling != "" {
+					pending, listed = strings.Replace(pending, timerange, tc.spelling, 1), tc.spelling
+				}
 				var deletes, polls atomic.Int32
 				respond := func(status int, body string) *http.Response {
 					return &http.Response{
@@ -533,7 +542,7 @@ func TestUnfinishedDeletionSaysWhatWasLastSeen(t *testing.T) {
 						return respond(http.StatusOK, pending), nil
 					default:
 						polls.Add(1)
-						return respond(http.StatusOK, `[{"object_id":"`+objectID+`","timerange":"`+timerange+`"}]`), nil
+						return respond(http.StatusOK, `[{"object_id":"`+objectID+`","timerange":"`+listed+`"}]`), nil
 					}
 				})
 				client, err := New(Config{

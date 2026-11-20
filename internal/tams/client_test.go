@@ -204,7 +204,8 @@ func TestRegisterSegmentsReturnsStructuredPartialResult(t *testing.T) {
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(writer).Encode(BulkSegmentFailure{FailedSegments: []FailedSegment{
-			{ObjectID: "object-b", Timerange: "[1:0_2:0)"},
+			// A service may respell the timerange it was sent.
+			{ObjectID: "object-b", Timerange: "1:0_2:0"},
 			// A unique Object ID identifies its request without a timerange.
 			{ObjectID: "object-c"},
 		}})
@@ -1361,21 +1362,38 @@ func TestMetadataTimeoutBoundsEachAttempt(t *testing.T) {
 }
 
 func TestPartialDownloadCannotEstablishObjectSize(t *testing.T) {
-	for _, status := range []int{http.StatusPartialContent, http.StatusOK} {
+	// A range of a larger Object can be exactly as long as the Object the
+	// caller expects; it is still not that Object. The status and the header
+	// each say so on their own.
+	for _, part := range []struct {
+		status        int
+		span, payload string
+	}{
+		{http.StatusPartialContent, "bytes 0-3/16", "part"},
+		{http.StatusOK, "bytes 0-3/16", "part"},
+		{http.StatusPartialContent, "bytes 0-15/32", "sixteen bytes of"},
+		{http.StatusOK, "bytes 0-15/32", "sixteen bytes of"},
+		{http.StatusPartialContent, "", "sixteen bytes of"},
+	} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Range", "bytes 0-3/16")
-			w.WriteHeader(status)
-			_, _ = io.WriteString(w, "part")
+			if part.span != "" {
+				w.Header().Set("Content-Range", part.span)
+			}
+			w.WriteHeader(part.status)
+			_, _ = io.WriteString(w, part.payload)
 		}))
-		client, err := New(Config{Endpoint: server.URL})
+		client, err := New(Config{Endpoint: server.URL, TransferIdleTimeout: time.Minute})
 		if err != nil {
 			t.Fatal(err)
 		}
 		_, _, err = client.DownloadDigest(t.Context(), PresignedURL{URL: server.URL}, 16)
 		server.Close()
+		if err == nil || !strings.Contains(err.Error(), "complete Object representation") {
+			t.Fatalf("HTTP %d with Content-Range %q: error = %v, want the incomplete representation named", part.status, part.span, err)
+		}
 		var integrity *ObjectSizeError
-		if err == nil || errors.As(err, &integrity) {
-			t.Fatalf("HTTP %d partial representation treated as integrity evidence: %v", status, err)
+		if errors.As(err, &integrity) {
+			t.Fatalf("HTTP %d with Content-Range %q treated as integrity evidence: %v", part.status, part.span, err)
 		}
 	}
 }

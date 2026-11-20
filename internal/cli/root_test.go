@@ -1003,8 +1003,6 @@ cat <<'EOF'
 {"streams":[{"index":0,"codec_name":"h264","codec_type":"video","width":64,"height":64,"avg_frame_rate":"25/1","start_time":"0.0","duration":"1.0","disposition":{"attached_pic":0}}],"format":{"tags":{"major_brand":"isom"},"format_name":"mov,mp4","start_time":"0.0","duration":"1.0","size":"7","bit_rate":"56000"}}
 EOF
 `
-	if err := os.WriteFile(filename, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writeTestTool(t, filename, script)
 	return filename
 }

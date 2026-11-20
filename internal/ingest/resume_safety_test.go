@@ -207,6 +207,49 @@ func TestResumeChecksExistingTiming(t *testing.T) {
 	}
 }
 
+// A resumed Segment whose download URL expires is listed again for a fresh
+// one, and its timing is checked on that listing too: the Segment can have
+// been replaced between the two.
+func TestResumeChecksTimingAgainAfterAnExpiredURL(t *testing.T) {
+	filename := filepath.Join(t.TempDir(), "fixture.mp4")
+	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := newFakeClient()
+	run := func() Result {
+		p, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		batch, err := p.Run(t.Context(), []source.Item{localSource(filename)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertBatchResultSchema(t, batch)
+		return batch.Results[0]
+	}
+	first := run()
+	if first.Status != ResultStatusIngested {
+		t.Fatalf("setup: %+v", first)
+	}
+	client.expireFirstDownloads = true
+	client.onExpiredDownload = func() {
+		client.lock.Lock()
+		defer client.lock.Unlock()
+		for id, segment := range client.segments[first.RootFlowID] {
+			segment.TSOffset = "1:0"
+			client.segments[first.RootFlowID][id] = segment
+		}
+	}
+	second := run()
+	if second.Status != ResultStatusFailed || second.Failure == nil || second.Failure.Code != FailureCodeSegmentConflict {
+		t.Fatalf("timing changed under the expired URL was accepted: %+v", second)
+	}
+	if len(client.segments[first.RootFlowID]) != 1 || client.uploads != 1 || len(client.deletedTimeranges) != 0 {
+		t.Fatal("existing Segment was changed")
+	}
+}
+
 func TestResumeVerificationPreservesUnreadableSegments(t *testing.T) {
 	for _, failure := range []string{"cancelled", "listing"} {
 		t.Run(failure, func(t *testing.T) {

@@ -2,6 +2,8 @@ package ingest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -181,6 +183,12 @@ func TestAdoptionListsAgainOnlyForAnExpiredURL(t *testing.T) {
 				}
 			}},
 		{name: "the timing differs", listings: 1, conflict: true, arrange: retime},
+		{name: "the occupant spans more than the Object", conflict: true,
+			arrange: func(client *fakeClient, flowID string) {
+				segment := client.segments[flowID][occupant]
+				segment.Timerange = "[0:0_3600:0)"
+				client.segments[flowID][occupant] = segment
+			}},
 		{name: "the URL expires and the timing then differs", listings: 2, reads: 1, conflict: true,
 			arrange: func(client *fakeClient, flowID string) {
 				client.expireFirstDownloads = true
@@ -288,6 +296,20 @@ func TestUploadsCarryTheFlowContainerWhenUninstructed(t *testing.T) {
 	}
 	if got := client.uploadContentTypes[flow.Objects[0].ObjectID]; got != container {
 		t.Fatalf("upload Content-Type = %q, want the Flow container %q", got, container)
+	}
+}
+
+// An upload destination carries the Object's digest, which an unsigned
+// upload sends so that storage can refuse a corrupted transfer.
+func TestUploadsCarryTheObjectsDigest(t *testing.T) {
+	t.Parallel()
+	client := newFakeClient()
+	result := runOnce(t, client, ingestFixture(t))
+	digest := sha256.Sum256([]byte("media-object"))
+	client.lock.Lock()
+	defer client.lock.Unlock()
+	if got := client.uploadDigests[result.rootFlow().Objects[0].ObjectID]; got != hex.EncodeToString(digest[:]) {
+		t.Fatalf("upload digest = %q, want %x", got, digest)
 	}
 }
 

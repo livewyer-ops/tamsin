@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -27,13 +28,24 @@ const (
 	doctorRequestedStorage = "6ba7b811-9dad-11d1-80b4-00c04fd430c8"
 )
 
+// writeTestTool writes an executable that a test goes on to run. A process
+// forked while the file is open for writing holds that descriptor until it
+// execs, and running the file in that interval fails with ETXTBSY. Parallel
+// tests fork throughout. Every fork takes syscall.ForkLock, so holding it for
+// reading keeps them out until the file is closed.
+func writeTestTool(t *testing.T, filename, script string) {
+	t.Helper()
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
+	if err := os.WriteFile(filename, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func fakeDoctorTool(t *testing.T, name, version string) string {
 	t.Helper()
 	filename := filepath.Join(t.TempDir(), name)
-	body := "#!/bin/sh\nprintf '%s\\n' '" + version + "'\n"
-	if err := os.WriteFile(filename, []byte(body), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writeTestTool(t, filename, "#!/bin/sh\nprintf '%s\\n' '"+version+"'\n")
 	return filename
 }
 
@@ -300,9 +312,7 @@ func TestDoctorDoesNotReportMediaToolControlledText(t *testing.T) {
 			const pathSecret = "tool-path-credential"
 			const stderrSecret = "tool-stderr-credential"
 			toxicTool := filepath.Join(t.TempDir(), testCase.check+"-"+pathSecret)
-			if err := os.WriteFile(toxicTool, []byte("#!/bin/sh\nprintf '%s\\n' '"+stderrSecret+"' >&2\nexit 42\n"), 0o700); err != nil {
-				t.Fatal(err)
-			}
+			writeTestTool(t, toxicTool, "#!/bin/sh\nprintf '%s\\n' '"+stderrSecret+"' >&2\nexit 42\n")
 			arguments := []string{
 				"--format", "json",
 				"--ffprobe", fakeDoctorTool(t, "ffprobe", "ffprobe version 5.1 safe"),
@@ -386,6 +396,26 @@ func TestDoctorOnlineChecksAPIVersionWithoutMutation(t *testing.T) {
 				t.Fatalf("online doctor made requests/mutations = %d/%d, want two read-only requests", requests.Load(), mutations.Load())
 			}
 		})
+	}
+}
+
+// A store whose URL lifetime exceeds its Object lifetime is usable, and the
+// check says which lifetime uploads are scheduled against.
+func TestDoctorOnlineReportsInconsistentServiceLifetimes(t *testing.T) {
+	t.Parallel()
+	service := validDoctorService("8.1")
+	service["min_object_timeout"] = "600:0"
+	service["min_presigned_url_timeout"] = "3600:0"
+	server, _, _ := doctorServer(t, service, []tams.StorageBackend{{ID: doctorDefaultStorage, DefaultStorage: true}}, false)
+	defer server.Close()
+	code, result, stdout, stderr := executeDoctor(t, onlineDoctorArgs(t, server.URL))
+	check := checkNamed(t, result, "service_lifetimes")
+	warnings, _ := check.Detail["warnings"].([]any)
+	if code != ExitOK || check.Status != doctorPass || len(warnings) != 1 || check.Detail["presigned_url"] != "10m0s" {
+		t.Fatalf("exit/check = %d/%#v; stdout = %s; stderr = %s", code, check, stdout, stderr)
+	}
+	if warning, _ := warnings[0].(string); !strings.Contains(warning, "/min_presigned_url_timeout (3600:0) exceeds /min_object_timeout (600:0)") {
+		t.Fatalf("warning = %q", warning)
 	}
 }
 

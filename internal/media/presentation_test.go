@@ -62,6 +62,37 @@ func TestPacketTimestampClassificationUsesTheSameStrictRules(t *testing.T) {
 	}
 }
 
+// A transport stream's 33-bit timestamps wrap about every 26.5 hours. The
+// pictures either side of a wrap are one period apart, and only a transport
+// stream's timestamps are read that way.
+func TestCadenceScanFollowsATransportStreamAcrossAWrap(t *testing.T) {
+	t.Parallel()
+	const pictures = "stream_index=0|pts=8589927392\nstream_index=0|pts=8589930992\nstream_index=0|pts=0\nstream_index=0|pts=3600\n"
+	for _, testCase := range []struct {
+		format string
+		want   CadenceEvidence
+		last   int64
+	}{
+		{format: "mpegts", want: CadenceFixed, last: mpegTSWrap + 3600},
+		{format: "mov,mp4,m4a,3gp,3g2,mj2", want: CadenceUnknown, last: 3600},
+	} {
+		probe := Probe{Streams: []Stream{{CodecType: "video", TimeBase: "1/90000", AverageFrameRate: "25/1"}}}
+		probe.Format.Name = testCase.format
+		states := cadenceStates(&probe)
+		if err := scanPresentationTimestamps(strings.NewReader(pictures), states, "pts"); err != nil {
+			t.Fatal(err)
+		}
+		states[0].finish()
+		span := probe.Streams[0].Presentation
+		if probe.Streams[0].Cadence != testCase.want || span.Last != testCase.last {
+			t.Errorf("%s: cadence = %v, last = %d; want %v and %d", testCase.format, probe.Streams[0].Cadence, span.Last, testCase.want, testCase.last)
+		}
+		if testCase.want == CadenceFixed && (span.MinimumStep != 3600 || span.MaximumStep != 3600) {
+			t.Errorf("%s: steps = %d to %d, want 3600", testCase.format, span.MinimumStep, span.MaximumStep)
+		}
+	}
+}
+
 func TestCadenceTimelineRetainsBoundaryEvidence(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

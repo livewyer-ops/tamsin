@@ -116,6 +116,14 @@ func TestTimelineCursorJudgesRegularisedSegmentsAtHalfAPeriod(t *testing.T) {
 		t.Fatalf("dropped frame between cuts: third = %d, %v; want %d", third, err, second+ten+period)
 	}
 
+	// A cut the container rounds a millisecond late is still the next frame,
+	// well inside half a period, so those Segments abut too.
+	late := timed(30*time.Second+time.Duration(period)+time.Millisecond, 39999*time.Millisecond+time.Duration(period))
+	fourth, err := cursor.place(late, regular)
+	if err != nil || fourth != third+ten {
+		t.Fatalf("a cut rounded late: fourth = %d, %v; want %d", fourth, err, third+ten)
+	}
+
 	// Without regularisation the tolerance stays at the manifest's rounding:
 	// a millisecond short Object is followed by a millisecond gap, which is
 	// what its own timestamps say.
@@ -127,6 +135,59 @@ func TestTimelineCursorJudgesRegularisedSegmentsAtHalfAPeriod(t *testing.T) {
 	next, err := cursor.place(timed(10*time.Second, 19999*time.Millisecond), measured)
 	if err != nil || next != flowStart+ten {
 		t.Fatalf("unregularised: next = %d, %v; want %d", next, err, flowStart+ten)
+	}
+}
+
+// An open GOP presents its leading pictures before the frame the cut was
+// made on, so the Object begins that much before its manifest entry and the
+// gap to the Object before it is measured from there.
+func TestTimelineCursorMeasuresAGapFromTheLeadingPictures(t *testing.T) {
+	t.Parallel()
+	const (
+		span = int64(2 * time.Second)
+		lead = int64(80 * time.Millisecond)
+	)
+	cursor := newTimelineCursor(0, 0, discardLogger())
+	if _, err := cursor.place(timed(0, 2*time.Second), objectMeasurement{duration: span, referenceSpan: span}); err != nil {
+		t.Fatal(err)
+	}
+	// The entry starts a lead after the previous one ended, and the pictures
+	// shown before it fill that interval.
+	second, err := cursor.place(timed(2080*time.Millisecond, 4*time.Second), objectMeasurement{duration: span, referenceSpan: span, lead: lead})
+	if err != nil || second != span {
+		t.Fatalf("leading pictures left a gap: second = %d, %v; want %d", second, err, span)
+	}
+	// Half a second missing from the source is still half a second.
+	third, err := cursor.place(timed(4580*time.Millisecond, 6500*time.Millisecond), objectMeasurement{duration: span, referenceSpan: span, lead: lead})
+	if err != nil || third != 2*span+int64(500*time.Millisecond) {
+		t.Fatalf("third = %d, %v; want %d", third, err, 2*span+int64(500*time.Millisecond))
+	}
+}
+
+// MPEG-TS cannot carry the MP4 edit that shortens a programme's last AAC
+// packet, so the packets of the final Object run past the programme's end.
+// The Segment stops where the programme does.
+func TestMPEGTSAudioSegmentEndsWithTheProgramme(t *testing.T) {
+	t.Parallel()
+	const (
+		start     = int64(1400 * time.Millisecond)
+		packet    = int64(time.Second) * 1024 / 48000
+		packets   = int64(1024 * time.Millisecond)
+		programme = int64(time.Second)
+	)
+	record := media.SegmentRecord{
+		End: programme, Timed: true, Final: true, MPEGTS: true, FlowStart: start, ProgrammeDuration: programme,
+	}
+	object, err := newTimelineCursor(start, start, discardLogger()).object("flow", "path", record, objectMeasurement{
+		size: 1, checksum: "sum", measured: true, audioOnly: true, audioPeriod: packet,
+		objectStart: start, duration: packets, referenceStart: start, referenceSpan: packets,
+		lastSample: start + packets - packet,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if object.start != start || object.duration != programme || object.timerange != "[1:400000000_2:400000000)" {
+		t.Fatalf("segment = %s, %d ns from %d; want the programme's second", object.timerange, object.duration, object.start)
 	}
 }
 

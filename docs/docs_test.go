@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,37 +13,44 @@ import (
 
 const repoRoot = ".."
 
+// The published documentation: the repository's root documents and every
+// Markdown file under these directories.
+var (
+	publicDocuments   = []string{"CHANGELOG.md", "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "README.md", "SECURITY.md"}
+	publicDirectories = []string{".github", "docs"}
+)
+
 func markdownFiles(t *testing.T, root string) []string {
 	t.Helper()
 	var files []string
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() && (info.Name() == ".git" || info.Name() == ".local" || info.Name() == ".cache" || info.Name() == ".tmp" || info.Name() == "dist" || info.Name() == "bin" || info.Name() == "testdata") {
-			return filepath.SkipDir
-		}
-		if filepath.Dir(path) == filepath.Clean(root) && (info.Name() == "AGENTS.md" || info.Name() == "CLAUDE.md") {
+	for _, name := range publicDocuments {
+		files = append(files, filepath.Join(root, name))
+	}
+	for _, directory := range publicDirectories {
+		err := filepath.WalkDir(filepath.Join(root, directory), func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !entry.IsDir() && strings.HasSuffix(path, ".md") {
+				files = append(files, path)
+			}
 			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
-		if !info.IsDir() && strings.HasSuffix(path, ".md") {
-			files = append(files, path)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 	return files
 }
 
-func TestMarkdownFilesExcludePrivateGuidance(t *testing.T) {
+func TestMarkdownFilesComeFromThePublishedRoots(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	for _, name := range []string{
-		".github/PULL_REQUEST_TEMPLATE.md", "README.md", "docs/guide.md",
-		"AGENTS.md", "CLAUDE.md", ".local/notes.md", ".local/nested/README.md",
-	} {
+	want := []string{
+		"CHANGELOG.md", "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "README.md", "SECURITY.md",
+		".github/PULL_REQUEST_TEMPLATE.md", "docs/guide.md", "docs/nested/page.md",
+	}
+	for _, name := range append([]string{"NOTES.md", "scratch/README.md", "docs/figure.svg"}, want...) {
 		path := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -51,10 +59,8 @@ func TestMarkdownFilesExcludePrivateGuidance(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	want := []string{
-		filepath.Join(root, ".github/PULL_REQUEST_TEMPLATE.md"),
-		filepath.Join(root, "README.md"),
-		filepath.Join(root, "docs/guide.md"),
+	for index, name := range want {
+		want[index] = filepath.Join(root, name)
 	}
 	if got := markdownFiles(t, root); !slices.Equal(got, want) {
 		t.Fatalf("documentation files = %v, want %v", got, want)

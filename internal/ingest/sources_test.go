@@ -71,6 +71,36 @@ func TestSourcesReceiveLabelDescriptionAndProvenance(t *testing.T) {
 	}
 }
 
+// A store derives a Source from its Flow in its own time. One that is not
+// there on the first read is asked for once more before its metadata is
+// given up.
+func TestSourceNotYetDerivedIsReadOnceMore(t *testing.T) {
+	t.Parallel()
+	filename := filepath.Join(t.TempDir(), "fixture.mp4")
+	if err := os.WriteFile(filename, []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := newFakeClient()
+	client.sourceMissingReads = 1
+	pipeline, err := New(Config{Concurrency: 1, VerificationMode: VerificationReadback}, client, fakeProber{}, nil, discardLogger(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := pipeline.Run(context.Background(), []source.Item{localSource(filename)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batch.Succeeded != 1 {
+		t.Fatalf("ingest failed: %#v", batch.Results[0].Failure)
+	}
+	root := batch.Results[0].rootFlow()
+	client.lock.Lock()
+	defer client.lock.Unlock()
+	if label := client.sources[root.SourceID]["label"]; label == nil || label != client.flows[root.FlowID]["label"] {
+		t.Fatalf("source label = %v, want the Flow's %v", label, client.flows[root.FlowID]["label"])
+	}
+}
+
 func TestSourcePopulationFailureIsAWarningNotAFailure(t *testing.T) {
 	t.Parallel()
 	filename := filepath.Join(t.TempDir(), "fixture.mp4")

@@ -224,6 +224,30 @@ func TestSegmentsParsesAllRFCLinkFieldValues(t *testing.T) {
 	}
 }
 
+// A Segment's object_timerange comes back only when the listing asks for it.
+func TestSegmentListingAsksForTheObjectTimerange(t *testing.T) {
+	t.Parallel()
+	var queries []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		queries = append(queries, request.URL.RawQuery)
+		_, _ = io.WriteString(writer, "[]")
+	}))
+	defer server.Close()
+	client, err := New(Config{Endpoint: server.URL, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, options := range []SegmentListOptions{{}, {IncludeObjectTimerange: true}} {
+		if _, err := client.ListSegments(context.Background(), "flow", options); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(queries) != 2 || strings.Contains(queries[0], "include_object_timerange") ||
+		!strings.Contains(queries[1], "include_object_timerange=true") {
+		t.Fatalf("queries = %q", queries)
+	}
+}
+
 func TestNextPageURLAcceptsRFCParameterAndRelationSyntax(t *testing.T) {
 	for _, testCase := range []struct {
 		name  string
