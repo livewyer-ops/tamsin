@@ -258,9 +258,9 @@ func TestCLIRequiresProfileAndResolvesExplicitEssenceSegmentsProfile(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.profile != "essence-segments" || options.profileVersion != "1" ||
-		options.segmentDuration != 10*time.Second || options.segmentFormat != "source" ||
-		options.essenceStorage != "independent" {
+	if options.treatment.Name != "essence-segments" || options.treatment.Version != "1" ||
+		options.treatment.SegmentDuration != 10*time.Second || options.treatment.SegmentFormat != "source" ||
+		options.treatment.EssenceStorage != "independent" {
 		t.Fatalf("default resolved options = %#v", options)
 	}
 }

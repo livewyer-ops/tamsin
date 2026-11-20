@@ -64,7 +64,7 @@ func (c *Client) ListSegments(ctx context.Context, flowID string, options Segmen
 		query.Set("accept_get_urls", "")
 		query.Set("presigned", "false")
 	}
-	requestPath := "flows/" + escapeSegment(flowID) + "/segments?" + query.Encode()
+	requestPath := "flows/" + url.PathEscape(flowID) + "/segments?" + query.Encode()
 	segments, err := listPages[Segment](ctx, c, requestPath, "segments for flow "+flowID)
 	if err != nil {
 		return nil, err

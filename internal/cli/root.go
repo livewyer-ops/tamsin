@@ -337,8 +337,7 @@ func readConfigFile(filename string) ([]byte, error) {
 type ingestOptions struct {
 	inputs           []string
 	inputMode        string
-	profile          string
-	profileVersion   string
+	treatment        ingest.Profile
 	concurrency      int
 	transfers        int
 	probeConcurrency int
@@ -347,9 +346,6 @@ type ingestOptions struct {
 	tempDirectory    string
 	stagingBytes     int64
 	maxInputs        int
-	segmentDuration  time.Duration
-	segmentFormat    string
-	essenceStorage   string
 	ffmpegArgs       []string
 	start            string
 	storageID        string
@@ -558,12 +554,12 @@ func (a *application) runIngest(command *cobra.Command, args []string) (returnEr
 	}
 	pipeline, err := ingest.New(ingest.Config{
 		Observability: run, LifecycleObserver: lifecycleObserver,
-		Profile: options.profile, ProfileVersion: options.profileVersion,
+		Profile: options.treatment.Name, ProfileVersion: options.treatment.Version,
 		Concurrency: options.concurrency, Transfers: options.transfers, ProbeConcurrency: options.probeConcurrency, Retries: a.v.GetInt("http.retries"),
 		DryRunMode: ingest.DryRunMode(options.dryRun), VerificationMode: ingest.VerificationMode(options.verify),
 		TempDirectory: options.tempDirectory, StagingByteBudget: options.stagingBytes,
 		InputMode:       ingest.InputMode(options.inputMode),
-		SegmentDuration: options.segmentDuration, SegmentFormat: media.SegmentFormat(options.segmentFormat), EssenceStorage: media.EssenceStorage(options.essenceStorage), FFmpegArgs: options.ffmpegArgs, Start: start, StorageID: options.storageID,
+		SegmentDuration: options.treatment.SegmentDuration, SegmentFormat: options.treatment.SegmentFormat, EssenceStorage: options.treatment.EssenceStorage, FFmpegArgs: options.ffmpegArgs, Start: start, StorageID: options.storageID,
 		FlowID: options.flowID, SourceID: options.sourceID, FlowMetadata: metadata, CollectedFlowMetadata: collectedMetadata,
 		TAMSFlowProfiles: options.tamsFlowProfiles,
 	}, client, media.FFprobe{Executable: options.ffprobe}, media.FFmpeg{Executable: options.ffmpeg}, logger, reporter)
@@ -646,15 +642,11 @@ func (a *application) resolveIngestOptions(command *cobra.Command, args []string
 	if strings.TrimSpace(v.GetString("ingest.profile")) == "" {
 		return nil, "", errors.New("ingest profile is required; choose one with --profile (run `tamsin profiles` to compare them)")
 	}
-	profile, err := v.treatment()
+	treatment, err := v.treatment()
 	if err != nil {
 		return nil, "", err
 	}
-	options.profile = profile.Name
-	options.profileVersion = profile.Version
-	options.segmentDuration = profile.SegmentDuration
-	options.segmentFormat = string(profile.SegmentFormat)
-	options.essenceStorage = string(profile.EssenceStorage)
+	options.treatment = treatment
 	if options.inputMode == string(ingest.InputStream) && len(options.ffmpegArgs) > 0 {
 		return nil, "", errors.New("--input-mode=stream cannot be combined with --ffmpeg-arg; use auto or stage")
 	}
@@ -705,7 +697,7 @@ func (a *application) tamsClient(ctx context.Context, endpoint string, base *htt
 		Endpoint: cleanEndpoint, Transport: transport, ExternalTransport: base,
 		Timeout: a.v.GetDuration("http.timeout"), TransferTimeout: a.v.GetDuration("http.transfer_timeout"), TransferIdleTimeout: a.v.GetDuration("http.transfer_idle_timeout"),
 		Retries: a.v.GetInt("http.retries"), UserAgent: "tamsin/" + version.Version,
-		Observability: run, DeletionTimeout: a.v.GetDuration("http.deletion_timeout"), Logger: runLogger(run),
+		Observability: run, DeletionTimeout: a.v.GetDuration("http.deletion_timeout"), Logger: run.Logger(),
 	})
 	if err != nil {
 		return nil, "", err
@@ -795,14 +787,6 @@ func (a *application) reporter() progress.Reporter {
 		return progress.Discard{}
 	}
 	return progress.New(a.stderr, progress.Options{Mode: mode})
-}
-
-// runLogger is the run's logger, or nil before a run exists.
-func runLogger(run *observability.Run) *slog.Logger {
-	if run == nil {
-		return nil
-	}
-	return run.Logger()
 }
 
 // loggerFor serialises diagnostics with human progress on stderr.

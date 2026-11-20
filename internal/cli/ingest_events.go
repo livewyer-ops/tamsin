@@ -150,8 +150,8 @@ func (o *ingestEventOutput) startLocked(options *ingestOptions) error {
 	event := ingestevent.RunStarted{StartedAt: o.started.UTC()}
 	if options != nil {
 		concurrency, transfers, inputs := uint64(options.concurrency), uint64(options.transfers), uint64(len(options.inputs))
-		event.Profile = options.profile
-		event.ProfileVersion = options.profileVersion
+		event.Profile = options.treatment.Name
+		event.ProfileVersion = options.treatment.Version
 		event.DryRunMode = options.dryRun
 		event.VerificationMode = options.verify
 		event.Concurrency, event.Transfers, event.RequestedInputs = &concurrency, &transfers, &inputs
@@ -437,7 +437,7 @@ func (o *ingestEventOutput) Finish(cause error, exitCode int,
 	profile, profileVersion := ingest.ProfileUnresolved, ingest.UnresolvedProfileVersion
 	verification := ingest.VerificationNotReached
 	if options != nil {
-		profile, profileVersion = options.profile, options.profileVersion
+		profile, profileVersion = options.treatment.Name, options.treatment.Version
 		if ingest.VerificationMode(options.verify) == ingest.VerificationNone {
 			verification = ingest.VerificationNotRequested
 		}
@@ -504,9 +504,6 @@ func (o *ingestEventOutput) Finish(cause error, exitCode int,
 	}
 	if err := o.emitLocked(nil, finished); err != nil {
 		return ExitGeneral, err
-	}
-	if err := o.encoder.Finalize(); err != nil {
-		return ExitGeneral, o.failLocked(err)
 	}
 	o.finished = true
 	o.exitCode = exitCode

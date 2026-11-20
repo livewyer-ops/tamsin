@@ -199,7 +199,7 @@ func TestInstalledFFmpegRendersAreByteStable(t *testing.T) {
 		err := (FFmpeg{Executable: executable}).Segment(context.Background(), SegmentRequest{
 			Input: input, Duration: time.Second, Format: SegmentFormatSource,
 			SourceContainer: SegmentContainer{Muxer: "mp4", Extension: ".mp4"},
-			StreamIndices:   []int{AllStreams}, Directory: filepath.Join(directory, run), BitExact: true,
+			StreamIndices:   []int{AllStreams}, Directory: filepath.Join(directory, run),
 		}, func(record SegmentRecord) error {
 			data, err := os.ReadFile(record.Path)
 			if err != nil {
@@ -422,9 +422,18 @@ printf '"%s",0.000000,1.000000\n' "$output" >&3
 			arguments := strings.Split(strings.TrimSpace(string(recorded)), "\n")
 			var got []string
 			mapped := ""
+			bitExact := 0
 			for index, argument := range arguments {
 				if argument == "-map" {
 					mapped = arguments[index+1]
+					// An output's options end where the next output begins.
+					own := arguments[index+1:]
+					if next := slices.Index(own, "-map"); next >= 0 {
+						own = own[:next]
+					}
+					if flag := slices.Index(own, "-fflags"); flag >= 0 && own[flag+1] == "+bitexact" {
+						bitExact++
+					}
 				}
 				if strings.HasPrefix(argument, "-bsf") || strings.HasPrefix(argument, "-time_base") {
 					got = append(got, mapped+" "+argument+" "+arguments[index+1])
@@ -432,6 +441,11 @@ printf '"%s",0.000000,1.000000\n' "$output" >&3
 			}
 			if !slices.Equal(got, test.want) || !slices.Equal(repeats, test.repeats) {
 				t.Fatalf("filtered streams = %q on records %v, want %q on %v", got, repeats, test.want, test.repeats)
+			}
+			// Resume identifies an Object by its bytes, so every output is
+			// muxed without build-dependent metadata.
+			if bitExact != len(request.StreamIndices) {
+				t.Fatalf("%d of %d outputs ask for bit-exact muxing", bitExact, len(request.StreamIndices))
 			}
 		})
 	}

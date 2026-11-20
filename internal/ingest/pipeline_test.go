@@ -936,6 +936,29 @@ func TestPipelineAllocatesAndUploadsEverySegment(t *testing.T) {
 	}
 }
 
+// validSnapshot checks the invariants every Tracker snapshot satisfies.
+func validSnapshot(s progress.Snapshot) error {
+	if s.Scope.InputIndex < 0 {
+		return errors.New("progress input index cannot be negative")
+	}
+	if s.Phase != progress.PhaseStore && s.Phase != progress.PhaseVerify {
+		return errors.New("unsupported progress phase")
+	}
+	if s.Revision == 0 {
+		return errors.New("progress revision must be positive")
+	}
+	if s.CompletedObjects < 0 || s.TotalObjects < 0 || s.CompletedBytes < 0 || s.TotalBytes < 0 {
+		return errors.New("progress counters cannot be negative")
+	}
+	if s.TotalsFinal && s.CompletedObjects > s.TotalObjects {
+		return errors.New("completed objects exceed the final total")
+	}
+	if s.TotalsFinal && s.CompletedBytes > s.TotalBytes {
+		return errors.New("completed bytes exceed the final total")
+	}
+	return nil
+}
+
 func TestPipelineProgressKeepsStoreAndVerificationSeparate(t *testing.T) {
 	t.Parallel()
 	filename := writeFixture(t, "fixture.mp4", "media")
@@ -961,7 +984,7 @@ func TestPipelineProgressKeepsStoreAndVerificationSeparate(t *testing.T) {
 	defer progressLock.Unlock()
 	var storeFinal, verifyFinal progress.Snapshot
 	for _, snapshot := range snapshots {
-		if err := snapshot.Validate(); err != nil {
+		if err := validSnapshot(snapshot); err != nil {
 			t.Fatalf("pipeline published invalid progress %+v: %v", snapshot, err)
 		}
 		if snapshot.Scope.InputIndex != 0 || snapshot.Scope.Input != item.URI {

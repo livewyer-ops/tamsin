@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"maps"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -203,4 +205,64 @@ func (p *Pipeline) acquireGraph(rootFlowID string) func() {
 		}
 		p.graphLocksMu.Unlock()
 	}
+}
+
+var idNamespace = uuid.MustParse("d1f5657c-cee0-5ac4-a0a5-c78ba122fa39")
+
+// rendererIdentityEpoch changes only when TAMSin deliberately changes the
+// semantics of media it writes. Package rebuilds and FFmpeg patch releases are
+// provenance, not a new ingest policy, and must not manufacture a new Flow.
+const rendererIdentityEpoch = "6"
+
+// flowProfile is everything about an ingest that changes what ends up in the
+// store. Generated identifiers derive from it, so that the same input treated
+// the same way keeps landing on the same Flow -- which is what makes a resume
+// work -- while any difference that alters the result produces a new one.
+//
+// Essence storage is part of it because it decides whether one Flow or several
+// are written and what shape the parent takes. Without it a muxed
+// multi-essence Flow and the collector of a demultiplexed ingest would derive
+// the same identifier for the same input: two incompatible Flows claiming one
+// ID, one holding Media Objects and one holding none.
+//
+// The start is part of it because it decides where the media sits on the
+// timeline. Without it a second ingest at a different --start appends to the
+// Flow the first one made, instead of describing the placement that was asked
+// for.
+func flowProfile(digest string, config Config) string {
+	return flowProfileForRendererEpoch(digest, config, rendererIdentityEpoch)
+}
+
+func flowProfileForRendererEpoch(digest string, config Config, rendererEpoch string) string {
+	parts := []string{
+		config.Profile,
+		config.ProfileVersion,
+		digest,
+		strconv.FormatInt(int64(config.SegmentDuration), 10),
+		string(config.SegmentFormat),
+		string(config.EssenceStorage),
+		strconv.FormatInt(config.Start, 10),
+		strconv.Itoa(len(config.FFmpegArgs)),
+	}
+	parts = append(parts, config.FFmpegArgs...)
+	parts = append(parts, config.TAMSFlowProfiles...)
+	parts = append(parts, rendererEpoch)
+	return identityFingerprint("media-treatment/v1", parts...)
+}
+
+func mediaToolchainFingerprint(profile, profileVersion, ffmpegReport string) string {
+	return identityFingerprint("media-toolchain/v1", profile, profileVersion, ffmpegReport)
+}
+
+// sourceIdentity derives a Source identifier from content, independent of its
+// location or packaging. The same essence shares a Source across muxed and
+// demuxed Flows. Re-encoding changes the bytes; --source-id lets the operator
+// assert equivalence when the resulting media still represents the same Source.
+func sourceIdentity(digest string, parts ...string) string {
+	return namedID(append([]string{"source", digest}, parts...)...)
+}
+
+func namedID(parts ...string) string {
+	// Source and Object identity encodings must stay stable for resume.
+	return uuid.NewSHA1(idNamespace, []byte(strings.Join(parts, "\x00"))).String()
 }

@@ -173,7 +173,7 @@ func TestMP4SegmentsFollowTheNominalRate(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var records []media.SegmentRecord
 			if err := (media.FFmpeg{}).Segment(ctx, media.SegmentRequest{
-				Input: input, Duration: 3 * time.Second, Format: media.SegmentFormatSource, BitExact: true,
+				Input: input, Duration: 3 * time.Second, Format: media.SegmentFormatSource,
 				SourceContainer: media.SegmentContainer{Muxer: "mp4", Extension: ".mp4"},
 				StreamIndices:   []int{stream}, Directory: t.TempDir(),
 			}, func(record media.SegmentRecord) error {
@@ -254,7 +254,7 @@ func TestOpenGOPSegmentsAbut(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var records []media.SegmentRecord
 			if err := (media.FFmpeg{}).Segment(ctx, media.SegmentRequest{
-				Input: input, FlowStart: int64(time.Minute), Duration: 2 * time.Second, Format: media.SegmentFormatSource, BitExact: true,
+				Input: input, FlowStart: int64(time.Minute), Duration: 2 * time.Second, Format: media.SegmentFormatSource,
 				SourceContainer: media.SegmentContainer{Muxer: "mpegts", Extension: ".ts"},
 				StreamIndices:   []int{stream}, Directory: t.TempDir(),
 			}, func(record media.SegmentRecord) error {
@@ -316,7 +316,7 @@ func TestOpenGOPSegmentsAbut(t *testing.T) {
 			}
 			var records []media.SegmentRecord
 			if err := (media.FFmpeg{}).Segment(ctx, media.SegmentRequest{
-				Input: mp4, Duration: 2 * time.Second, Format: media.SegmentFormatSource, BitExact: true,
+				Input: mp4, Duration: 2 * time.Second, Format: media.SegmentFormatSource,
 				SourceContainer: media.SegmentContainer{Muxer: "mp4", Extension: ".mp4"},
 				StreamIndices:   []int{stream}, Directory: t.TempDir(),
 			}, func(record media.SegmentRecord) error {
@@ -404,7 +404,7 @@ func TestMidGOPCaptureIsAnchoredOnItsFirstKeyFrame(t *testing.T) {
 	}
 	var records []media.SegmentRecord
 	if err := (media.FFmpeg{}).Segment(ctx, media.SegmentRequest{
-		Input: input, FlowStart: start, Duration: 2 * time.Second, Format: media.SegmentFormatSource, BitExact: true,
+		Input: input, FlowStart: start, Duration: 2 * time.Second, Format: media.SegmentFormatSource,
 		SourceContainer: media.SegmentContainer{Muxer: "mpegts", Extension: ".ts"},
 		StreamIndices:   []int{media.AllStreams}, Directory: t.TempDir(),
 	}, func(record media.SegmentRecord) error {

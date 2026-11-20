@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -62,11 +63,10 @@ type doctorResult struct {
 	Checks        []doctorCheck `json:"checks"`
 }
 
-type doctorFailure struct{ exitCode int }
-
 type doctorRun struct {
-	report   doctorResult
-	failures []doctorFailure
+	report doctorResult
+	// failures holds the exit code of each failed check.
+	failures []int
 }
 
 func newDoctorRun(online bool) *doctorRun {
@@ -88,7 +88,7 @@ func (r *doctorRun) fail(name string, err error, exitCode int, detail map[string
 	r.report.Checks = append(r.report.Checks, doctorCheck{
 		Name: name, Status: doctorFail, Detail: detail, Error: err.Error(),
 	})
-	r.failures = append(r.failures, doctorFailure{exitCode: exitCode})
+	r.failures = append(r.failures, exitCode)
 }
 
 func (r *doctorRun) skip(name, reason string) {
@@ -102,10 +102,8 @@ func (r *doctorRun) skip(name, reason string) {
 // remote TAMS validation, and finally other local runtime failures.
 func (r *doctorRun) exitCode() int {
 	for _, candidate := range []int{ExitUsage, ExitMedia, ExitAuth, ExitRemote, ExitGeneral} {
-		for _, failure := range r.failures {
-			if failure.exitCode == candidate {
-				return candidate
-			}
+		if slices.Contains(r.failures, candidate) {
+			return candidate
 		}
 	}
 	return ExitGeneral
@@ -395,9 +393,6 @@ func safeDoctorRemoteError(operation string, err error) error {
 	var httpErr *tams.HTTPError
 	if errors.As(err, &httpErr) {
 		return fmt.Errorf("%s returned %d %s", operation, httpErr.StatusCode, http.StatusText(httpErr.StatusCode))
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
 	}
 	// The TAMS client suppresses raw transport errors and redacts URL query
 	// values. Keeping its diagnostic preserves actionable request context.

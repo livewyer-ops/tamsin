@@ -44,6 +44,13 @@ type graphFlow struct {
 	profileID        string
 }
 
+// flowGraph is the set of Flows one input produces. It is passed by value,
+// and every copy shares the flows slice, each member's Flow map and the
+// changes map with the others. A function given a flowGraph may therefore
+// assign a member's profile ID, set fields on a member's Flow or record a
+// status change, and its caller reads the result from its own copy. Code that
+// needs a Flow as it stood at one moment clones the map, as
+// beginRollingFlowPlan does.
 type flowGraph struct {
 	changes     flowChanges
 	flows       []graphFlow

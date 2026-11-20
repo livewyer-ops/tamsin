@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -189,7 +190,7 @@ func ServiceAndBackends(ctx context.Context, client interface {
 
 func (c *Client) Profile(ctx context.Context, profileID string) (Profile, error) {
 	var result Profile
-	if err := c.doJSON(ctx, http.MethodGet, "service/profiles/"+escapeSegment(profileID), nil, &result, http.StatusOK); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "service/profiles/"+url.PathEscape(profileID), nil, &result, http.StatusOK); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -197,7 +198,7 @@ func (c *Client) Profile(ctx context.Context, profileID string) (Profile, error)
 
 func (c *Client) Flow(ctx context.Context, flowID string) (Flow, error) {
 	var result Flow
-	if err := c.doJSON(ctx, http.MethodGet, "flows/"+escapeSegment(flowID), nil, &result, http.StatusOK); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "flows/"+url.PathEscape(flowID), nil, &result, http.StatusOK); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -205,7 +206,7 @@ func (c *Client) Flow(ctx context.Context, flowID string) (Flow, error) {
 
 func (c *Client) PutFlow(ctx context.Context, flowID string, flow Flow) (Flow, error) {
 	var result Flow
-	if err := c.doJSON(ctx, http.MethodPut, "flows/"+escapeSegment(flowID), flow, &result, http.StatusCreated, http.StatusNoContent, http.StatusOK); err != nil {
+	if err := c.doJSON(ctx, http.MethodPut, "flows/"+url.PathEscape(flowID), flow, &result, http.StatusCreated, http.StatusNoContent, http.StatusOK); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -213,7 +214,7 @@ func (c *Client) PutFlow(ctx context.Context, flowID string, flow Flow) (Flow, e
 
 func (c *Client) Source(ctx context.Context, sourceID string) (Source, error) {
 	var result Source
-	if err := c.doJSON(ctx, http.MethodGet, "sources/"+escapeSegment(sourceID), nil, &result, http.StatusOK); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "sources/"+url.PathEscape(sourceID), nil, &result, http.StatusOK); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -223,29 +224,29 @@ func (c *Client) Source(ctx context.Context, sourceID string) (Source, error) {
 // properties the API exposes as sub-resources. Each body is a JSON string and
 // success is 204.
 func (c *Client) PutSourceLabel(ctx context.Context, sourceID, label string) error {
-	return c.doJSON(ctx, http.MethodPut, "sources/"+escapeSegment(sourceID)+"/label", label, nil, http.StatusNoContent)
+	return c.doJSON(ctx, http.MethodPut, "sources/"+url.PathEscape(sourceID)+"/label", label, nil, http.StatusNoContent)
 }
 
 func (c *Client) PutSourceDescription(ctx context.Context, sourceID, description string) error {
-	return c.doJSON(ctx, http.MethodPut, "sources/"+escapeSegment(sourceID)+"/description", description, nil, http.StatusNoContent)
+	return c.doJSON(ctx, http.MethodPut, "sources/"+url.PathEscape(sourceID)+"/description", description, nil, http.StatusNoContent)
 }
 
 // PutSourceTag writes one Source tag. A tag value is a string or a list of
 // strings, so it is sent as the JSON value it is.
 func (c *Client) PutSourceTag(ctx context.Context, sourceID, name string, value any) error {
-	return c.doJSON(ctx, http.MethodPut, "sources/"+escapeSegment(sourceID)+"/tags/"+escapeSegment(name), value, nil, http.StatusNoContent)
+	return c.doJSON(ctx, http.MethodPut, "sources/"+url.PathEscape(sourceID)+"/tags/"+url.PathEscape(name), value, nil, http.StatusNoContent)
 }
 
 func (c *Client) AllocateStorage(ctx context.Context, flowID string, request StorageRequest) (StorageResponse, error) {
 	var result StorageResponse
-	if err := c.doJSON(ctx, http.MethodPost, "flows/"+escapeSegment(flowID)+"/storage", request, &result, http.StatusCreated); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "flows/"+url.PathEscape(flowID)+"/storage", request, &result, http.StatusCreated); err != nil {
 		return StorageResponse{}, err
 	}
 	return result, nil
 }
 
 func (c *Client) RegisterSegment(ctx context.Context, flowID string, request SegmentRequest) error {
-	return c.doJSON(ctx, http.MethodPost, "flows/"+escapeSegment(flowID)+"/segments", request, nil, http.StatusCreated)
+	return c.doJSON(ctx, http.MethodPost, "flows/"+url.PathEscape(flowID)+"/segments", request, nil, http.StatusCreated)
 }
 
 func (c *Client) RegisterSegments(ctx context.Context, flowID string, requests []SegmentRequest) error {
@@ -256,7 +257,7 @@ func (c *Client) RegisterSegments(ctx context.Context, flowID string, requests [
 		return c.RegisterSegment(ctx, flowID, requests[0])
 	}
 	var failure BulkSegmentFailure
-	path := "flows/" + escapeSegment(flowID) + "/segments"
+	path := "flows/" + url.PathEscape(flowID) + "/segments"
 	response, err := c.doJSONResponse(ctx, http.MethodPost, path, requests, &failure, http.StatusCreated, http.StatusOK)
 	if err != nil {
 		return err
@@ -711,7 +712,7 @@ func (c *Client) doJSONResponse(ctx context.Context, method, requestPath string,
 			continue
 		}
 
-		success := containsStatus(expected, response.StatusCode)
+		success := slices.Contains(expected, response.StatusCode)
 		limit := int64(maxErrorBody)
 		if success {
 			limit = maxJSONBody
@@ -803,10 +804,6 @@ func (c *Client) resolve(requestPath string) (*url.URL, error) {
 	return &resolved, nil
 }
 
-func escapeSegment(value string) string {
-	return url.PathEscape(value)
-}
-
 func retryableMethod(method string) bool {
 	switch method {
 	case http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete:
@@ -823,15 +820,6 @@ func retryableStatus(status int) bool {
 	default:
 		return false
 	}
-}
-
-func containsStatus(expected []int, actual int) bool {
-	for _, status := range expected {
-		if status == actual {
-			return true
-		}
-	}
-	return false
 }
 
 // maxRetryAfter caps server-requested retry delays.

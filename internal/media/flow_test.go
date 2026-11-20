@@ -264,6 +264,12 @@ func TestInterlaceModeOmitsAmbiguousAndPsFClaims(t *testing.T) {
 	}
 }
 
+// describeContainer is the container media type a Flow of the given stream
+// type declares, or empty for a refused container.
+func describeContainer(format Format, streamType, detected string) string {
+	return resolveContainer(format, detected).mime(streamType)
+}
+
 // Unsupported containers must be refused, without guessing from their extension.
 func TestContainerProfilePolicy(t *testing.T) {
 	t.Parallel()
@@ -301,6 +307,18 @@ func TestContainerProfilePolicy(t *testing.T) {
 				t.Fatalf("describeContainer() = %q, want %q", got, testCase.want)
 			}
 		})
+	}
+}
+
+// FFprobe names the ISO base media demuxer by a list of aliases. Each of them
+// alone names that demuxer.
+func TestEachISOBMFFAliasIsRecognised(t *testing.T) {
+	t.Parallel()
+	for _, alias := range []string{"mov", "mp4", "m4a", "3gp", "3g2", "mj2"} {
+		format := Format{Name: alias, Tags: map[string]string{"major_brand": "isom"}}
+		if got := describeContainer(format, "video", ""); got != "video/mp4" {
+			t.Errorf("describeContainer(%q) = %q, want video/mp4", alias, got)
+		}
 	}
 }
 

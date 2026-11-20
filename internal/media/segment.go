@@ -29,6 +29,15 @@ const (
 	SegmentFormatMPEGTS SegmentFormat = "mpegts"
 )
 
+// OutputContainer is the container a render in this format writes from a
+// source in the given container.
+func (f SegmentFormat) OutputContainer(source SegmentContainer) SegmentContainer {
+	if f == SegmentFormatMPEGTS {
+		return SegmentContainer{Muxer: "mpegts", Extension: ".ts"}
+	}
+	return source
+}
+
 // ContainerMIME reports the container MIME type Segments of this format carry,
 // or empty when the format follows the source and the probe already knows it.
 func (f SegmentFormat) ContainerMIME() string {
@@ -98,7 +107,6 @@ type SegmentRequest struct {
 	StreamIndices     []int
 	Directory         string
 	AdditionalArgs    []string
-	BitExact          bool
 	// Streams is the probed source, which tells the renderer the codec of
 	// each stream it copies.
 	Streams []Stream
@@ -218,10 +226,7 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 	if err := os.MkdirAll(request.Directory, 0o700); err != nil {
 		return fmt.Errorf("create segment directory: %w", err)
 	}
-	outputContainer := request.SourceContainer
-	if request.Format == SegmentFormatMPEGTS {
-		outputContainer = SegmentContainer{Muxer: "mpegts", Extension: ".ts"}
-	}
+	outputContainer := request.Format.OutputContainer(request.SourceContainer)
 	if (outputContainer.Muxer != "mp4" && outputContainer.Muxer != "mpegts") || outputContainer.Extension == "" {
 		return errors.New("output container must be MP4 or MPEG-TS")
 	}
@@ -248,9 +253,9 @@ func (f FFmpeg) Segment(ctx context.Context, request SegmentRequest, sink Segmen
 			filters = parameterSetFilters(request.Streams, streamIndex)
 		}
 		arguments = append(arguments, filters...)
-		if request.BitExact {
-			arguments = append(arguments, "-fflags", "+bitexact")
-		}
+		// Every render is bit-exact so an identical re-run produces identical
+		// bytes, and with them identical Object identifiers.
+		arguments = append(arguments, "-fflags", "+bitexact")
 		arguments = append(arguments, request.AdditionalArgs...)
 		arguments = append(arguments, "-avoid_negative_ts", "disabled")
 		phase := strconv.FormatInt((mpegTSPhase(request.FlowStart)+500)/1000, 10) + "us"

@@ -1,14 +1,8 @@
 package media
 
 import (
-	"errors"
 	"fmt"
-	"io"
 	"math/big"
-	"mime"
-	"net/http"
-	"os"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -67,7 +61,8 @@ type UnsupportedCodec struct {
 }
 
 func BuildFlow(probe Probe, identity Identity, detectedContentType string, storage EssenceStorage) (tams.Flow, FlowInfo, error) {
-	if err := ValidateContainer(probe.Format, detectedContentType); err != nil {
+	packaging := resolveContainer(probe.Format, detectedContentType)
+	if err := packaging.validate(probe.Format); err != nil {
 		return nil, FlowInfo{}, err
 	}
 	streams, undescribed := describableStreams(contentStreams(probe.Streams))
@@ -89,7 +84,7 @@ func BuildFlow(probe Probe, identity Identity, detectedContentType string, stora
 
 	info := FlowInfo{
 		Start: start, Duration: duration,
-		SegmentContainer: SourceSegmentContainer(probe.Format, detectedContentType),
+		SegmentContainer: packaging.segmentContainer(),
 		Streams:          probe.Streams,
 	}
 	if info.ReferenceOffset, err = referenceOffset(streams, start); err != nil {
@@ -117,14 +112,14 @@ func BuildFlow(probe Probe, identity Identity, detectedContentType string, stora
 	// reference Media Objects directly; their media is reached through the
 	// multi-essence Flow's Segments, located by `container_mapping`.
 	if len(streams) > 1 {
-		container := describeContainer(probe.Format, containerEssence(streams), detectedContentType)
+		container := packaging.mime(containerEssence(streams))
 		flow["format"] = "urn:x-nmos:format:multi"
 		flow["container"] = container
 		info.Format = "urn:x-nmos:format:multi"
 		info.Container = container
 		info.ContentType = container
 
-		collected, err := collectEssenceFlows(streams, undescribed, probe, identity, detectedContentType, start, duration, storage)
+		collected, err := collectEssenceFlows(streams, undescribed, probe, identity, packaging, start, duration, storage)
 		if err != nil {
 			return nil, FlowInfo{}, err
 		}
@@ -134,7 +129,7 @@ func BuildFlow(probe Probe, identity Identity, detectedContentType string, stora
 
 	stream := streams[0]
 	codec := codecMIME(stream.CodecName)
-	container := describeContainer(probe.Format, stream.CodecType, detectedContentType)
+	container := packaging.mime(stream.CodecType)
 	info.Codec = codec
 	info.Container = container
 	info.ContentType = container
@@ -323,7 +318,7 @@ type CollectedFlow struct {
 // so its parent Collection Item carries container_mapping and the child has no
 // container of its own; an independently stored Flow owns its Media Objects,
 // so it declares a container and has no multiplex to map into.
-func collectEssenceFlows(streams, undescribed []Stream, probe Probe, identity Identity, detectedContentType string, start, duration int64, storage EssenceStorage) ([]CollectedFlow, error) {
+func collectEssenceFlows(streams, undescribed []Stream, probe Probe, identity Identity, packaging sourceContainer, start, duration int64, storage EssenceStorage) ([]CollectedFlow, error) {
 	formatCounts := make(map[string]int, len(streams))
 	for _, stream := range streams {
 		formatCounts[essenceRole(stream.CodecType)]++
@@ -347,7 +342,7 @@ func collectEssenceFlows(streams, undescribed []Stream, probe Probe, identity Id
 			"description": "Ingested by Tamsin",
 			"tags":        provenanceTags(identity),
 		}
-		container := describeContainer(probe.Format, stream.CodecType, detectedContentType)
+		container := packaging.mime(stream.CodecType)
 		var mapping map[string]any
 		if storage == EssenceStorageIndependent {
 			// The essence is demultiplexed into its own Media Objects, so the Flow
@@ -415,7 +410,7 @@ func addContainerIdentifiers(mapping map[string]any, format Format, stream Strea
 	switch {
 	case names["mpegts"]:
 		mapping["mp2ts_container"] = map[string]any{"pid": id}
-	case names["mov"] || names["mp4"] || names["m4a"] || names["3gp"] || names["3g2"] || names["mj2"]:
+	case isISOBMFF(names):
 		mapping["isobmff_container"] = map[string]any{"track_id": id}
 	}
 }
@@ -513,24 +508,6 @@ func essenceRole(codecType string) string {
 	default:
 		return "data"
 	}
-}
-
-func DetectContentType(filename string) (string, error) {
-	file, err := os.Open(filename)
-	if err != nil {
-		return "", fmt.Errorf("open input for content detection: %w", err)
-	}
-	defer file.Close()
-	return DetectReaderContentType(file)
-}
-
-func DetectReaderContentType(reader io.Reader) (string, error) {
-	buffer := make([]byte, 512)
-	read, err := io.ReadFull(reader, buffer)
-	if err != nil && read == 0 {
-		return "", fmt.Errorf("read input for content detection: %w", err)
-	}
-	return normalizeMIME(http.DetectContentType(buffer[:read])), nil
 }
 
 func contentStreams(streams []Stream) []Stream {
@@ -842,355 +819,12 @@ func probeDuration(probe Probe, streams []Stream, start int64) (int64, error) {
 	return latestEnd, nil
 }
 
-func codecMIME(codec string) string {
-	known := map[string]string{
-		"aac": "audio/aac", "ac3": "audio/ac3", "eac3": "audio/eac3", "flac": "audio/flac", "mp2": "audio/mpeg", "mp3": "audio/mpeg", "opus": "audio/opus", "vorbis": "audio/vorbis",
-		"h264": "video/h264", "hevc": "video/h265", "av1": "video/AV1", "ffv1": "video/FFV1", "mpeg2video": "video/mpeg", "mpeg4": "video/mp4v-es", "prores": "video/quicktime", "vp8": "video/VP8", "vp9": "video/VP9",
-		"mpeg1video": "video/mpeg", "dvvideo": "video/DV", "dnxhd": "video/x-dnxhd",
-		"mjpeg": "image/jpeg", "jpeg2000": "image/jp2", "png": "image/png", "gif": "image/gif", "webp": "image/webp",
-		"dts": "audio/vnd.dts", "truehd": "audio/vnd.dolby.mlp", "s302m": "audio/x-smpte302m",
-		"pcm_alaw": "audio/PCMA", "pcm_mulaw": "audio/PCMU",
-		"subrip": "application/x-subrip", "ass": "text/x-ssa", "webvtt": "text/vtt", "ttml": "application/ttml+xml",
-		"mov_text": "text/x-quicktime-text", "dvb_subtitle": "application/x-dvb-subtitle",
-		"dvb_teletext": "application/x-dvb-teletext", "scte_35": "application/x-scte35",
-		"eia_608": "application/x-cea-608",
-	}
-	if value := known[strings.ToLower(codec)]; value != "" {
-		return value
-	}
-	if strings.HasPrefix(codec, "pcm_") {
-		switch {
-		case strings.Contains(codec, "f32") || strings.Contains(codec, "f64"):
-			return "audio/x-raw-float"
-		case strings.Contains(codec, "f16") || strings.Contains(codec, "f24"):
-			// The schema allows only 32- and 64-bit floating point.
-			return ""
-		}
-		return "audio/x-raw-int"
-	}
-	return ""
-}
-
-// essenceCodec is the coding media type for a stream as the Flow describes
-// it. JPEG 2000 is image/jp2 for a still picture and video/jp2 for moving
-// pictures, the value the BBC examples use for J2K video Flows.
-func essenceCodec(stream Stream, stillImage bool) string {
-	codec := codecMIME(stream.CodecName)
-	if stream.CodecType == "video" && !stillImage && strings.EqualFold(stream.CodecName, "jpeg2000") {
-		return "video/jp2"
-	}
-	return codec
-}
-
-// describableStreams separates the streams Tamsin can describe as Flows from
-// data and attachment tracks that have no coding media type to declare. Video,
-// audio and subtitle streams are always kept: an unknown codec there is a
-// reason to stop, not to drop the essence.
-func describableStreams(streams []Stream) (kept, undescribed []Stream) {
-	for _, stream := range streams {
-		if UndescribableDataStream(stream) {
-			undescribed = append(undescribed, stream)
-			continue
-		}
-		kept = append(kept, stream)
-	}
-	return kept, undescribed
-}
-
-// streamCodecLabel names a stream's coding for diagnostics. FFprobe leaves
-// codec_name out for tracks FFmpeg has no decoder for, such as timecode,
-// and reports only the container's four-character tag.
-func streamCodecLabel(stream Stream) string {
-	switch {
-	case stream.CodecName != "":
-		return stream.CodecName
-	case stream.CodecTagString != "":
-		return stream.CodecTagString
-	}
-	return "unknown"
-}
-
-// UndescribableDataStream reports a data or attachment track with no coding
-// media type Tamsin can name, such as timecode. Such a track cannot be an
-// elemental Flow, because the schema requires a codec, so it stays in the
-// preserved multiplex undescribed.
-func UndescribableDataStream(stream Stream) bool {
-	switch stream.CodecType {
-	case "data", "attachment":
-		return codecMIME(stream.CodecName) == ""
-	}
-	return false
-}
-
-func pcmUncompressedType(codec string) string {
-	codec = strings.ToLower(strings.TrimSpace(codec))
-	if strings.HasSuffix(codec, "_planar") || codec == "pcm_lxf" {
-		return "planar"
-	}
-	return "interleaved"
-}
-
-var ErrUnsupportedContainer = errors.New("unsupported input container")
-
-// ValidateContainer applies the same content-based policy to every input.
-func ValidateContainer(format Format, detected string) error {
-	if SourceSegmentContainer(format, detected).Muxer == "" {
-		return fmt.Errorf("%w %q (brand %q): only MP4 and MPEG-TS are supported", ErrUnsupportedContainer, format.Name, format.Tags["major_brand"])
-	}
-	return nil
-}
-
-// describeContainer returns the supported MIME type, or empty for rejection.
-func describeContainer(format Format, streamType, detected string) string {
-	names := ffprobeFormatNames(format.Name)
-	if names["mpegts"] {
-		return "video/mp2t"
-	}
-	if isISOBMFF(names) {
-		return isoBMFFContainer(format.Tags, streamType, detected)
-	}
-	return ""
-}
-
-// SourceSegmentContainer resolves a supported container from media evidence.
-func SourceSegmentContainer(format Format, detected string) SegmentContainer {
-	switch describeContainer(format, "video", detected) {
-	case "video/mp4":
-		return SegmentContainer{Muxer: "mp4", Extension: ".mp4"}
-	case "video/mp2t":
-		return SegmentContainer{Muxer: "mpegts", Extension: ".ts"}
-	}
-	return SegmentContainer{}
-}
-
-func isISOBMFF(names map[string]bool) bool {
-	return namesAny(names, []string{"mov", "mp4", "m4a", "3gp", "3g2", "mj2"})
-}
-
-func namesAny(names map[string]bool, candidates []string) bool {
-	for _, candidate := range candidates {
-		if names[candidate] {
-			return true
-		}
-	}
-	return false
-}
-
-func ffprobeFormatNames(value string) map[string]bool {
-	names := make(map[string]bool)
-	for _, name := range strings.Split(strings.ToLower(value), ",") {
-		names[strings.TrimSpace(name)] = true
-	}
-	return names
-}
-
-func isoBMFFContainer(tags map[string]string, streamType, detected string) string {
-	brand := strings.ToLower(strings.TrimSpace(tags["major_brand"]))
-	switch {
-	case brand == "qt", strings.HasPrefix(brand, "3gp"), strings.HasPrefix(brand, "3g2"),
-		brand == "mjp2", brand == "mj2s", brand == "avif", brand == "avis", brand == "mif1", brand == "msf1",
-		strings.HasPrefix(brand, "hei"):
-		return ""
-	case isMP4Brand(brand) || hasMP4CompatibleBrand(tags["compatible_brands"]):
-		return mp4Container(streamType)
-	}
-	if brand == "" {
-		switch normalizeMIME(detected) {
-		case "video/mp4", "audio/mp4", "application/mp4":
-			return mp4Container(streamType)
-		}
-	}
-	return ""
-}
-
-func mp4Container(streamType string) string {
-	switch streamType {
-	case "video":
-		return "video/mp4"
-	case "audio":
-		return "audio/mp4"
-	default:
-		// RFC 4337 reserves application/mp4 for a file with neither an audio
-		// nor a visual presentation. A normal multiplex therefore reaches the
-		// video or audio branch according to its actual streams.
-		return "application/mp4"
-	}
-}
-
-func isMP4Brand(brand string) bool {
-	switch brand {
-	case "isom", "mp41", "mp42", "m4a", "m4b", "m4p", "m4v":
-		return true
-	default:
-		return false
-	}
-}
-
-// FFprobe exposes ISO compatible_brands as concatenated four-byte codes. A new
-// major brand that declares compatibility with the stable MP4 brands does not
-// need another Tamsin table entry; unrelated ISO formats such as AVIF/HEIF do
-// not acquire MP4 compatibility merely because the same demuxer opened them.
-func hasMP4CompatibleBrand(value string) bool {
-	for len(value) >= 4 {
-		brand := strings.ToLower(strings.TrimSpace(value[:4]))
-		if brand == "isom" || brand == "mp41" || brand == "mp42" {
-			return true
-		}
-		value = value[4:]
-	}
-	return false
-}
-
-func containerEssence(streams []Stream) string {
-	hasAudio := false
-	for _, stream := range streams {
-		switch stream.CodecType {
-		case "video":
-			return "video"
-		case "audio":
-			hasAudio = true
-		}
-	}
-	if hasAudio {
-		return "audio"
-	}
-	return "data"
-}
-
-func normalizeMIME(value string) string {
-	mediaType, _, err := mime.ParseMediaType(value)
-	if err != nil {
-		return ""
-	}
-	return mediaType
-}
-
 func isStillImage(probe Probe, stream Stream, duration int64) bool {
 	if duration > 0 {
 		return false
 	}
 	format := strings.ToLower(probe.Format.Name)
 	return strings.Contains(format, "image") || strings.Contains(format, "pipe") || stream.CodecName == "png" || stream.CodecName == "mjpeg" || stream.CodecName == "jpeg2000" || stream.CodecName == "webp" || stream.CodecName == "gif"
-}
-
-func bitDepth(stream Stream) int {
-	for _, value := range []string{stream.BitsPerRawSample, strconv.Itoa(stream.BitsPerSample)} {
-		depth, err := strconv.Atoi(value)
-		if err == nil && depth > 0 {
-			return depth
-		}
-	}
-	return pixelFormatDepth(stream.PixelFormat)
-}
-
-var (
-	planarDepthPattern = regexp.MustCompile(`p(9|1[0-6])$`)
-	grayDepthPattern   = regexp.MustCompile(`^(?:gray|ya)(9|1[0-6]|32)f?$`)
-	semiPlanarPattern  = regexp.MustCompile(`^p[024](10|12|16)$`)
-	packedRGB16Pattern = regexp.MustCompile(`^(?:rgb|bgr)48$|^(?:rgba|bgra)64$`)
-	packedRGB10Pattern = regexp.MustCompile(`^x2(?:rgb|bgr)10$`)
-)
-
-// pixelFormatDepth reads the sample depth an FFmpeg pixel format name states
-// explicitly: the planar suffix (yuv420p10le, gbrp12be), gray and gray-alpha
-// depths, semi-planar P010/P016, and the 16-bit packed RGB forms. Formats
-// that state no depth, such as yuv420p or nv12, give zero rather than a
-// guess: digits in a chroma-subsampling group are not a depth.
-func pixelFormatDepth(name string) int {
-	name = strings.ToLower(strings.TrimSpace(name))
-	name = strings.TrimSuffix(strings.TrimSuffix(name, "le"), "be")
-	if name == "" {
-		return 0
-	}
-	depth := func(digits string) int {
-		value, _ := strconv.Atoi(digits)
-		return value
-	}
-	switch {
-	case packedRGB16Pattern.MatchString(name):
-		return 16
-	case packedRGB10Pattern.MatchString(name):
-		return 10
-	}
-	if match := semiPlanarPattern.FindStringSubmatch(name); match != nil {
-		return depth(match[1])
-	}
-	if match := grayDepthPattern.FindStringSubmatch(name); match != nil {
-		return depth(match[1])
-	}
-	if match := planarDepthPattern.FindStringSubmatch(name); match != nil {
-		return depth(match[1])
-	}
-	return 0
-}
-
-func interlaceMode(value string) string {
-	switch strings.ToLower(value) {
-	case "progressive":
-		return "progressive"
-	case "tt":
-		return "interlaced_tff"
-	case "bb":
-		return "interlaced_bff"
-	default:
-		// FFmpeg documents tb/bt in terms of coded and displayed order,
-		// while its demuxers and muxers do not interpret those values
-		// consistently. Neither value distinguishes interlace from PsF.
-		// Omitting an optional field is safer than choosing the wrong scan.
-		return ""
-	}
-}
-
-// videoColorspace names the colour system the essence was authored in.
-//
-// The primaries answer that question. The matrix coefficients FFprobe reports
-// as color_space usually agree with them and are a different property: a file
-// can carry BT.709 matrix coefficients with BT.2020 primaries, and reading the
-// matrix would then describe it as the wrong system entirely. Primaries are
-// therefore preferred, with the matrix used only when a file states no
-// primaries -- which older material often does not.
-//
-// BT.2100 is BT.2020 primaries with an HDR transfer, so the transfer is what
-// separates the two. Reporting BT2020 alongside HLG or PQ would name a system
-// that does not use those transfer functions.
-func videoColorspace(primaries, matrix, transfer string) string {
-	system := colorSystem(primaries)
-	if system == "" {
-		system = colorSystem(matrix)
-	}
-	if system == "BT2020" && (transfer == "HLG" || transfer == "PQ") {
-		return "BT2100"
-	}
-	return system
-}
-
-// colorSystem maps either a primaries or a matrix coefficient name onto the
-// colour systems TAMS names. The two vocabularies overlap, which is why one
-// table serves both.
-func colorSystem(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "bt709":
-		return "BT709"
-	case "bt2020", "bt2020nc", "bt2020c":
-		return "BT2020"
-	case "smpte170m", "bt470bg", "bt470m", "smpte240m":
-		return "BT601"
-	default:
-		return ""
-	}
-}
-
-func transferCharacteristic(value string) string {
-	switch strings.ToLower(value) {
-	case "arib-std-b67":
-		return "HLG"
-	case "smpte2084":
-		return "PQ"
-	case "bt709", "smpte170m", "gamma22", "gamma28":
-		return "SDR"
-	default:
-		return ""
-	}
 }
 
 func errorsForDimensions(label string) error {

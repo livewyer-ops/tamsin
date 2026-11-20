@@ -26,8 +26,6 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-var idNamespace = uuid.MustParse("d1f5657c-cee0-5ac4-a0a5-c78ba122fa39")
-
 // The measured four-track crossover saves enough process startup and input
 // reopening to justify the multi-output command, while the common video/audio
 // pair stays on the simpler isolated-output path.
@@ -39,11 +37,6 @@ const multiOutputEssenceThreshold = 4
 func rendersTogether(essences int, additionalArgs []string) bool {
 	return essences >= multiOutputEssenceThreshold && len(additionalArgs) == 0
 }
-
-// rendererIdentityEpoch changes only when TAMSin deliberately changes the
-// semantics of media it writes. Package rebuilds and FFmpeg patch releases are
-// provenance, not a new ingest policy, and must not manufacture a new Flow.
-const rendererIdentityEpoch = "6"
 
 // MaxConcurrency bounds each of a run's concurrency settings and MaxRetries
 // its retries. The CLI refuses a setting beyond them before a Pipeline is
@@ -290,10 +283,7 @@ func (p *Pipeline) RunObserved(ctx context.Context, items []source.Item, observe
 				result.Profile = p.config.Profile
 				result.ProfileVersion = p.config.ProfileVersion
 				if err != nil {
-					result.Input = safeURI(items[index].URI)
-					result.Status = ResultStatusFailed
-					result.Error = err.Error()
-					result.Verification = p.verificationFailureStatus(err)
+					result = p.failed(result, items[index], err)
 					result.Failure = describeRunFailure(result, err, ctx)
 				} else if p.config.VerificationMode != VerificationNone && p.config.DryRunMode == DryRunOff {
 					result.Verification = VerificationVerified
@@ -409,12 +399,22 @@ func (p *Pipeline) failAll(items []source.Item, cause error, observe ResultObser
 	return batch, cause
 }
 
-func (p *Pipeline) failedResult(item source.Item, cause error) Result {
-	result := Result{
-		Input: safeURI(item.URI), Profile: p.config.Profile, ProfileVersion: p.config.ProfileVersion,
-		Status: ResultStatusFailed, Verification: p.verificationFailureStatus(cause),
-		Flows: []FlowResult{}, Error: cause.Error(),
+// failed marks result as the failed outcome of item. The caller describes the
+// failure, which depends on whether the run was interrupted.
+func (p *Pipeline) failed(result Result, item source.Item, cause error) Result {
+	result.Input = safeURI(item.URI)
+	result.Profile, result.ProfileVersion = p.config.Profile, p.config.ProfileVersion
+	result.Status = ResultStatusFailed
+	result.Verification = p.verificationFailureStatus(cause)
+	result.Error = cause.Error()
+	if result.Flows == nil {
+		result.Flows = []FlowResult{}
 	}
+	return result
+}
+
+func (p *Pipeline) failedResult(item source.Item, cause error) Result {
+	result := p.failed(Result{}, item, cause)
 	var classified *classifiedFailure
 	if !errors.As(cause, &classified) && (errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded)) {
 		result.Failure = DescribeInputInterruptedFailure()
@@ -493,10 +493,8 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 			return Result{}, withFailure(FailureCodeMediaOptionsInvalid, FailureMessageMediaOptionsInvalid, true, err)
 		}
 	}
-	segmentContainer := media.SourceSegmentContainer(probe.Format, contentType)
-	if p.config.SegmentFormat == media.SegmentFormatMPEGTS {
-		segmentContainer = media.SegmentContainer{Muxer: "mpegts", Extension: ".ts"}
-	}
+	segmentContainer := p.config.SegmentFormat.OutputContainer(media.SourceSegmentContainer(probe.Format, contentType))
+	ffmpegVersion, toolchainFingerprint := "", ""
 	if writesOutput {
 		if err := validateRenderedTracks(probe, segmentContainer.Muxer); err != nil {
 			return Result{}, withFailure(FailureCodeMediaUnsupported, FailureMessageMediaUnsupported, true, err)
@@ -506,14 +504,9 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 				return Result{}, withFailure(FailureCodeMediaUnsupported, FailureMessageMediaUnsupported, true, err)
 			}
 		}
-	}
-	if writesOutput {
 		if err := validateMuxerArguments(p.config.FFmpegArgs, p.config.SegmentDuration > 0, segmentContainer.Muxer); err != nil {
 			return Result{}, withFailure(FailureCodeMediaOptionsInvalid, FailureMessageMediaOptionsInvalid, true, err)
 		}
-	}
-	ffmpegVersion, toolchainFingerprint := "", ""
-	if writesOutput {
 		ffmpegVersion, toolchainFingerprint, err = p.mediaToolchain(ctx)
 		if err != nil {
 			return Result{}, withFailure(FailureCodeMediaToolUnavailable, FailureMessageMediaToolUnavailable, true, err)
@@ -559,17 +552,20 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 		return Result{}, withFailure(FailureCodeMediaOptionsInvalid, FailureMessageCollectedMetadataInvalid, true, err)
 	}
 	if flowID == "" {
-		mediaKey, err := mediaInterpretationFingerprint(flow, flowInfo)
-		if err != nil {
-			return Result{}, withFailure(FailureCodeMediaAnalysisFailed, FailureMessageMediaIdentityUnresolved, true,
-				fmt.Errorf("derive media interpretation identity: %w", err))
-		}
-		flowID = generatedRootFlowID(profileKey, mediaKey)
+		// A streamed input is identified before its cadence and duration are
+		// known, so it has a derivation of its own.
 		if staged.bridge != nil {
 			flowID, err = streamedFlowID(profileKey, flow, flowInfo, p.config.FlowMetadata, p.config.CollectedFlowMetadata)
 			if err != nil {
 				return Result{}, err
 			}
+		} else {
+			mediaKey, err := mediaInterpretationFingerprint(flow, flowInfo)
+			if err != nil {
+				return Result{}, withFailure(FailureCodeMediaAnalysisFailed, FailureMessageMediaIdentityUnresolved, true,
+					fmt.Errorf("derive media interpretation identity: %w", err))
+			}
+			flowID = generatedRootFlowID(profileKey, mediaKey)
 		}
 	}
 	// A locator is not part of generated identity. Consequently two resolved
@@ -867,7 +863,7 @@ func (p *Pipeline) ingestIndependently(ctx context.Context, item source.Item, st
 		allowance := max(p.staging.limit, 1)
 		if len(p.config.FFmpegArgs) == 0 {
 			var err error
-			allowance, err = percentageWithFloor(staged.size, segmentAllowancePercent, segmentAllowanceFloor)
+			allowance, err = segmentAllowance(staged.size)
 			if err != nil {
 				return Result{}, fmt.Errorf("estimate essence staging: %w", err)
 			}
@@ -935,7 +931,7 @@ func (p *Pipeline) ingestIndependently(ctx context.Context, item source.Item, st
 		// collection would demultiplex the wrong track. Its offset places it
 		// where it starts relative to the container, which is what keeps the
 		// essences in sync once each is a Flow of its own.
-		objects, cleanup, err := p.prepareEssenceObjects(
+		objects, cleanup, err := p.prepareObjectsForStream(
 			ctx, member.id, staged, flowInfo, essence.StreamIndex, p.config.Start+essence.Offset,
 			renderedByStream[essence.StreamIndex])
 		if err != nil {
@@ -1102,14 +1098,6 @@ func (p *Pipeline) checkAPIVersion(service map[string]any) error {
 // could be registered.
 const assumedThroughput = 1 << 20
 
-// prepareEssenceObjects stages the Media Objects for a single elementary
-// stream. Extraction always runs, even at a zero segment duration, because the
-// essence has to be separated from the multiplex before it can be stored.
-func (p *Pipeline) prepareEssenceObjects(ctx context.Context, flowID string, staged stagedFile, flowInfo media.FlowInfo,
-	streamIndex int, start int64, rendered []media.SegmentRecord) ([]preparedObject, func(), error) {
-	return p.prepareObjectsForStream(ctx, flowID, staged, flowInfo, streamIndex, start, rendered)
-}
-
 func (p *Pipeline) prepareObjects(ctx context.Context, flowID string, staged stagedFile, flowInfo media.FlowInfo) ([]preparedObject, func(), error) {
 	return p.prepareObjectsForStream(ctx, flowID, staged, flowInfo, media.AllStreams, p.config.Start, nil)
 }
@@ -1191,9 +1179,6 @@ func (p *Pipeline) renderSegmentsTo(ctx context.Context, staged stagedFile, flow
 		Directory: directory, AdditionalArgs: additionalArgs, StagingWindow: window,
 		FlowStart: p.config.Start, ProgrammeDuration: programmeDuration, Muxed: len(flowInfo.Collected) > 0,
 		Streams: flowInfo.Streams,
-		// Every render is bit-exact so an identical re-run produces identical
-		// bytes, and with them identical Object identifiers.
-		BitExact: true,
 	}, func(record media.SegmentRecord) error {
 		if err := segmentCtx.Err(); err != nil {
 			return err
@@ -1449,51 +1434,6 @@ func ensureStagedInputUnchanged(ctx context.Context, staged stagedFile) error {
 	return withFailure(FailureCodeSourceChanged, FailureMessageSourceChanged, true, err)
 }
 
-func (p *Pipeline) verifyObject(ctx context.Context, expected preparedObject, segment tams.Segment) error {
-	if len(segment.GetURLs) == 0 {
-		return fmt.Errorf("segment %s has no download URL for verification", expected.id)
-	}
-	// A service may list several routes to one Object: a presigned one, a
-	// direct storage URL that needs credentials of its own, an unsigned route
-	// on the API origin. Presigned routes are tried first, then the rest, until
-	// one can be read. A route that serves the wrong bytes or the wrong length
-	// is an integrity failure, not a reason to try another.
-	candidates := make([]tams.PresignedURL, 0, len(segment.GetURLs))
-	for _, candidate := range segment.GetURLs {
-		if candidate.Presigned {
-			candidates = append(candidates, candidate)
-		}
-	}
-	for _, candidate := range segment.GetURLs {
-		if !candidate.Presigned {
-			candidates = append(candidates, candidate)
-		}
-	}
-	var unreadable []error
-	for _, download := range candidates {
-		size, checksum, err := p.client.DownloadDigest(ctx, download, expected.size)
-		if err != nil {
-			var sizeErr *tams.ObjectSizeError
-			if errors.As(err, &sizeErr) {
-				return fmt.Errorf("%w: verify object %s: %w", errObjectIntegrity, expected.id, err)
-			}
-			if ctx.Err() != nil || len(candidates) == 1 {
-				return fmt.Errorf("verify object %s: %w", expected.id, err)
-			}
-			unreadable = append(unreadable, err)
-			continue
-		}
-		if size != expected.size {
-			return fmt.Errorf("%w: object %s byte length mismatch: expected %d, got %d", errObjectIntegrity, expected.id, expected.size, size)
-		}
-		if checksum != expected.sha256 {
-			return fmt.Errorf("%w: object %s SHA-256 mismatch: expected %s, got %s", errObjectIntegrity, expected.id, expected.sha256, checksum)
-		}
-		return nil
-	}
-	return fmt.Errorf("verify object %s: none of %d advertised URLs could be read: %w", expected.id, len(candidates), errors.Join(unreadable...))
-}
-
 func digestFile(ctx context.Context, filename string) (int64, string, error) {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -1571,42 +1511,6 @@ func copyContext(ctx context.Context, destination io.Writer, source io.Reader) (
 			return total, readErr
 		}
 	}
-}
-
-// flowProfile is everything about an ingest that changes what ends up in the
-// store. Generated identifiers derive from it, so that the same input treated
-// the same way keeps landing on the same Flow -- which is what makes a resume
-// work -- while any difference that alters the result produces a new one.
-//
-// Essence storage is part of it because it decides whether one Flow or several
-// are written and what shape the parent takes. Without it a muxed
-// multi-essence Flow and the collector of a demultiplexed ingest would derive
-// the same identifier for the same input: two incompatible Flows claiming one
-// ID, one holding Media Objects and one holding none.
-//
-// The start is part of it because it decides where the media sits on the
-// timeline. Without it a second ingest at a different --start appends to the
-// Flow the first one made, instead of describing the placement that was asked
-// for.
-func flowProfile(digest string, config Config) string {
-	return flowProfileForRendererEpoch(digest, config, rendererIdentityEpoch)
-}
-
-func flowProfileForRendererEpoch(digest string, config Config, rendererEpoch string) string {
-	parts := []string{
-		config.Profile,
-		config.ProfileVersion,
-		digest,
-		strconv.FormatInt(int64(config.SegmentDuration), 10),
-		string(config.SegmentFormat),
-		string(config.EssenceStorage),
-		strconv.FormatInt(config.Start, 10),
-		strconv.Itoa(len(config.FFmpegArgs)),
-	}
-	parts = append(parts, config.FFmpegArgs...)
-	parts = append(parts, config.TAMSFlowProfiles...)
-	parts = append(parts, rendererEpoch)
-	return identityFingerprint("media-treatment/v1", parts...)
 }
 
 // recoveryDeadline is how long detached cleanup may take. Retraction waits
@@ -1689,23 +1593,6 @@ func (p *Pipeline) checkProbeToolchain(ctx context.Context) error {
 	}
 	line, _, _ := strings.Cut(strings.TrimSpace(strings.ReplaceAll(report, "\r\n", "\n")), "\n")
 	return media.ValidateToolVersion(line, "FFprobe")
-}
-
-func mediaToolchainFingerprint(profile, profileVersion, ffmpegReport string) string {
-	return identityFingerprint("media-toolchain/v1", profile, profileVersion, ffmpegReport)
-}
-
-// sourceIdentity derives a Source identifier from content, independent of its
-// location or packaging. The same essence shares a Source across muxed and
-// demuxed Flows. Re-encoding changes the bytes; --source-id lets the operator
-// assert equivalence when the resulting media still represents the same Source.
-func sourceIdentity(digest string, parts ...string) string {
-	return namedID(append([]string{"source", digest}, parts...)...)
-}
-
-func namedID(parts ...string) string {
-	// Source and Object identity encodings must stay stable for resume.
-	return uuid.NewSHA1(idNamespace, []byte(strings.Join(parts, "\x00"))).String()
 }
 
 func generatedLabel(digest string) string {

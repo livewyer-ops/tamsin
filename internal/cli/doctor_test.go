@@ -906,14 +906,14 @@ func TestDoctorExitPrecedenceIsStable(t *testing.T) {
 
 	for _, testCase := range []struct {
 		name     string
-		failures []doctorFailure
+		failures []int
 		want     int
 	}{
-		{name: "usage over every category", failures: []doctorFailure{{ExitGeneral}, {ExitRemote}, {ExitAuth}, {ExitMedia}, {ExitUsage}}, want: ExitUsage},
-		{name: "media over auth remote and general", failures: []doctorFailure{{ExitGeneral}, {ExitRemote}, {ExitAuth}, {ExitMedia}}, want: ExitMedia},
-		{name: "auth over remote and general", failures: []doctorFailure{{ExitGeneral}, {ExitRemote}, {ExitAuth}}, want: ExitAuth},
-		{name: "remote over general", failures: []doctorFailure{{ExitGeneral}, {ExitRemote}}, want: ExitRemote},
-		{name: "general fallback", failures: []doctorFailure{{ExitGeneral}}, want: ExitGeneral},
+		{name: "usage over every category", failures: []int{ExitGeneral, ExitRemote, ExitAuth, ExitMedia, ExitUsage}, want: ExitUsage},
+		{name: "media over auth remote and general", failures: []int{ExitGeneral, ExitRemote, ExitAuth, ExitMedia}, want: ExitMedia},
+		{name: "auth over remote and general", failures: []int{ExitGeneral, ExitRemote, ExitAuth}, want: ExitAuth},
+		{name: "remote over general", failures: []int{ExitGeneral, ExitRemote}, want: ExitRemote},
+		{name: "general fallback", failures: []int{ExitGeneral}, want: ExitGeneral},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			run := doctorRun{failures: testCase.failures}

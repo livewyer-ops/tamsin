@@ -14,16 +14,11 @@ import (
 
 var ErrEventTooLarge = errors.New("encoded ingest event exceeds advertised max_event_bytes")
 
-type flushWriter interface {
-	Flush() error
-}
-
 // Encoder serialises one process-wide NDJSON stream. Emit is safe for
 // concurrent callers.
 type Encoder struct {
 	mu            sync.Mutex
 	sink          io.Writer
-	flusher       flushWriter
 	runID         string
 	now           func() time.Time
 	started       time.Time
@@ -32,8 +27,6 @@ type Encoder struct {
 	maxEventBytes uint64
 	failed        error
 	finished      bool
-	final         bool
-	finalErr      error
 }
 
 func NewEncoder(sink io.Writer, runID string) (*Encoder, error) {
@@ -43,25 +36,18 @@ func NewEncoder(sink io.Writer, runID string) (*Encoder, error) {
 	if _, err := uuid.Parse(runID); err != nil {
 		return nil, fmt.Errorf("ingest event run ID must be a UUID: %w", err)
 	}
-	encoder := &Encoder{sink: sink, runID: runID, now: time.Now, started: time.Now()}
-	if flusher, ok := sink.(flushWriter); ok {
-		encoder.flusher = flusher
-	}
-	return encoder, nil
+	return &Encoder{sink: sink, runID: runID, now: time.Now, started: time.Now()}, nil
 }
 
-// Emit writes and flushes one event record. Ordering beyond the process-level
-// hello and terminal boundaries belongs to the CLI state machine that produces
-// the events.
+// Emit writes one event record. Ordering beyond the process-level hello and
+// terminal boundaries belongs to the CLI state machine that produces the
+// events.
 func (e *Encoder) Emit(scope *Scope, event Event) error {
 	if e == nil {
 		return errors.New("nil ingest event encoder")
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.final {
-		return errors.New("ingest event encoder is finalised")
-	}
 	if e.finished {
 		return errors.New("ingest event follows run.finished")
 	}
@@ -93,7 +79,7 @@ func (e *Encoder) Emit(scope *Scope, event Event) error {
 	envelope := Envelope{
 		Protocol: Protocol, ProtocolVersion: ProtocolVersion, Type: event.EventType(),
 		Seq: e.nextSequence, RunID: e.runID, EmittedAt: emittedAt.UTC(), ElapsedMS: elapsedMS,
-		Scope: cloneScope(scope), Payload: payload,
+		Scope: scope, Payload: payload,
 	}
 	var line bytes.Buffer
 	jsonEncoder := json.NewEncoder(&line)
@@ -113,12 +99,6 @@ func (e *Encoder) Emit(scope *Scope, event Event) error {
 		e.failed = fmt.Errorf("write event sequence %d: %w", envelope.Seq, err)
 		return e.failed
 	}
-	if e.flusher != nil {
-		if err := e.flusher.Flush(); err != nil {
-			e.failed = fmt.Errorf("flush event sequence %d: %w", envelope.Seq, err)
-			return e.failed
-		}
-	}
 	e.nextSequence++
 	e.lastElapsedMS = elapsedMS
 	if isHello {
@@ -128,27 +108,6 @@ func (e *Encoder) Emit(scope *Scope, event Event) error {
 		e.finished = true
 	}
 	return nil
-}
-
-// Finalize checks that the producer emitted the terminal record. It never
-// closes the caller-owned writer.
-func (e *Encoder) Finalize() error {
-	if e == nil {
-		return errors.New("nil ingest event encoder")
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.final {
-		return e.finalErr
-	}
-	e.final = true
-	switch {
-	case e.failed != nil:
-		e.finalErr = fmt.Errorf("ingest event encoder previously failed: %w", e.failed)
-	case !e.finished:
-		e.finalErr = errors.New("ingest event stream ended before run.finished")
-	}
-	return e.finalErr
 }
 
 func writeAll(writer io.Writer, data []byte) error {
@@ -163,13 +122,4 @@ func writeAll(writer io.Writer, data []byte) error {
 		data = data[written:]
 	}
 	return nil
-}
-
-func cloneScope(scope *Scope) *Scope {
-	if scope == nil {
-		return nil
-	}
-	result := *scope
-	result.InputIndex = clonePtr(scope.InputIndex)
-	return &result
 }

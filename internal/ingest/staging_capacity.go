@@ -466,7 +466,7 @@ func estimatedStagingRequirement(item source.Item, config Config) (required int6
 		if item.Size >= rollingOutputWindowBytes {
 			return rollingOutputWindowBytes, false, nil
 		}
-		allowance, err := percentageWithFloor(item.Size, segmentAllowancePercent, segmentAllowanceFloor)
+		allowance, err := segmentAllowance(item.Size)
 		return min(allowance, rollingOutputWindowBytes), false, err
 	}
 	remote := item.LocalPath == ""
@@ -493,7 +493,7 @@ func estimatedStagingRequirement(item source.Item, config Config) (required int6
 		required = max(item.Size, 1)
 	}
 	if generated {
-		allowance, allowanceErr := percentageWithFloor(item.Size, segmentAllowancePercent, segmentAllowanceFloor)
+		allowance, allowanceErr := segmentAllowance(item.Size)
 		if allowanceErr != nil {
 			return 0, false, allowanceErr
 		}
@@ -508,15 +508,18 @@ func estimatedStagingRequirement(item source.Item, config Config) (required int6
 	return required, false, nil
 }
 
-func percentageWithFloor(value int64, percent int64, floor int64) (int64, error) {
-	if value < 0 || percent <= 0 {
+// segmentAllowance is the staging that rendering an input of that size may
+// need: its size and a percentage more, or its size and a fixed floor more,
+// whichever is larger.
+func segmentAllowance(size int64) (int64, error) {
+	if size < 0 {
 		return 0, errors.New("invalid staging estimate")
 	}
-	if value > math.MaxInt64/percent {
+	if size > math.MaxInt64/segmentAllowancePercent {
 		return 0, errors.New("staging estimate exceeds the supported byte range")
 	}
-	estimate := value * percent / 100
-	minimum, err := checkedAdd(value, floor)
+	estimate := size * segmentAllowancePercent / 100
+	minimum, err := checkedAdd(size, segmentAllowanceFloor)
 	if err != nil {
 		return 0, err
 	}

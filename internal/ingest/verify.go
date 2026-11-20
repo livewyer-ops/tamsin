@@ -86,8 +86,6 @@ func (p *Pipeline) verifyAll(ctx context.Context, flowID string, objects []prepa
 			return recoveryCtx
 		}
 		defer func() {
-			// Do not start a timer for a batch with no verification failures.
-			once.Do(func() {})
 			if cancel != nil {
 				cancel()
 			}
@@ -240,4 +238,49 @@ func (p *Pipeline) retractWithinRecovery(ctx context.Context, flowID string, obj
 	p.observability.Verification(object.size, observability.OutcomeRetracted)
 	return outcomeRetracted, fmt.Errorf(
 		"%w; retraction of the segment from flow %s completed", cause, flowID)
+}
+
+func (p *Pipeline) verifyObject(ctx context.Context, expected preparedObject, segment tams.Segment) error {
+	if len(segment.GetURLs) == 0 {
+		return fmt.Errorf("segment %s has no download URL for verification", expected.id)
+	}
+	// A service may list several routes to one Object: a presigned one, a
+	// direct storage URL that needs credentials of its own, an unsigned route
+	// on the API origin. Presigned routes are tried first, then the rest, until
+	// one can be read. A route that serves the wrong bytes or the wrong length
+	// is an integrity failure, not a reason to try another.
+	candidates := make([]tams.PresignedURL, 0, len(segment.GetURLs))
+	for _, candidate := range segment.GetURLs {
+		if candidate.Presigned {
+			candidates = append(candidates, candidate)
+		}
+	}
+	for _, candidate := range segment.GetURLs {
+		if !candidate.Presigned {
+			candidates = append(candidates, candidate)
+		}
+	}
+	var unreadable []error
+	for _, download := range candidates {
+		size, checksum, err := p.client.DownloadDigest(ctx, download, expected.size)
+		if err != nil {
+			var sizeErr *tams.ObjectSizeError
+			if errors.As(err, &sizeErr) {
+				return fmt.Errorf("%w: verify object %s: %w", errObjectIntegrity, expected.id, err)
+			}
+			if ctx.Err() != nil || len(candidates) == 1 {
+				return fmt.Errorf("verify object %s: %w", expected.id, err)
+			}
+			unreadable = append(unreadable, err)
+			continue
+		}
+		if size != expected.size {
+			return fmt.Errorf("%w: object %s byte length mismatch: expected %d, got %d", errObjectIntegrity, expected.id, expected.size, size)
+		}
+		if checksum != expected.sha256 {
+			return fmt.Errorf("%w: object %s SHA-256 mismatch: expected %s, got %s", errObjectIntegrity, expected.id, expected.sha256, checksum)
+		}
+		return nil
+	}
+	return fmt.Errorf("verify object %s: none of %d advertised URLs could be read: %w", expected.id, len(candidates), errors.Join(unreadable...))
 }

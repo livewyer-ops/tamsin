@@ -36,7 +36,7 @@ func (c *Client) DeleteSegments(ctx context.Context, flowID string, options Segm
 	query := make(url.Values)
 	query.Set("timerange", options.Timerange)
 	query.Set("object_id", options.ObjectID)
-	path := "flows/" + escapeSegment(flowID) + "/segments?" + query.Encode()
+	path := "flows/" + url.PathEscape(flowID) + "/segments?" + query.Encode()
 	var initial DeletionRequest
 	response, err := c.doJSONResponse(ctx, http.MethodDelete, path, nil, &initial, http.StatusNoContent, http.StatusAccepted)
 	if err != nil {

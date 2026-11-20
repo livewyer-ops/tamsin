@@ -50,8 +50,8 @@ func TestIngestEventOutputSeparatesProgressAndTerminalRecords(t *testing.T) {
 	}
 	t.Cleanup(output.Close)
 	options := &ingestOptions{
-		profile: ingest.ProfileEssenceSegments, profileVersion: "1",
-		verify: string(ingest.VerificationReadback), concurrency: 1, transfers: 1, inputs: []string{"input.ts"},
+		treatment: ingest.Profile{Name: ingest.ProfileEssenceSegments, Version: "1"},
+		verify:    string(ingest.VerificationReadback), concurrency: 1, transfers: 1, inputs: []string{"input.ts"},
 	}
 	if err := output.Start(options); err != nil {
 		t.Fatal(err)
@@ -198,8 +198,8 @@ func TestIngestEventInterruptionCompletesQueuedInput(t *testing.T) {
 	}
 	t.Cleanup(output.Close)
 	options := &ingestOptions{
-		profile: ingest.ProfileEssenceSegments, profileVersion: "1",
-		verify: string(ingest.VerificationNone), concurrency: 1, transfers: 1, inputs: []string{"done.ts", "queued.ts"},
+		treatment: ingest.Profile{Name: ingest.ProfileEssenceSegments, Version: "1"},
+		verify:    string(ingest.VerificationNone), concurrency: 1, transfers: 1, inputs: []string{"done.ts", "queued.ts"},
 	}
 	if err := output.Start(options); err != nil {
 		t.Fatal(err)
