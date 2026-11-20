@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -95,6 +96,11 @@ func cadenceStates(probe *Probe) map[int]*cadenceState {
 	return states
 }
 
+// frameScanThreads is the number of threads each decoder of the decoded-frame
+// scan is given on a host with that many CPUs. The scan shares the host with
+// one other media process and the uploads.
+func frameScanThreads(cpus int) int { return min(cpus, 4) }
+
 func (p FFprobe) probePresentationMode(ctx context.Context, filename string, probe *Probe, mode presentationMode) (bool, error) {
 	states := cadenceStates(probe)
 	section, timestampField := "packet", "pts"
@@ -109,6 +115,11 @@ func (p FFprobe) probePresentationMode(ctx context.Context, filename string, pro
 		executable = "ffprobe"
 	}
 	arguments := append([]string{"-v", "error"}, inputOptions(filename)...)
+	if mode == presentationFrames {
+		// This pass decodes every picture, and FFprobe decodes on one thread
+		// unless it is given more.
+		arguments = append(arguments, "-threads", strconv.Itoa(frameScanThreads(runtime.GOMAXPROCS(0))))
+	}
 	arguments = append(arguments,
 		"-select_streams", "v",
 		showArgument,

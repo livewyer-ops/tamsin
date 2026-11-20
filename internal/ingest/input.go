@@ -104,9 +104,9 @@ func (p *Pipeline) prepareInput(ctx context.Context, item source.Item, mode Inpu
 	return staged, nil
 }
 
-func (p *Pipeline) probePreparedInput(ctx context.Context, input stagedFile) (media.Probe, error) {
+func (p *Pipeline) probePreparedInput(ctx context.Context, input stagedFile, contentType string) (media.Probe, error) {
 	if input.bridge == nil {
-		return p.probeInput(ctx, input.path)
+		return p.probeInput(ctx, input.path, contentType)
 	}
 	release, err := p.acquireProbe(ctx)
 	if err != nil {

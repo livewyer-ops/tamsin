@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/livewyer-ops/tamsin/internal/media"
@@ -26,6 +27,10 @@ func (p *Pipeline) populateSources(ctx context.Context, planned []plannedFlowWri
 	if p.config.DryRunMode != DryRunOff || p.client == nil {
 		return
 	}
+	// Each Source is a document of its own, so Sources are populated side by
+	// side, as many across the run as the transfer budget is large. The
+	// requests for one Source stay in order.
+	var sources sync.WaitGroup
 	seen := make(map[string]bool, len(planned))
 	for _, plan := range planned {
 		flow := plan.effective
@@ -34,18 +39,34 @@ func (p *Pipeline) populateSources(ctx context.Context, planned []plannedFlowWri
 			continue
 		}
 		seen[sourceID] = true
-		source, err := p.readDerivedSource(ctx, sourceID)
-		if err != nil {
-			p.logger.Warn("source metadata was not populated", "source_id", sourceID, "error", err)
+		select {
+		case p.sourceSlots <- struct{}{}:
+		case <-ctx.Done():
+			// A slot held by another input is not worth waiting for once
+			// this one has been cancelled.
+			p.logger.Warn("source metadata was not populated", "source_id", sourceID, "error", ctx.Err())
 			continue
 		}
-		if source == nil {
-			p.logger.Warn("source has not been derived from its Flow yet; label, description and tags were not set", "source_id", sourceID)
-			continue
-		}
-		if err := p.writeSourceIdentity(ctx, sourceID, source, flow); err != nil {
-			p.logger.Warn("source metadata was not populated", "source_id", sourceID, "error", err)
-		}
+		sources.Go(func() {
+			defer func() { <-p.sourceSlots }()
+			p.populateSource(ctx, sourceID, flow)
+		})
+	}
+	sources.Wait()
+}
+
+func (p *Pipeline) populateSource(ctx context.Context, sourceID string, flow tams.Flow) {
+	source, err := p.readDerivedSource(ctx, sourceID)
+	if err != nil {
+		p.logger.Warn("source metadata was not populated", "source_id", sourceID, "error", err)
+		return
+	}
+	if source == nil {
+		p.logger.Warn("source has not been derived from its Flow yet; label, description and tags were not set", "source_id", sourceID)
+		return
+	}
+	if err := p.writeSourceIdentity(ctx, sourceID, source, flow); err != nil {
+		p.logger.Warn("source metadata was not populated", "source_id", sourceID, "error", err)
 	}
 }
 

@@ -133,6 +133,10 @@ type Pipeline struct {
 	// transfers is the global budget. Acquiring a slot is what bounds
 	// concurrency; goroutines are cheap, waiting on the network is not.
 	transfers chan struct{}
+	// sourceSlots bounds the Sources being populated across the run. It is as
+	// large as the transfer budget and apart from it, so populating a Source
+	// never waits behind another input's upload.
+	sourceSlots chan struct{}
 	// probes bounds media measurement globally. Limiting it per Flow multiplied
 	// by the number of Flows prepared at once.
 	probes chan struct{}

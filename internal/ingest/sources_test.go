@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/livewyer-ops/tamsin/internal/media"
 	"github.com/livewyer-ops/tamsin/internal/source"
+	"github.com/livewyer-ops/tamsin/internal/tams"
 )
 
 // TestSourcesReceiveLabelDescriptionAndProvenance covers AppNote 0007: the
@@ -109,5 +111,90 @@ func TestSourcePopulationFailureIsAWarningNotAFailure(t *testing.T) {
 				t.Fatalf("no warning: %s", logged.String())
 			}
 		})
+	}
+}
+
+// sourceBarrierClient holds every Source read until the test lets it go, and
+// says when each one arrives.
+type sourceBarrierClient struct {
+	*fakeClient
+	arrived chan struct{}
+	proceed chan struct{}
+}
+
+func (c *sourceBarrierClient) Source(ctx context.Context, id string) (tams.Source, error) {
+	c.arrived <- struct{}{}
+	<-c.proceed
+	return c.fakeClient.Source(ctx, id)
+}
+
+// Sources are populated side by side, and no more of them at once across the
+// run than the transfer budget is large.
+func TestSourcesArePopulatedWithinTheTransferBudget(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name      string
+		inputs    int
+		transfers int
+		together  int
+	}{
+		{"three at once", 1, 3, 3},
+		{"one at a time", 1, 1, 1},
+		{"two inputs share the budget", 2, 2, 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var items []source.Item
+			for input := range test.inputs {
+				items = append(items, localSource(writeFixture(t, fmt.Sprintf("fixture-%d.ts", input), fmt.Sprintf("muxed-media-%d", input))))
+			}
+			// Each input has a root Source and one for each of two essences.
+			sources := 3 * test.inputs
+			client := &sourceBarrierClient{fakeClient: newFakeClient(), arrived: make(chan struct{}, sources), proceed: make(chan struct{})}
+			pipeline := mustNew(t, Config{Concurrency: test.inputs, Transfers: test.transfers, SegmentDuration: time.Second},
+				client, muxedProber{}, fakeSegmenter{}, discardLogger(), nil)
+			done := make(chan error, 1)
+			go func() {
+				_, err := pipeline.Run(context.Background(), items)
+				done <- err
+			}()
+			for read := range test.together {
+				select {
+				case <-client.arrived:
+				case <-time.After(10 * time.Second):
+					t.Fatalf("%d Source reads were in flight, want %d", read, test.together)
+				}
+			}
+			if test.together < sources {
+				select {
+				case <-client.arrived:
+					t.Fatalf("more than %d Source reads were in flight", test.together)
+				case <-time.After(100 * time.Millisecond):
+				}
+			}
+			close(client.proceed)
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// A cancelled input does not wait for a Source slot that another input holds.
+func TestCancelledInputDoesNotWaitForASourceSlot(t *testing.T) {
+	t.Parallel()
+	pipeline := mustNew(t, Config{Concurrency: 1, Transfers: 1}, newFakeClient(), fakeProber{}, fakeSegmenter{}, discardLogger(), nil)
+	pipeline.sourceSlots <- struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		pipeline.populateSources(ctx, []plannedFlowWrite{{effective: tams.Flow{"source_id": "source"}}})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a cancelled input waited for a Source slot held elsewhere")
 	}
 }

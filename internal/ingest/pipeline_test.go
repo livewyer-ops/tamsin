@@ -485,13 +485,35 @@ func TestExplicitEssenceParametersSkipUnusedPresentationDecode(t *testing.T) {
 			prober := &presentationCountingProber{}
 			pipeline := mustNew(t, Config{Concurrency: 1, FlowMetadata: testCase.metadata},
 				newFakeClient(), prober, nil, discardLogger(), nil)
-			if _, err := pipeline.probeInput(context.Background(), "input"); err != nil {
+			if _, err := pipeline.probeInput(context.Background(), "input", ""); err != nil {
 				t.Fatal(err)
 			}
 			if got := prober.presentations.Load(); got != testCase.want {
 				t.Fatalf("presentation scans = %d, want %d", got, testCase.want)
 			}
 		})
+	}
+}
+
+type quickTimeProber struct{ presentationCountingProber }
+
+func (*quickTimeProber) Probe(context.Context, string) (media.Probe, error) {
+	return media.Probe{Format: media.Format{
+		Name: "mov,mp4,m4a,3gp,3g2,mj2", Tags: map[string]string{"major_brand": "qt  "},
+	}}, nil
+}
+
+// A container that is refused is refused before the cadence scan, which
+// decodes the whole input.
+func TestUnsupportedContainerIsRefusedBeforeTheCadenceScan(t *testing.T) {
+	t.Parallel()
+	prober := &quickTimeProber{}
+	pipeline := mustNew(t, Config{Concurrency: 1}, newFakeClient(), prober, nil, discardLogger(), nil)
+	if _, err := pipeline.probeInput(context.Background(), "input", ""); !errors.Is(err, media.ErrUnsupportedContainer) {
+		t.Fatalf("probe error = %v, want an unsupported container", err)
+	}
+	if got := prober.presentations.Load(); got != 0 {
+		t.Fatalf("presentation scans = %d, want none", got)
 	}
 }
 

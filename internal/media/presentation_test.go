@@ -5,6 +5,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -307,5 +310,52 @@ func TestReorderedVideoSkipsPacketScan(t *testing.T) {
 	}
 	if probe.Streams[0].Cadence != CadenceFixed {
 		t.Fatal("decoded-frame evidence was not used")
+	}
+}
+
+// The decoded-frame scan decodes the whole input, so it asks for a thread for
+// each CPU up to four. The packet scan decodes nothing and asks for none.
+func TestFrameScanBoundsItsDecoderThreads(t *testing.T) {
+	for cpus, want := range map[int]int{1: 1, 2: 2, 4: 4, 8: 4} {
+		if got := frameScanThreads(cpus); got != want {
+			t.Errorf("frameScanThreads(%d) = %d, want %d", cpus, got, want)
+		}
+	}
+	// Keep executable creation outside parallel tests, as above.
+	executable := filepath.Join(t.TempDir(), "ffprobe")
+	script := `#!/bin/sh
+case " $* " in *' -show_frames '*) mode=frames; field=best_effort_timestamp;; *) mode=packets; field=pts;; esac
+printf '%s\n' "$@" > "$0.$mode"
+printf 'stream_index=0|%s=0\nstream_index=0|%s=40\n' "$field" "$field"
+`
+	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	recorded := func(mode string) []string {
+		data, err := os.ReadFile(executable + "." + mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Split(strings.TrimSpace(string(data)), "\n")
+	}
+	reordered := Probe{Streams: []Stream{{CodecType: "video", HasBFrames: 2, AverageFrameRate: "25/1"}}}
+	if err := (FFprobe{Executable: executable}).ProbePresentation(context.Background(), "fixture.mp4", &reordered); err != nil {
+		t.Fatal(err)
+	}
+	frames := recorded("frames")
+	at := slices.Index(frames, "-threads")
+	if at < 0 || at > slices.Index(frames, "fixture.mp4") {
+		t.Fatalf("frame scan arguments = %q, want -threads before the input", frames)
+	}
+	if want := strconv.Itoa(frameScanThreads(runtime.GOMAXPROCS(0))); frames[at+1] != want {
+		t.Fatalf("frame scan threads = %q, want %s", frames[at+1], want)
+	}
+
+	ordered := Probe{Streams: []Stream{{CodecType: "video", AverageFrameRate: "25/1"}}}
+	if err := (FFprobe{Executable: executable}).ProbePresentation(context.Background(), "fixture.mp4", &ordered); err != nil {
+		t.Fatal(err)
+	}
+	if packets := recorded("packets"); slices.Contains(packets, "-threads") {
+		t.Fatalf("packet scan arguments = %q, want no -threads", packets)
 	}
 }

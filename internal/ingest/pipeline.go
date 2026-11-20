@@ -177,7 +177,8 @@ func New(config Config, client TAMSClient, prober media.Prober, segmenter media.
 		config: config, client: client, prober: prober, segmenter: segmenter, logger: logger,
 		observability: run,
 		reporter:      reporter, transfers: make(chan struct{}, config.Transfers),
-		probes: make(chan struct{}, config.ProbeConcurrency), mediaProcesses: semaphore.NewWeighted(2),
+		sourceSlots: make(chan struct{}, config.Transfers),
+		probes:      make(chan struct{}, config.ProbeConcurrency), mediaProcesses: semaphore.NewWeighted(2),
 		rollingRenders:     make(chan struct{}, 1),
 		graphLocks:         make(map[string]*graphLock),
 		apiVersion:         tams.APIVersion{Major: tams.SpecMajor, Minor: tams.SpecMinor},
@@ -477,7 +478,7 @@ func (p *Pipeline) ingestInput(ctx context.Context, item source.Item, storageID 
 	// The input's own probe is an ffprobe spawn like any other, so it draws on
 	// the same budget; leaving it out let one process per concurrent input
 	// escape the bound.
-	probe, err := p.probePreparedInput(ctx, staged)
+	probe, err := p.probePreparedInput(ctx, staged, contentType)
 	if err != nil {
 		if errors.Is(err, media.ErrUnsupportedContainer) {
 			return Result{}, withFailure(FailureCodeMediaUnsupported, FailureMessageMediaUnsupported, true, err)
@@ -1042,7 +1043,7 @@ func (p *Pipeline) advanceProgress(ctx context.Context, phase progress.Phase, ob
 }
 
 // probeInput measures a staged input under the global measurement budget.
-func (p *Pipeline) probeInput(ctx context.Context, path string) (media.Probe, error) {
+func (p *Pipeline) probeInput(ctx context.Context, path, contentType string) (media.Probe, error) {
 	release, err := p.acquireProbe(ctx)
 	if err != nil {
 		return media.Probe{}, err
@@ -1050,6 +1051,11 @@ func (p *Pipeline) probeInput(ctx context.Context, path string) (media.Probe, er
 	defer release()
 	probe, err := p.prober.Probe(ctx, path)
 	if err != nil {
+		return media.Probe{}, err
+	}
+	// The scan below decodes the whole input, so a container that will be
+	// refused is refused first.
+	if err := media.ValidateContainer(probe.Format, contentType); err != nil {
 		return media.Probe{}, err
 	}
 	// A complete operator override replaces essence_parameters as one object,

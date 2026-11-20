@@ -280,7 +280,7 @@ func TestOpenGOPSegmentsAbut(t *testing.T) {
 			const start = int64(time.Minute)
 			pipeline := mustNew(t, Config{Concurrency: 1, SegmentDuration: 2 * time.Second, Start: start},
 				newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-			probe, err := pipeline.probePreparedInput(ctx, stagedFile{path: input})
+			probe, err := pipeline.probePreparedInput(ctx, stagedFile{path: input}, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -327,7 +327,7 @@ func TestOpenGOPSegmentsAbut(t *testing.T) {
 			}
 			pipeline := mustNew(t, Config{Concurrency: 1, SegmentDuration: 2 * time.Second},
 				newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-			probe, err := pipeline.probePreparedInput(ctx, stagedFile{path: mp4})
+			probe, err := pipeline.probePreparedInput(ctx, stagedFile{path: mp4}, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -372,7 +372,7 @@ func TestMidGOPCaptureIsAnchoredOnItsFirstKeyFrame(t *testing.T) {
 	const start = int64(time.Minute)
 	pipeline := mustNew(t, Config{Concurrency: 1, SegmentDuration: 2 * time.Second, Start: start},
 		newFakeClient(), media.FFprobe{}, media.FFmpeg{}, discardLogger(), nil)
-	probe, err := pipeline.probePreparedInput(ctx, stagedFile{path: input})
+	probe, err := pipeline.probePreparedInput(ctx, stagedFile{path: input}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
