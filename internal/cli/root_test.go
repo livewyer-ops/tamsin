@@ -486,6 +486,32 @@ func TestCLIUsageExitCode(t *testing.T) {
 	}
 }
 
+// TestCLIRejectsADeletionTimeoutThatIsNotPositive covers every place the
+// setting can come from. Zero or less would leave a deletion without a
+// deadline.
+func TestCLIRejectsADeletionTimeoutThatIsNotPositive(t *testing.T) {
+	for _, value := range []string{"0s", "-1s"} {
+		for _, origin := range []string{"flag", "environment", "file"} {
+			t.Run(origin+" "+value, func(t *testing.T) {
+				args := []string{"--dry-run=fast", "missing"}
+				switch origin {
+				case "flag":
+					args = append([]string{"--deletion-timeout=" + value}, args...)
+				case "environment":
+					t.Setenv("TAMSIN_HTTP_DELETION_TIMEOUT", value)
+				case "file":
+					args = append([]string{"--config", writeTestConfig(t, t.TempDir(), "\nhttp:\n  deletion_timeout: "+value+"\n")}, args...)
+				}
+				var stdout, stderr bytes.Buffer
+				code := Execute(context.Background(), args, strings.NewReader(""), &stdout, &stderr)
+				if code != ExitUsage || !strings.Contains(stderr.String(), "deletion timeout must be positive") {
+					t.Fatalf("exit = %d, want %d and the reason; stderr = %s", code, ExitUsage, stderr.String())
+				}
+			})
+		}
+	}
+}
+
 func TestCLIArgumentFailuresUseUsageExitCode(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {

@@ -105,7 +105,7 @@ func (c *Client) waitForDeletionRequest(ctx context.Context, deletePath, locatio
 	}
 
 	request := initial
-	for {
+	for polls := 0; ; polls++ {
 		if request.Status != "" {
 			complete, err := validateDeletionRequest(request, flowID, options.Timerange)
 			if err != nil {
@@ -116,7 +116,7 @@ func (c *Client) waitForDeletionRequest(ctx context.Context, deletePath, locatio
 			}
 		}
 
-		if err := waitForPoll(ctx, c.deletePollInterval); err != nil {
+		if err := waitForPoll(ctx, c.pollInterval(polls)); err != nil {
 			return fmt.Errorf("wait for segment deletion request: %w", err)
 		}
 		request = DeletionRequest{}
@@ -162,7 +162,7 @@ func (c *Client) segmentPresent(ctx context.Context, flowID string, options Segm
 		ObjectID: options.ObjectID, Timerange: options.Timerange,
 	})
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("list segments to confirm deletion: %w", err)
 	}
 	for _, segment := range segments {
 		if tamstime.EqualTimeRanges(segment.Timerange, options.Timerange) && segment.ObjectID == options.ObjectID {
@@ -172,8 +172,12 @@ func (c *Client) segmentPresent(ctx context.Context, flowID string, options Segm
 	return false, nil
 }
 
+// waitForSegmentAbsence lists the Segment until it is gone. When the deadline
+// ends the wait, the error says the Segment was still listed. A listing that
+// fails or cannot be trusted ends the wait at once with its own error, and is
+// never taken for a Segment that is still there.
 func (c *Client) waitForSegmentAbsence(ctx context.Context, flowID string, options SegmentDeleteOptions) error {
-	for {
+	for listings := 1; ; listings++ {
 		present, err := c.segmentPresent(ctx, flowID, options)
 		if err != nil {
 			return err
@@ -181,10 +185,16 @@ func (c *Client) waitForSegmentAbsence(ctx context.Context, flowID string, optio
 		if !present {
 			return nil
 		}
-		if err := waitForPoll(ctx, c.deletePollInterval); err != nil {
-			return err
+		if err := waitForPoll(ctx, c.pollInterval(listings-1)); err != nil {
+			return fmt.Errorf("segment still listed after %d listings: %w", listings, err)
 		}
 	}
+}
+
+// pollInterval is how long to wait before the next poll of one deletion: it
+// doubles from deletePollInterval to sixteen times that.
+func (c *Client) pollInterval(polls int) time.Duration {
+	return c.deletePollInterval << min(polls, 4)
 }
 
 func waitForPoll(ctx context.Context, interval time.Duration) error {

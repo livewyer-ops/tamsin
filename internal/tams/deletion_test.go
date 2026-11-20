@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -142,6 +143,9 @@ func TestDeleteSegmentsJoinsAmbiguousFailureWithFailedConfirmation(t *testing.T)
 		!strings.Contains(err.Error(), "500 Internal Server Error") ||
 		!strings.Contains(err.Error(), "confirm segment deletion") {
 		t.Fatalf("DeleteSegments() error = %v, want original and confirmation failures", err)
+	}
+	if strings.Contains(err.Error(), "still listed") {
+		t.Fatalf("DeleteSegments() error = %v, which takes a failed listing for a Segment that is still there", err)
 	}
 }
 
@@ -473,5 +477,199 @@ func TestDeleteSegmentsTimesOutWhileSegmentRemains(t *testing.T) {
 	}
 	if client.DeletionTimeout() != 30*time.Millisecond {
 		t.Fatalf("DeletionTimeout() = %v", client.DeletionTimeout())
+	}
+}
+
+// TestUnfinishedDeletionSaysWhatWasLastSeen covers a deletion that its
+// deadline ends. The error says what the store last showed, the polls grow
+// further apart, the DELETE is sent no more often than the retries allow and
+// a deletion request the service is still working on is not asked for again.
+func TestUnfinishedDeletionSaysWhatWasLastSeen(t *testing.T) {
+	t.Parallel()
+	const (
+		flowID    = "00000000-0000-4000-8000-000000000001"
+		objectID  = "00000000-0000-4000-8000-000000000002"
+		timerange = "[0:0_1:0)"
+		pending   = `{"id":"request","flow_id":"` + flowID + `","timerange_to_delete":"` + timerange + `","delete_flow":false,"status":"started"}`
+	)
+	for _, tc := range []struct {
+		name     string
+		status   int
+		retries  int
+		deadline time.Duration
+		deletes  int32
+		seen     string
+	}{
+		{name: "acknowledged and still listed", status: http.StatusNoContent, deadline: 200 * time.Millisecond, deletes: 1, seen: "segment still listed after"},
+		{name: "failing and still listed", status: http.StatusServiceUnavailable, retries: 1, deadline: 600 * time.Millisecond, deletes: 2, seen: "segment still listed after"},
+		{name: "accepted and still pending", status: http.StatusAccepted, deadline: 200 * time.Millisecond, deletes: 1, seen: "wait for segment deletion request"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// The store answers at once on a clock that moves only while the
+			// client waits, so the deadline always passes between requests.
+			// Over a socket it can pass inside a listing, which is a
+			// different error with a test of its own.
+			synctest.Test(t, func(t *testing.T) {
+				var deletes, polls atomic.Int32
+				respond := func(status int, body string) *http.Response {
+					return &http.Response{
+						StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}},
+						Body: io.NopCloser(strings.NewReader(body)),
+					}
+				}
+				store := roundTripError(func(request *http.Request) (*http.Response, error) {
+					switch {
+					case request.Method == http.MethodDelete:
+						deletes.Add(1)
+						if tc.status != http.StatusAccepted {
+							return respond(tc.status, ""), nil
+						}
+						response := respond(tc.status, pending)
+						response.Header.Set("Location", "/flow-delete-requests/request")
+						return response, nil
+					case request.URL.Path == "/flow-delete-requests/request":
+						polls.Add(1)
+						return respond(http.StatusOK, pending), nil
+					default:
+						polls.Add(1)
+						return respond(http.StatusOK, `[{"object_id":"`+objectID+`","timerange":"`+timerange+`"}]`), nil
+					}
+				})
+				client, err := New(Config{
+					Endpoint: "https://example.test", Transport: store,
+					Timeout: time.Second, Retries: tc.retries, DeletionTimeout: tc.deadline,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				client.deletePollInterval = time.Millisecond
+				err = client.DeleteSegments(context.Background(), flowID, SegmentDeleteOptions{Timerange: timerange, ObjectID: objectID})
+				if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), tc.seen) {
+					t.Fatalf("DeleteSegments() error = %v, want the deadline and %q", err, tc.seen)
+				}
+				if deletes.Load() != tc.deletes {
+					t.Fatalf("DELETE was sent %d times, want %d", deletes.Load(), tc.deletes)
+				}
+				// A poll every millisecond would be hundreds. Four come before
+				// the interval reaches its sixteen, and one every sixteen after.
+				if most := int32(5 + tc.deadline/(16*time.Millisecond)); polls.Load() < 3 || polls.Load() > most {
+					t.Fatalf("the store was polled %d times, want between 3 and %d", polls.Load(), most)
+				}
+			})
+		})
+	}
+}
+
+// TestDeletionCutShortInsideAListingSaysTheListingFailed covers a deadline
+// that passes while a listing is still being read, after an earlier one
+// showed the Segment. The error names the listing as what failed and does
+// not say the Segment was still there, which that listing never showed.
+func TestDeletionCutShortInsideAListingSaysTheListingFailed(t *testing.T) {
+	t.Parallel()
+	const (
+		flowID    = "00000000-0000-4000-8000-000000000001"
+		objectID  = "00000000-0000-4000-8000-000000000002"
+		timerange = "[0:0_1:0)"
+	)
+	// The store answers at once on a clock that moves only while the client
+	// waits, and its second listing never answers, so the deadline always
+	// passes inside that listing. Over a socket a slow start can spend the
+	// deadline inside the first one.
+	synctest.Test(t, func(t *testing.T) {
+		var listings atomic.Int32
+		store := roundTripError(func(request *http.Request) (*http.Response, error) {
+			if request.Method == http.MethodDelete {
+				return &http.Response{StatusCode: http.StatusNoContent, Header: http.Header{}, Body: http.NoBody}, nil
+			}
+			if listings.Add(1) > 1 {
+				<-request.Context().Done()
+				return nil, request.Context().Err()
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}},
+				Body: io.NopCloser(strings.NewReader(`[{"object_id":"` + objectID + `","timerange":"` + timerange + `"}]`)),
+			}, nil
+		})
+		// The request timeout is the longer, so the deletion deadline is what
+		// ends the second listing.
+		client, err := New(Config{
+			Endpoint: "https://example.test", Transport: store,
+			Timeout: 10 * time.Second, DeletionTimeout: 150 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		client.deletePollInterval = time.Millisecond
+		err = client.DeleteSegments(context.Background(), flowID, SegmentDeleteOptions{Timerange: timerange, ObjectID: objectID})
+		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "list segments to confirm deletion") {
+			t.Fatalf("DeleteSegments() error = %v, want the deadline inside a named listing", err)
+		}
+		if strings.Contains(err.Error(), "still listed") {
+			t.Fatalf("DeleteSegments() error = %v, which reports a Segment the last listing did not show", err)
+		}
+		if listings.Load() != 2 {
+			t.Fatalf("the Segment was listed %d times, want 2", listings.Load())
+		}
+	})
+}
+
+// TestDeleteSegmentsNeedsAValidListingToConfirmAbsence keeps a listing that
+// names nothing usable from standing in for the empty array that proves a
+// Segment is gone.
+func TestDeleteSegmentsNeedsAValidListingToConfirmAbsence(t *testing.T) {
+	t.Parallel()
+	const (
+		flowID    = "00000000-0000-4000-8000-000000000001"
+		objectID  = "00000000-0000-4000-8000-000000000002"
+		timerange = "[0:0_1:0)"
+	)
+	for name, listing := range map[string]string{
+		"empty body":                           "",
+		"null":                                 "null",
+		"entry without fields":                 "[{}]",
+		"target with a malformed timerange":    `[{"object_id":"` + objectID + `","timerange":"0:0-1:0"}]`,
+		"target without a timerange":           `[{"object_id":"` + objectID + `"}]`,
+		"unnamed entry at the exact timerange": `[{"timerange":"` + timerange + `"}]`,
+		"target with an unbounded timerange":   `[{"object_id":"` + objectID + `","timerange":"_"}]`,
+		"target with an empty timerange":       `[{"object_id":"` + objectID + `","timerange":"()"}]`,
+		"target with an exclusive start":       `[{"object_id":"` + objectID + `","timerange":"(1:0_2:0)"}]`,
+		"target with a misspelt timestamp":     `[{"object_id":"` + objectID + `","timerange":"[02:0_3:0)"}]`,
+		"target under keys in another case":    `[{"OBJECT_ID":"` + objectID + `","TIMERANGE":"[2:0_3:0)"}]`,
+	} {
+		for _, deleteStatus := range []int{http.StatusNoContent, http.StatusServiceUnavailable} {
+			t.Run(name+"/"+http.StatusText(deleteStatus), func(t *testing.T) {
+				t.Parallel()
+				var listings atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+					if request.Method == http.MethodDelete {
+						writer.WriteHeader(deleteStatus)
+						return
+					}
+					listings.Add(1)
+					writer.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(writer, listing)
+				}))
+				defer server.Close()
+
+				client, err := New(Config{Endpoint: server.URL, Timeout: time.Second})
+				if err != nil {
+					t.Fatal(err)
+				}
+				client.deletePollInterval = time.Millisecond
+				err = client.DeleteSegments(context.Background(), flowID, SegmentDeleteOptions{
+					Timerange: timerange, ObjectID: objectID,
+				})
+				if err == nil || !strings.Contains(err.Error(), "confirm segment deletion") {
+					t.Fatalf("DeleteSegments() = %v, want an unconfirmed deletion", err)
+				}
+				if strings.Contains(err.Error(), "still listed") {
+					t.Fatalf("DeleteSegments() = %v, which takes an unusable listing for a Segment that is still there", err)
+				}
+				if listings.Load() == 0 {
+					t.Fatal("the confirmation listing was never requested")
+				}
+			})
+		}
 	}
 }

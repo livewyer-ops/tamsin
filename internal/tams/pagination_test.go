@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -491,6 +492,165 @@ func TestSegmentsEnforcesAtomicCollectionLimits(t *testing.T) {
 			}
 			if requests.Load() != testCase.wantRequests {
 				t.Fatalf("requests = %d, want %d", requests.Load(), testCase.wantRequests)
+			}
+		})
+	}
+}
+
+// pagedListing serves each body as one page of a listing, linking every page
+// but the last to its successor.
+func pagedListing(t *testing.T, pages []string) *Client {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		index, _ := strconv.Atoi(request.URL.Query().Get("page"))
+		if index+1 < len(pages) {
+			writer.Header().Set("Link", "<"+request.URL.Path+"?page="+strconv.Itoa(index+1)+">; rel=\"next\"")
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, pages[index])
+	}))
+	t.Cleanup(server.Close)
+	client, err := New(Config{Endpoint: server.URL, Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
+// TestSegmentListingRejectsWhatCannotBeMatched covers the listings that used
+// to read as "no such Segment": that answer is the proof a retraction
+// completed and the reason a resume uploads, so only a well-formed array may
+// give it.
+func TestSegmentListingRejectsWhatCannotBeMatched(t *testing.T) {
+	t.Parallel()
+	const valid = `[{"object_id":"object","timerange":"[0:0_1:0)"}]`
+	for name, pages := range map[string][]string{
+		"empty body":                          {""},
+		"null":                                {"null"},
+		"entry without fields":                {"[{}]"},
+		"entry without an object_id":          {`[{"timerange":"[0:0_1:0)"}]`},
+		"entry without a timerange":           {`[{"object_id":"object"}]`},
+		"entry with a malformed timerange":    {`[{"object_id":"object","timerange":"0:0-1:0"}]`},
+		"empty body after a valid page":       {valid, ""},
+		"null after a valid page":             {valid, "null"},
+		"malformed entry after a valid page":  {valid, `[{"object_id":"object","timerange":"0:0-1:0"}]`},
+		"entry without fields after an empty": {"[]", "[{}]"},
+		"never":                               {`[{"object_id":"object","timerange":"()"}]`},
+		"eternity":                            {`[{"object_id":"object","timerange":"_"}]`},
+		"timerange without a start":           {`[{"object_id":"object","timerange":"_1:0)"}]`},
+		"timerange without an end":            {`[{"object_id":"object","timerange":"[1:0_"}]`},
+		"timerange with an exclusive start":   {`[{"object_id":"object","timerange":"(1:0_2:0)"}]`},
+		"timerange with a plus sign":          {`[{"object_id":"object","timerange":"[+2:0_3:0)"}]`},
+		"timerange with a leading zero":       {`[{"object_id":"object","timerange":"[02:0_3:0)"}]`},
+		"timerange with signed nanoseconds":   {`[{"object_id":"object","timerange":"[1:+0_2:0)"}]`},
+		"keys in another case":                {`[{"OBJECT_ID":"object","TIMERANGE":"[0:0_1:0)"}]`},
+		"object_id key in another case":       {`[{"Object_ID":"object","timerange":"[0:0_1:0)"}]`},
+		"timerange key in another case":       {`[{"object_id":"object","Timerange":"[0:0_1:0)"}]`},
+		"entry that is not an object":         {`["object"]`},
+		"null entry":                          {`[null]`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			segments, err := pagedListing(t, pages).ListSegments(context.Background(), "flow", SegmentListOptions{})
+			if err == nil {
+				t.Fatalf("ListSegments() = %v, want an error", segments)
+			}
+			if segments != nil {
+				t.Fatalf("ListSegments() returned %v beside %v", segments, err)
+			}
+		})
+	}
+}
+
+// TestSegmentListingReadsExactKeys covers the lenient key matching of
+// encoding/json: a key that differs only in case is an extension, so it must
+// neither supply nor replace a field a Segment is matched on.
+func TestSegmentListingReadsExactKeys(t *testing.T) {
+	t.Parallel()
+	count := 2
+	want := Segment{
+		ObjectID: "object", Timerange: "[0:0_1:0)", ObjectTimerange: "[5:0_6:0)", TSOffset: "-5:0",
+		LastDuration: "0:40000000", KeyFrameCount: &count,
+		GetURLs: []PresignedURL{{URL: "https://media.example/object", Presigned: true}},
+		// A number past 2^53 shows whether provider metadata keeps its digits.
+		InitObject: &ObjectCore{"object_id": "init", "sequence": json.Number("9007199254740993")},
+	}
+	fields := reflect.ValueOf(want)
+	for index := range fields.NumField() {
+		if fields.Field(index).IsZero() {
+			t.Fatalf("the fixture leaves %s unset", fields.Type().Field(index).Name)
+		}
+	}
+	exact, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every exact key is followed by the same key in another case carrying a
+	// different value, and by an unrelated extension.
+	shadowed := strings.TrimSuffix(string(exact), "}") + `,"OBJECT_ID":"other","TimeRange":"[2:0_3:0)",` +
+		`"Object_Timerange":"[7:0_8:0)","TS_OFFSET":"0:0","Last_Duration":"0:1","KEY_FRAME_COUNT":9,` +
+		`"GET_URLS":[],"Init_Object":{"object_id":"other"},"vendor":{"note":true}}`
+	for name, body := range map[string]string{"exact keys": string(exact), "shadowed keys": shadowed} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			segments, err := pagedListing(t, []string{"[" + body + "]"}).ListSegments(
+				context.Background(), "flow", SegmentListOptions{IncludeDownloadURLs: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(segments) != 1 {
+				t.Fatalf("ListSegments() = %+v, want one Segment", segments)
+			}
+			if got, err := json.Marshal(segments[0]); err != nil || string(got) != string(exact) {
+				t.Fatalf("ListSegments() read %s, %v; want %s", got, err, exact)
+			}
+		})
+	}
+}
+
+func TestListingAcceptsAnEmptyArray(t *testing.T) {
+	t.Parallel()
+	const valid = `[{"object_id":"object","timerange":"[0:0_1:0)"}]`
+	for name, test := range map[string]struct {
+		pages []string
+		want  int
+	}{
+		"empty":                      {[]string{"[]"}, 0},
+		"empty page before entries":  {[]string{"[]", valid}, 1},
+		"empty page after entries":   {[]string{valid, "[]"}, 1},
+		"whitespace around an array": {[]string{" [] \n"}, 0},
+		"instant":                    {[]string{`[{"object_id":"object","timerange":"[5:0]"}]`}, 1},
+		"instant in two timestamps":  {[]string{`[{"object_id":"object","timerange":"[5:0_5:0]"}]`}, 1},
+		"inclusive end":              {[]string{`[{"object_id":"object","timerange":"[0:0_1:0]"}]`}, 1},
+		"omitted markers":            {[]string{`[{"object_id":"object","timerange":"0:0_1:0"}]`}, 1},
+		"negative start":             {[]string{`[{"object_id":"object","timerange":"[-1:500000000_0:0)"}]`}, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			segments, err := pagedListing(t, test.pages).ListSegments(context.Background(), "flow", SegmentListOptions{})
+			if err != nil || len(segments) != test.want {
+				t.Fatalf("ListSegments() = %v, %v, want %d entries", segments, err, test.want)
+			}
+		})
+	}
+	backends, err := pagedListing(t, []string{"[]"}).StorageBackends(context.Background())
+	if err != nil || len(backends) != 0 {
+		t.Fatalf("StorageBackends() = %v, %v", backends, err)
+	}
+}
+
+func TestStorageBackendListingRequiresAnArray(t *testing.T) {
+	t.Parallel()
+	for name, pages := range map[string][]string{
+		"empty body":             {""},
+		"null":                   {"null"},
+		"null after a full page": {`[{"id":"backend"}]`, "null"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			backends, err := pagedListing(t, pages).StorageBackends(context.Background())
+			if err == nil || backends != nil {
+				t.Fatalf("StorageBackends() = %v, %v, want an error and no partial result", backends, err)
 			}
 		})
 	}

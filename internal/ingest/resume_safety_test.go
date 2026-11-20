@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -234,6 +235,33 @@ func TestResumeVerificationPreservesUnreadableSegments(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestUnusableResumeListingWritesNothing covers the listing that decides
+// what already exists: when it cannot be read, nothing is uploaded, registered
+// or retracted on its strength.
+func TestUnusableResumeListingWritesNothing(t *testing.T) {
+	path := writeFixture(t, "clip.mp4", "media")
+	client := newFakeClient()
+	client.listSegmentsErr = errors.New("listing returned a response that is not a JSON array")
+	p, err := New(Config{Concurrency: 1}, client, fakeProber{}, nil, discardLogger(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := p.Run(t.Context(), []source.Item{localSource(path)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := batch.Results[0]
+	if result.Status != ResultStatusFailed || result.Failure == nil {
+		t.Fatalf("result = %+v, want a failed input", result)
+	}
+	client.lock.Lock()
+	defer client.lock.Unlock()
+	if client.uploads != 0 || len(client.segments[result.RootFlowID]) != 0 || len(client.deletedTimeranges) != 0 {
+		t.Fatalf("uploads = %d, segments = %d, retractions = %d; an unreadable listing authorised a write",
+			client.uploads, len(client.segments[result.RootFlowID]), len(client.deletedTimeranges))
 	}
 }
 

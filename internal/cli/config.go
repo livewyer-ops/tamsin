@@ -653,6 +653,9 @@ func (s *settings) validateGlobal() error {
 	if timeout := s.GetDuration("http.transfer_idle_timeout"); timeout <= 0 {
 		return errors.New("transfer idle timeout must be positive")
 	}
+	if timeout := s.GetDuration("http.deletion_timeout"); timeout <= 0 {
+		return errors.New("deletion timeout must be positive")
+	}
 	if retries := s.GetInt("http.retries"); retries < 0 || retries > 20 {
 		return errors.New("HTTP retries must be between 0 and 20")
 	}

@@ -1,6 +1,7 @@
 package tams
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -224,6 +225,34 @@ type Segment struct {
 	KeyFrameCount   *int           `json:"key_frame_count,omitempty"`
 	GetURLs         []PresignedURL `json:"get_urls,omitempty"`
 	InitObject      *ObjectCore    `json:"init_object,omitempty"`
+}
+
+// UnmarshalJSON reads each field by its exact key. encoding/json also matches
+// keys that differ only in case, so OBJECT_ID could otherwise stand in for, or
+// replace, the object_id a listing is matched on.
+func (s *Segment) UnmarshalJSON(data []byte) error {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(data, &members); err != nil {
+		return err
+	}
+	*s = Segment{}
+	for key, field := range map[string]any{
+		"object_id": &s.ObjectID, "timerange": &s.Timerange, "object_timerange": &s.ObjectTimerange,
+		"ts_offset": &s.TSOffset, "last_duration": &s.LastDuration, "key_frame_count": &s.KeyFrameCount,
+		"get_urls": &s.GetURLs, "init_object": &s.InitObject,
+	} {
+		member, present := members[key]
+		if !present {
+			continue
+		}
+		// Numbers in retained provider metadata keep their digits.
+		decoder := json.NewDecoder(bytes.NewReader(member))
+		decoder.UseNumber()
+		if err := decoder.Decode(field); err != nil {
+			return fmt.Errorf("segment %s: %w", key, err)
+		}
+	}
+	return nil
 }
 
 // Source is a TAMS Source as the service derives it from its Flows. Its
